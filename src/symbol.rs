@@ -47,6 +47,9 @@ pub struct Symbol {
     pub got_idx: Option<u32>,
     /// The symbol's slot in __thread_ptrs, for thread-local variables.
     pub tlv_idx: Option<u32>,
+    /// The symbol's entry in __objc_stubs, for linker-synthesized
+    /// _objc_msgSend$selector stubs.
+    pub objc_stub_idx: Option<u32>,
 }
 
 impl Symbol {
@@ -65,6 +68,7 @@ impl Symbol {
             stub_idx: None,
             got_idx: None,
             tlv_idx: None,
+            objc_stub_idx: None,
         }
     }
 

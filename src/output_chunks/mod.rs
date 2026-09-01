@@ -43,6 +43,13 @@ pub enum ChunkKind {
     /// Pointers to thread-local variable descriptors: what a
     /// TLVP-relocated instruction sequence loads from.
     ThreadPtrs,
+    /// Linker-synthesized _objc_msgSend$<selector> stubs.
+    ObjcStubs,
+    /// Selector name strings for the synthesized objc stubs.
+    ObjcMethname,
+    /// Selector references (pointers into __objc_methname) loaded by the
+    /// synthesized objc stubs.
+    ObjcSelrefs,
     /// The __TEXT,__unwind_info section, generated from the objects'
     /// compact unwind records.
     UnwindInfo,
@@ -87,6 +94,9 @@ impl Chunk {
                         | ChunkKind::Stubs
                         | ChunkKind::Got
                         | ChunkKind::ThreadPtrs
+                        | ChunkKind::ObjcStubs
+                        | ChunkKind::ObjcMethname
+                        | ChunkKind::ObjcSelrefs
                         | ChunkKind::UnwindInfo
                 ),
             },

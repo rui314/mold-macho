@@ -245,6 +245,44 @@ pub fn resolve_dylib_symbols<E: Arch>(ctx: &mut Context<E>) {
     }
 }
 
+/// Synthesizes _objc_msgSend$<selector> stubs. With selector stubs
+/// (the default since Xcode 14), the compiler calls these
+/// linker-provided symbols instead of setting up the selector argument
+/// itself; each stub loads the interned selector and tail-calls
+/// _objc_msgSend.
+pub fn create_objc_msgsend_stubs<E: Arch>(ctx: &mut Context<E>) {
+    for i in 0..ctx.symtab.syms.len() {
+        let sym = &ctx.symtab[i];
+        if sym.is_defined() || !sym.is_used {
+            continue;
+        }
+        let Some(sel) = sym.name.strip_prefix("_objc_msgSend$") else {
+            continue;
+        };
+        let sel = sel.to_string();
+        let idx = ctx.objc_stubs.len() as u32;
+        let sym = &mut ctx.symtab[i];
+        sym.origin = Origin::Synthetic;
+        sym.objc_stub_idx = Some(idx);
+        ctx.objc_stubs.push((i, sel));
+    }
+
+    if !ctx.objc_stubs.is_empty() {
+        let id = ctx.symtab.intern("_objc_msgSend");
+        ctx.symtab[id].is_used = true;
+        ctx.objc_msgsend_sym = Some(id);
+
+        // Build the __objc_methname contents: one NUL-terminated string
+        // per selector.
+        for i in 0..ctx.objc_stubs.len() {
+            ctx.objc_methname_offs.push(ctx.objc_methname_data.len() as u64);
+            let sel = ctx.objc_stubs[i].1.clone();
+            ctx.objc_methname_data.extend_from_slice(sel.as_bytes());
+            ctx.objc_methname_data.push(0);
+        }
+    }
+}
+
 /// Reports references to symbols that are still unresolved.
 pub fn check_undefined_symbols<E: Arch>(ctx: &Context<E>) {
     for sym in &ctx.symtab.syms {
@@ -283,6 +321,13 @@ pub fn scan_relocs<E: Arch>(ctx: &mut Context<E>) {
             }
             _ => {}
         }
+    }
+}
+
+/// The synthesized objc stubs call _objc_msgSend through the GOT.
+pub fn scan_objc_stubs<E: Arch>(ctx: &mut Context<E>) {
+    if let Some(id) = ctx.objc_msgsend_sym {
+        add_got(ctx, id);
     }
 }
 
@@ -449,6 +494,25 @@ pub fn create_output_chunks<E: Arch>(ctx: &mut Context<E>) {
         chunk.hdr.flags = S_THREAD_LOCAL_VARIABLE_POINTERS;
         chunk.hdr.p2align = 3;
         chunk.hdr.size = ctx.thread_ptr_syms.len() as u64 * 8;
+        ctx.chunks.push(chunk);
+    }
+
+    if !ctx.objc_stubs.is_empty() {
+        let mut chunk = Chunk::new("__TEXT", "__objc_stubs", ChunkKind::ObjcStubs);
+        chunk.hdr.flags = S_ATTR_PURE_INSTRUCTIONS | S_ATTR_SOME_INSTRUCTIONS;
+        chunk.hdr.p2align = 5;
+        chunk.hdr.size = ctx.objc_stubs.len() as u64 * E::OBJC_STUB_SIZE;
+        ctx.chunks.push(chunk);
+
+        let mut chunk = Chunk::new("__TEXT", "__objc_methname", ChunkKind::ObjcMethname);
+        chunk.hdr.flags = S_CSTRING_LITERALS;
+        chunk.hdr.size = ctx.objc_methname_data.len() as u64;
+        ctx.chunks.push(chunk);
+
+        let mut chunk = Chunk::new("__DATA", "__objc_selrefs", ChunkKind::ObjcSelrefs);
+        chunk.hdr.flags = S_LITERAL_POINTERS | S_ATTR_NO_DEAD_STRIP;
+        chunk.hdr.p2align = 3;
+        chunk.hdr.size = ctx.objc_stubs.len() as u64 * 8;
         ctx.chunks.push(chunk);
     }
 
@@ -800,6 +864,14 @@ fn build_rebase_info<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
         }
     }
 
+    // Selector reference slots hold pointers into __objc_methname.
+    if let Some(idx) = output_chunks::find_chunk(ctx, |k| matches!(k, ChunkKind::ObjcSelrefs)) {
+        let addr = ctx.chunks[idx].hdr.addr;
+        for i in 0..ctx.objc_stubs.len() {
+            locs.push(addr + i as u64 * 8);
+        }
+    }
+
     // GOT slots that hold local addresses.
     if let Some(idx) = output_chunks::find_chunk(ctx, |k| matches!(k, ChunkKind::Got)) {
         let got_addr = ctx.chunks[idx].hdr.addr;
@@ -959,6 +1031,28 @@ pub fn copy_chunks<E: Arch>(ctx: &Context<E>, buf: &mut [u8]) {
                         let off = chunk.hdr.fileoff as usize + i * 8;
                         buf[off..off + 8].copy_from_slice(&ctx.sym_addr(id).to_le_bytes());
                     }
+                }
+            }
+            ChunkKind::ObjcStubs => {
+                let off = chunk.hdr.fileoff as usize;
+                let end = off + chunk.hdr.size as usize;
+                E::write_objc_stubs(ctx, chunk.hdr.addr, &mut buf[off..end]);
+            }
+            ChunkKind::ObjcMethname => {
+                let off = chunk.hdr.fileoff as usize;
+                buf[off..off + ctx.objc_methname_data.len()]
+                    .copy_from_slice(&ctx.objc_methname_data);
+            }
+            ChunkKind::ObjcSelrefs => {
+                let methname = output_chunks::find_chunk(ctx, |k| {
+                    matches!(k, ChunkKind::ObjcMethname)
+                })
+                .unwrap();
+                let methname_addr = ctx.chunks[methname].hdr.addr;
+                for (i, &sel_off) in ctx.objc_methname_offs.iter().enumerate() {
+                    let off = chunk.hdr.fileoff as usize + i * 8;
+                    let val = methname_addr + sel_off;
+                    buf[off..off + 8].copy_from_slice(&val.to_le_bytes());
                 }
             }
             ChunkKind::UnwindInfo => {

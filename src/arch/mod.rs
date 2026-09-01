@@ -35,6 +35,8 @@ pub trait Arch: Copy + Default + Send + Sync + 'static {
     const STUB_SIZE: u64;
     /// The compact unwind encoding mode meaning "use DWARF instead".
     const UNWIND_MODE_DWARF: u32;
+    /// The size of one __objc_stubs entry.
+    const OBJC_STUB_SIZE: u64;
 
     /// Classifies a relocation type by how it uses its target.
     fn classify_reloc(r_type: u8) -> RelocClass;
@@ -43,6 +45,11 @@ pub trait Arch: Copy + Default + Send + Sync + 'static {
     /// jump through the symbol's __got slot. `addr` is the section's
     /// address and `buf` its bytes in the output.
     fn write_stubs(ctx: &Context<Self>, addr: u64, buf: &mut [u8]);
+
+    /// Writes the __objc_stubs section: for each _objc_msgSend$<sel>
+    /// symbol, code that loads the selector from its __objc_selrefs
+    /// slot and tail-calls _objc_msgSend through the GOT.
+    fn write_objc_stubs(ctx: &Context<Self>, addr: u64, buf: &mut [u8]);
 
     /// Converts raw relocation records of one input section into
     /// [`Reloc`]s. Mach-O encodes addends target-dependently: some are

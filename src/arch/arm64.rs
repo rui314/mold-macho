@@ -7,6 +7,7 @@ use crate::error;
 use crate::fatal;
 use crate::input_sections::{Reloc, RelocTarget};
 use crate::macho::*;
+use crate::output_chunks;
 use crate::util::{bits, sign_extend};
 
 #[derive(Clone, Copy, Default)]
@@ -65,6 +66,7 @@ impl Arch for Arm64 {
     const PAGE_SIZE: u64 = 16384;
     const STUB_SIZE: u64 = 12;
     const UNWIND_MODE_DWARF: u32 = UNWIND_ARM64_MODE_DWARF;
+    const OBJC_STUB_SIZE: u64 = 32;
 
     fn classify_reloc(r_type: u8) -> crate::arch::RelocClass {
         use crate::arch::RelocClass;
@@ -88,6 +90,31 @@ impl Arch for Arm64 {
             write32(&mut ent[0..], 0x9000_0010 | page_offset(ptr_addr, ent_addr));
             write32(&mut ent[4..], 0xf940_0210 | (bits(ptr_addr, 11, 3) as u32) << 10);
             write32(&mut ent[8..], 0xd61f_0200);
+        }
+    }
+
+    fn write_objc_stubs(ctx: &Context<Self>, addr: u64, buf: &mut [u8]) {
+        let selrefs =
+            output_chunks::find_chunk(ctx, |k| matches!(k, output_chunks::ChunkKind::ObjcSelrefs))
+                .unwrap();
+        let selrefs_addr = ctx.chunks[selrefs].hdr.addr;
+        let msgsend_got = ctx.sym_got_addr(ctx.objc_msgsend_sym.unwrap());
+
+        for i in 0..ctx.objc_stubs.len() {
+            let ent = &mut buf[i * 32..];
+            let ent_addr = addr + i as u64 * 32;
+            let sel_addr = selrefs_addr + i as u64 * 8;
+
+            // adrp x1, sel@PAGE; ldr x1, [x1, sel@PAGEOFF]
+            // adrp x16, _objc_msgSend@GOTPAGE; ldr x16, [...]; br x16
+            write32(&mut ent[0..], 0x9000_0001 | page_offset(sel_addr, ent_addr));
+            write32(&mut ent[4..], 0xf940_0021 | (bits(sel_addr, 11, 3) as u32) << 10);
+            write32(&mut ent[8..], 0x9000_0010 | page_offset(msgsend_got, ent_addr + 8));
+            write32(&mut ent[12..], 0xf940_0210 | (bits(msgsend_got, 11, 3) as u32) << 10);
+            write32(&mut ent[16..], 0xd61f_0200);
+            write32(&mut ent[20..], 0xd420_0020);
+            write32(&mut ent[24..], 0xd420_0020);
+            write32(&mut ent[28..], 0xd420_0020);
         }
     }
 

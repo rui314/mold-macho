@@ -61,11 +61,13 @@ pub fn link<E: Arch>(cmdline: &[String], diag: &Diagnostics) -> Result<i32, Stri
     passes::create_synthetic_symbols(&mut ctx);
     passes::resolve_archive_members(&mut ctx);
     passes::convert_common_symbols(&mut ctx);
+    passes::create_objc_msgsend_stubs(&mut ctx);
     passes::resolve_dylib_symbols(&mut ctx);
     passes::check_undefined_symbols(&ctx);
     ctx.diag.checkpoint();
     passes::scan_relocs(&mut ctx);
     passes::scan_unwind_personalities(&mut ctx);
+    passes::scan_objc_stubs(&mut ctx);
 
     // Decide the output layout
     passes::create_output_chunks(&mut ctx);
