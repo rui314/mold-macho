@@ -149,6 +149,10 @@ pub struct Args {
     /// -order_file: files of symbol names; matching atoms are placed
     /// first in their output sections, in file order.
     pub order_files: Vec<String>,
+    /// -executable_path: what @executable_path in dependent dylibs'
+    /// install names stands for at link time (defaults to the output
+    /// path when linking an executable).
+    pub executable_path: Option<String>,
     pub pagezero_size: u64,
     /// True when -pagezero_size was given explicitly (it is an error
     /// anywhere but a main executable).
@@ -213,6 +217,7 @@ impl Default for Args {
             mark_dead_strippable_dylib: false,
             export_dynamic: false,
             order_files: Vec::new(),
+            executable_path: None,
             pagezero_size: 0x1_0000_0000,
             explicit_pagezero: false,
         }
@@ -479,6 +484,9 @@ pub fn parse_args(diag: &Diagnostics, cmdline: &[String]) -> Args {
             "-mark_dead_strippable_dylib" => args.mark_dead_strippable_dylib = true,
             "-export_dynamic" => args.export_dynamic = true,
             "-order_file" => args.order_files.push(next_arg(&mut i).to_string()),
+            "-executable_path" => {
+                args.executable_path = Some(next_arg(&mut i).to_string())
+            }
 
             // Reserve enough header padding that install_name_tool can
             // grow install names in place.

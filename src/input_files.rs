@@ -1132,6 +1132,7 @@ pub fn parse_dylib_binary<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile
     let mut symtab_cmd = None;
     let mut dysymtab_cmd = None;
     let mut reexports: Vec<String> = Vec::new();
+    let mut rpaths: Vec<String> = Vec::new();
 
     let mut off = size_of::<MachHeader>();
     for _ in 0..hdr.ncmds {
@@ -1152,6 +1153,16 @@ pub fn parse_dylib_binary<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile
                 let name = &data[off + cmd.nameoff as usize..off + cmd.cmdsize as usize];
                 let len = name.iter().position(|&b| b == 0).unwrap_or(name.len());
                 reexports.push(String::from_utf8_lossy(&name[..len]).into_owned());
+            }
+            LC_RPATH => {
+                let cmd = DylinkerCommand::read_from(&data[off..]);
+                let name = &data[off + cmd.nameoff as usize..off + cmd.cmdsize as usize];
+                let len = name.iter().position(|&b| b == 0).unwrap_or(name.len());
+                let mut rpath = String::from_utf8_lossy(&name[..len]).into_owned();
+                if let Some(rest) = rpath.strip_prefix("@loader_path/") {
+                    rpath = format!("{}/{rest}", dir_of(&mf.name));
+                }
+                rpaths.push(rpath);
             }
             _ => {}
         }
@@ -1185,14 +1196,19 @@ pub fn parse_dylib_binary<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile
     }
 
     // A dylib's clients see its reexported libraries' exports through
-    // it; merge them in, following the chain.
-    let mut queue = reexports;
+    // it; merge them in, following the chain. Each queue entry keeps
+    // the referencing dylib's directory and rpaths, since @loader_path
+    // and @rpath in an install name are relative to the referrer.
+    let mut queue: Vec<(String, String, Vec<String>)> = reexports
+        .into_iter()
+        .map(|name| (name, dir_of(&mf.name), rpaths.clone()))
+        .collect();
     let mut visited = std::collections::HashSet::new();
-    while let Some(name) = queue.pop() {
+    while let Some((name, loader_dir, loader_rpaths)) = queue.pop() {
         if !visited.insert(name.clone()) {
             continue;
         }
-        let Some(dep) = find_reexport_file(ctx, &name) else {
+        let Some(dep) = resolve_dylib_ref(ctx, &name, &loader_dir, &loader_rpaths) else {
             crate::warn!(ctx, "{}: reexported library not found: {}", mf.name, name);
             continue;
         };
@@ -1203,13 +1219,18 @@ pub fn parse_dylib_binary<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile
                 exports.extend(dep_tbd.tlv_exports);
                 exports.extend(dep_tbd.exports);
                 exports.extend(dep_tbd.weak_exports);
-                queue.extend(dep_tbd.external_reexports);
+                for dep_name in dep_tbd.external_reexports {
+                    queue.push((dep_name, dir_of(&dep.name), Vec::new()));
+                }
             }
             crate::filetype::FileType::Dylib => {
-                let (dep_exports, dep_tlvs, dep_reexports) = dylib_binary_exports(&ctx.diag, dep);
+                let (dep_exports, dep_tlvs, dep_reexports, dep_rpaths) =
+                    dylib_binary_exports(&ctx.diag, dep);
                 exports.extend(dep_exports);
                 tlv_exports.extend(dep_tlvs);
-                queue.extend(dep_reexports);
+                for dep_name in dep_reexports {
+                    queue.push((dep_name, dir_of(&dep.name), dep_rpaths.clone()));
+                }
             }
             _ => crate::warn!(ctx, "{}: unsupported reexported library: {}", mf.name, name),
         }
@@ -1264,12 +1285,13 @@ fn thread_local_section_ordinals(data: &[u8], hdr: &MachHeader) -> Vec<u8> {
 fn dylib_binary_exports(
     _diag: &crate::error::Diagnostics,
     mf: &'static MappedFile,
-) -> (Vec<String>, Vec<String>, Vec<String>) {
+) -> (Vec<String>, Vec<String>, Vec<String>, Vec<String>) {
     let data = mf.data;
     let hdr = MachHeader::read_from(data);
     let mut symtab_cmd = None;
     let mut dysymtab_cmd = None;
     let mut reexports = Vec::new();
+    let mut rpaths = Vec::new();
 
     let mut off = size_of::<MachHeader>();
     for _ in 0..hdr.ncmds {
@@ -1282,6 +1304,16 @@ fn dylib_binary_exports(
                 let name = &data[off + cmd.nameoff as usize..off + cmd.cmdsize as usize];
                 let len = name.iter().position(|&b| b == 0).unwrap_or(name.len());
                 reexports.push(String::from_utf8_lossy(&name[..len]).into_owned());
+            }
+            LC_RPATH => {
+                let cmd = DylinkerCommand::read_from(&data[off..]);
+                let name = &data[off + cmd.nameoff as usize..off + cmd.cmdsize as usize];
+                let len = name.iter().position(|&b| b == 0).unwrap_or(name.len());
+                let mut rpath = String::from_utf8_lossy(&name[..len]).into_owned();
+                if let Some(rest) = rpath.strip_prefix("@loader_path/") {
+                    rpath = format!("{}/{rest}", dir_of(&mf.name));
+                }
+                rpaths.push(rpath);
             }
             _ => {}
         }
@@ -1306,7 +1338,47 @@ fn dylib_binary_exports(
             exports.push(name);
         }
     }
-    (exports, tlv_exports, reexports)
+    (exports, tlv_exports, reexports, rpaths)
+}
+
+fn dir_of(path: &str) -> String {
+    match path.rsplit_once('/') {
+        Some((dir, _)) => dir.to_string(),
+        None => ".".to_string(),
+    }
+}
+
+/// Resolves a dependent dylib's install name the way dyld would, but
+/// at link time: @loader_path is the directory of the dylib that
+/// names the dependency, @rpath tries that dylib's own LC_RPATH
+/// entries, and @executable_path stands for the output executable's
+/// directory (or -executable_path).
+fn resolve_dylib_ref<E: Arch>(
+    ctx: &Context<E>,
+    name: &str,
+    loader_dir: &str,
+    loader_rpaths: &[String],
+) -> Option<&'static MappedFile> {
+    if let Some(rest) = name.strip_prefix("@loader_path/") {
+        return find_reexport_file(ctx, &format!("{loader_dir}/{rest}"));
+    }
+    if let Some(rest) = name.strip_prefix("@executable_path/") {
+        let exe = match &ctx.args.executable_path {
+            Some(path) => path.clone(),
+            None if ctx.args.output_type == MH_EXECUTE => ctx.args.output.clone(),
+            None => return None,
+        };
+        return find_reexport_file(ctx, &format!("{}/{rest}", dir_of(&exe)));
+    }
+    if let Some(rest) = name.strip_prefix("@rpath/") {
+        for rpath in loader_rpaths {
+            if let Some(mf) = find_reexport_file(ctx, &format!("{rpath}/{rest}")) {
+                return Some(mf);
+            }
+        }
+        return None;
+    }
+    find_reexport_file(ctx, name)
 }
 
 /// Locates the stub or binary for a reexported library's install name
@@ -1352,13 +1424,17 @@ pub fn parse_dylib<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile) -> us
     // namespace, so their exports count as this dylib's. Reexports not
     // inlined in this .tbd are separate files, possibly reexporting
     // further.
-    let mut queue = tbd.external_reexports;
+    let mut queue: Vec<(String, String)> = tbd
+        .external_reexports
+        .into_iter()
+        .map(|name| (name, dir_of(&mf.name)))
+        .collect();
     let mut visited = std::collections::HashSet::new();
-    while let Some(name) = queue.pop() {
+    while let Some((name, loader_dir)) = queue.pop() {
         if !visited.insert(name.clone()) {
             continue;
         }
-        let Some(dep) = find_reexport_file(ctx, &name) else {
+        let Some(dep) = resolve_dylib_ref(ctx, &name, &loader_dir, &[]) else {
             crate::warn!(ctx, "{}: reexported library not found: {}", mf.name, name);
             continue;
         };
@@ -1367,7 +1443,9 @@ pub fn parse_dylib<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile) -> us
         exports.extend(dep_tbd.weak_exports);
         tlv_exports.extend(dep_tbd.tlv_exports.iter().cloned());
         exports.extend(dep_tbd.tlv_exports);
-        queue.extend(dep_tbd.external_reexports);
+        for dep_name in dep_tbd.external_reexports {
+            queue.push((dep_name, dir_of(&dep.name)));
+        }
     }
 
     let priority = ctx.next_priority();
