@@ -56,6 +56,9 @@ pub struct Context<E: Arch> {
     /// section$start/end and segment$start/end symbols to resolve
     /// after layout: (symbol, is_start, segment, section).
     pub boundary_syms: Vec<(SymbolId, bool, String, Option<String>)>,
+    /// For -why_load: the symbol that made each object live, refreshed
+    /// each resolution round.
+    pub why_load: std::collections::HashMap<usize, &'static str>,
     /// Contents of the synthesized __objc_methname section, and each
     /// selector's offset in it.
     pub objc_methname_data: Vec<u8>,
@@ -128,6 +131,7 @@ impl<E: Arch> Context<E> {
             objc_stubs: Vec::new(),
             objc_msgsend_sym: None,
             boundary_syms: Vec::new(),
+            why_load: std::collections::HashMap::new(),
             objc_methname_data: Vec::new(),
             objc_methname_offs: Vec::new(),
             rebase_data: Vec::new(),

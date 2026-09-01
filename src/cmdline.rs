@@ -159,6 +159,9 @@ pub struct Args {
     /// --print-dependencies: report which file satisfied each
     /// undefined symbol.
     pub print_dependencies: bool,
+    /// -why_load: report which symbol caused each archive member to
+    /// load.
+    pub why_load: bool,
     pub pagezero_size: u64,
     /// True when -pagezero_size was given explicitly (it is an error
     /// anywhere but a main executable).
@@ -226,6 +229,7 @@ impl Default for Args {
             executable_path: None,
             object_path_lto: None,
             print_dependencies: false,
+            why_load: false,
             pagezero_size: 0x1_0000_0000,
             explicit_pagezero: false,
         }
@@ -493,6 +497,7 @@ pub fn parse_args(diag: &Diagnostics, cmdline: &[String]) -> Args {
             "-export_dynamic" => args.export_dynamic = true,
             "-order_file" => args.order_files.push(next_arg(&mut i).to_string()),
             "--print-dependencies" => args.print_dependencies = true,
+            "-why_load" | "-whyload" => args.why_load = true,
             "-executable_path" => {
                 args.executable_path = Some(next_arg(&mut i).to_string())
             }

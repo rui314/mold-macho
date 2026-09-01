@@ -610,6 +610,9 @@ fn do_resolve<E: Arch>(ctx: &mut Context<E>, only_alive: bool) {
 /// Marks archive members whose definitions live code references,
 /// walking owner links to a fixed point.
 fn mark_live_objects<E: Arch>(ctx: &mut Context<E>) {
+    // Resolution runs in rounds and recomputes liveness each time, so
+    // the -why_load record starts over with it.
+    ctx.why_load.clear();
     let mut queue: Vec<usize> = (0..ctx.objs.len())
         .filter(|&i| ctx.objs[i].is_alive)
         .collect();
@@ -622,6 +625,7 @@ fn mark_live_objects<E: Arch>(ctx: &mut Context<E>) {
             if let Origin::Obj(owner) = ctx.symtab[id].origin {
                 if !ctx.objs[owner].is_alive {
                     ctx.objs[owner].is_alive = true;
+                    ctx.why_load.insert(owner, ctx.symtab[id].name);
                     queue.push(owner);
                 }
             }
@@ -638,6 +642,7 @@ fn mark_live_objects<E: Arch>(ctx: &mut Context<E>) {
             if let Origin::Obj(owner) = ctx.symtab[sym_id].origin {
                 if !ctx.objs[owner].is_alive {
                     ctx.objs[owner].is_alive = true;
+                    ctx.why_load.insert(owner, ctx.symtab[sym_id].name);
                     queue.push(owner);
                 }
             }
@@ -1091,6 +1096,25 @@ pub fn print_dependencies<E: Arch>(ctx: &Context<E>) {
                 _ => continue,
             };
             println!("{}\t{}\tu\t{}", file_display(obj), provider, sym.name);
+        }
+    }
+}
+
+/// -why_load reports what dragged each archive member into the link:
+/// "_symbol forced load of archive.a(member.o)", in ld64's wording.
+/// Members loaded unconditionally (-all_load, -force_load) are
+/// reported with the option as the reason.
+pub fn print_why_load<E: Arch>(ctx: &Context<E>) {
+    if !ctx.args.why_load {
+        return;
+    }
+    for (idx, obj) in ctx.objs.iter().enumerate() {
+        if !obj.is_alive || obj.mf.parent.is_none() {
+            continue;
+        }
+        match ctx.why_load.get(&idx) {
+            Some(name) => println!("{} forced load of {}", name, file_display(obj)),
+            None => println!("-all_load or -force_load forced load of {}", file_display(obj)),
         }
     }
 }
