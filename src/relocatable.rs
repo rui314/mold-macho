@@ -164,6 +164,57 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
         strtab.push(0);
     }
 
+    // Re-synthesize __LD,__compact_unwind so unwind info survives the
+    // merge: one 32-byte entry per record, its pointer fields set by
+    // UNSIGNED relocations exactly as compilers emit them. Records
+    // synthesized from DWARF FDEs are not representable without
+    // carrying __eh_frame and are dropped.
+    let mut cu_data: Vec<u8> = Vec::new();
+    let mut cu_relocs: Vec<MachRel> = Vec::new();
+    for rec in &ctx.unwind_records {
+        let isec = &ctx.isecs[rec.isec];
+        if !isec.is_alive || rec.fde.is_some() {
+            continue;
+        }
+        let entry = cu_data.len() as u32;
+        let func_addr = ctx.chunks[isec.osec].hdr.addr + isec.output_offset
+            + rec.input_offset as u64;
+        cu_data.extend_from_slice(&func_addr.to_le_bytes());
+        cu_data.extend_from_slice(&rec.code_len.to_le_bytes());
+        cu_data.extend_from_slice(&rec.encoding.to_le_bytes());
+        cu_relocs.push(MachRel {
+            r_address: entry,
+            bits: ordinals[isec.osec] as u32 | (3 << 25),
+        });
+
+        match rec.personality {
+            Some(p) => {
+                let Some(&symnum) = index_of_sym.get(&p) else {
+                    fatal!(ctx, "-r: unwind personality lost: {}", ctx.symtab[p].name);
+                };
+                cu_data.extend_from_slice(&0u64.to_le_bytes());
+                cu_relocs.push(MachRel {
+                    r_address: entry + 16,
+                    bits: symnum | (3 << 25) | (1 << 27),
+                });
+            }
+            None => cu_data.extend_from_slice(&0u64.to_le_bytes()),
+        }
+
+        match rec.lsda {
+            Some((lsda, off)) => {
+                let l = &ctx.isecs[ctx.resolve_isec(lsda)];
+                let lsda_addr = ctx.chunks[l.osec].hdr.addr + l.output_offset + off as u64;
+                cu_data.extend_from_slice(&lsda_addr.to_le_bytes());
+                cu_relocs.push(MachRel {
+                    r_address: entry + 24,
+                    bits: ordinals[l.osec] as u32 | (3 << 25),
+                });
+            }
+            None => cu_data.extend_from_slice(&0u64.to_le_bytes()),
+        }
+    }
+
     // Regenerate each section's relocations against the merged tables.
     let mut sect_relocs: Vec<Vec<MachRel>> = Vec::new();
     for &chunk_idx in &section_chunks {
@@ -228,7 +279,8 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
     // symtab commands; then section contents, relocations, symbols and
     // strings.
     let ncmds = 4;
-    let seg_cmd_size = size_of::<SegmentCommand>() + section_chunks.len() * size_of::<MachSection>();
+    let num_sections = section_chunks.len() + if cu_data.is_empty() { 0 } else { 1 };
+    let seg_cmd_size = size_of::<SegmentCommand>() + num_sections * size_of::<MachSection>();
     let sizeofcmds = seg_cmd_size
         + size_of::<BuildVersionCommand>()
         + size_of::<SymtabCommand>()
@@ -248,12 +300,30 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
         sect_offsets.push(off);
         off += chunk.hdr.size;
     }
+    // The synthetic compact-unwind section sits last.
+    let mut cu_off = 0u64;
+    let mut cu_addr = 0u64;
+    if !cu_data.is_empty() {
+        off = align_to(off, 8);
+        cu_off = off;
+        cu_addr = align_to(vmsize, 8);
+        off += cu_data.len() as u64;
+    }
+    let vmsize = if cu_data.is_empty() {
+        vmsize
+    } else {
+        cu_addr + cu_data.len() as u64
+    };
     let content_end = off;
     off = align_to(off, 8);
     let mut reloff = Vec::new();
     for rels in &sect_relocs {
         reloff.push(off);
         off += (rels.len() * size_of::<MachRel>()) as u64;
+    }
+    let cu_reloff = off;
+    if !cu_data.is_empty() {
+        off += (cu_relocs.len() * size_of::<MachRel>()) as u64;
     }
     let symoff = off;
     off += (nlists_out.len() * size_of::<NList>()) as u64;
@@ -287,7 +357,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
         filesize: content_end - seg_fileoff,
         maxprot: VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE,
         initprot: VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE,
-        nsects: section_chunks.len() as u32,
+        nsects: num_sections as u32,
         flags: 0,
     };
     seg.write_to(&mut buf[p..]);
@@ -309,6 +379,25 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
             },
             nreloc: sect_relocs[i].len() as u32,
             flags: chunk.hdr.flags,
+            reserved1: 0,
+            reserved2: 0,
+            reserved3: 0,
+        };
+        sect.write_to(&mut buf[p..]);
+        p += size_of::<MachSection>();
+    }
+
+    if !cu_data.is_empty() {
+        let sect = MachSection {
+            sectname: str_to_name("__compact_unwind"),
+            segname: str_to_name("__LD"),
+            addr: cu_addr,
+            size: cu_data.len() as u64,
+            offset: cu_off as u32,
+            p2align: 3,
+            reloff: cu_reloff as u32,
+            nreloc: cu_relocs.len() as u32,
+            flags: S_ATTR_DEBUG,
             reserved1: 0,
             reserved2: 0,
             reserved3: 0,
@@ -399,6 +488,15 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
                     error!(ctx, "-r: unsupported non-external relocation");
                 }
             }
+        }
+    }
+
+    if !cu_data.is_empty() {
+        buf[cu_off as usize..cu_off as usize + cu_data.len()].copy_from_slice(&cu_data);
+        let mut p = cu_reloff as usize;
+        for rel in &cu_relocs {
+            rel.write_to(&mut buf[p..]);
+            p += size_of::<MachRel>();
         }
     }
 

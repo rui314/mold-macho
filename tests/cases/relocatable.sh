@@ -31,3 +31,22 @@ $t/exe1 | grep '^from a 8$'
 
 $CC --ld-path=$mold -o $t/exe2 $t/main.o $t/merged.o
 $t/exe2 | grep '^from a 8$'
+
+# Unwind info survives the merge: C++ exceptions still work after -r.
+cat <<EOF2 | $CXX -o $t/e1.o -c -xc++ -
+#include <cstdio>
+void thrower() { throw 42; }
+EOF2
+cat <<EOF2 | $CXX -o $t/e2.o -c -xc++ -
+#include <cstdio>
+void thrower();
+int main() {
+  try { thrower(); } catch (int e) { printf("caught %d\n", e); }
+}
+EOF2
+
+$mold -r -arch $ARCH -platform_version macos 15.0 15.0 -o $t/exc.o $t/e1.o $t/e2.o
+$CXX --ld-path=$mold -o $t/exc1 $t/exc.o
+$t/exc1 | grep 'caught 42'
+$CXX -o $t/exc2 $t/exc.o
+$t/exc2 | grep 'caught 42'
