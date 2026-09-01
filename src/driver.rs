@@ -83,11 +83,22 @@ pub fn link<E: Arch>(cmdline: &[String], diag: &Diagnostics) -> Result<i32, Stri
     let mut ctx: Context<E> = Context::new(args, Diagnostics::new(false));
     ctx.diag.set_suppress_warnings(ctx.args.suppress_warnings);
 
+    // -print_statistics phase timer, in the spirit of mold's --perf.
+    let t0 = std::time::Instant::now();
+    let mut phases: Vec<(&str, std::time::Duration)> = Vec::new();
+    let mut last = t0;
+    let mut lap = |phases: &mut Vec<(&str, std::time::Duration)>, name: &'static str| {
+        let now = std::time::Instant::now();
+        phases.push((name, now - last));
+        last = now;
+    };
+
     // Read every input eagerly, then resolve; loading auto-linked
     // libraries or the LTO output adds inputs, so resolution repeats
     // until the input set is stable.
     passes::read_input_files(&mut ctx);
     ctx.diag.checkpoint();
+    lap(&mut phases, "parse");
     loop {
         passes::resolve_symbols(&mut ctx);
         if !passes::load_autolink_deps(&mut ctx) {
@@ -102,6 +113,7 @@ pub fn link<E: Arch>(cmdline: &[String], diag: &Diagnostics) -> Result<i32, Stri
             }
         }
     }
+    lap(&mut phases, "resolve");
     passes::sweep_dead_files(&mut ctx);
     if ctx.args.relocatable {
         passes::merge_literals(&mut ctx);
@@ -128,6 +140,7 @@ pub fn link<E: Arch>(cmdline: &[String], diag: &Diagnostics) -> Result<i32, Stri
     if ctx.args.deduplicate {
         crate::icf::fold_identical_code(&mut ctx);
     }
+    lap(&mut phases, "passes");
     passes::scan_relocs(&mut ctx);
     passes::scan_unwind_personalities(&mut ctx);
     passes::scan_objc_stubs(&mut ctx);
@@ -141,12 +154,30 @@ pub fn link<E: Arch>(cmdline: &[String], diag: &Diagnostics) -> Result<i32, Stri
     ctx.diag.checkpoint();
     crate::mapfile::print_map(&ctx);
     crate::mapfile::write_dependency_info(&ctx);
+    lap(&mut phases, "layout");
 
     // Write the output
     let mut buf = vec![0; ctx.output_size as usize];
     passes::copy_chunks(&ctx, &mut buf);
     ctx.diag.checkpoint();
     output_file::write(&ctx.diag, &ctx.args.output, &buf);
+    lap(&mut phases, "copy+write");
+
+    // ld64's -print_statistics reports its phase times and memory to
+    // stderr; ours reports phases and the sizes that drive them.
+    if ctx.args.print_statistics {
+        eprintln!("ld total time: {:>8.1?}", t0.elapsed());
+        for (name, dur) in &phases {
+            eprintln!("  {name:<10} {dur:>8.1?}");
+        }
+        eprintln!(
+            "  objects: {} alive of {}; dylibs: {}; output: {} bytes",
+            ctx.objs.iter().filter(|o| o.is_alive).count(),
+            ctx.objs.len(),
+            ctx.dylibs.len(),
+            ctx.output_size,
+        );
+    }
 
     Ok(0)
 }

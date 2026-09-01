@@ -180,6 +180,8 @@ pub struct Args {
     /// -ignore_optimization_hints: skip LC_LINKER_OPTIMIZATION_HINT
     /// processing.
     pub ignore_optimization_hints: bool,
+    /// -print_statistics: report phase timings and sizes to stderr.
+    pub print_statistics: bool,
     /// -non_global_symbols_strip_list: local symbols to drop from the
     /// output symbol table (glob patterns).
     pub local_strip_list: Vec<String>,
@@ -261,6 +263,7 @@ impl Default for Args {
             client_name: None,
             trace: false,
             ignore_optimization_hints: false,
+            print_statistics: false,
             local_strip_list: Vec::new(),
             local_keep_list: None,
             pagezero_size: 0x1_0000_0000,
@@ -546,6 +549,7 @@ pub fn parse_args(diag: &Diagnostics, cmdline: &[String]) -> Args {
             "-client_name" => args.client_name = Some(next_arg(&mut i).to_string()),
             "-t" => args.trace = true,
             "-ignore_optimization_hints" => args.ignore_optimization_hints = true,
+            "-print_statistics" => args.print_statistics = true,
             "-non_global_symbols_strip_list" => {
                 let path = next_arg(&mut i);
                 args.local_strip_list.extend(read_symbol_list(diag, path));
