@@ -162,6 +162,9 @@ pub struct Args {
     /// -why_load: report which symbol caused each archive member to
     /// load.
     pub why_load: bool,
+    /// -why_live: for each matching symbol, print the reference chain
+    /// that kept it alive through -dead_strip ("*" wildcards allowed).
+    pub why_live: Vec<String>,
     pub pagezero_size: u64,
     /// True when -pagezero_size was given explicitly (it is an error
     /// anywhere but a main executable).
@@ -230,6 +233,7 @@ impl Default for Args {
             object_path_lto: None,
             print_dependencies: false,
             why_load: false,
+            why_live: Vec::new(),
             pagezero_size: 0x1_0000_0000,
             explicit_pagezero: false,
         }
@@ -498,6 +502,7 @@ pub fn parse_args(diag: &Diagnostics, cmdline: &[String]) -> Args {
             "-order_file" => args.order_files.push(next_arg(&mut i).to_string()),
             "--print-dependencies" => args.print_dependencies = true,
             "-why_load" | "-whyload" => args.why_load = true,
+            "-why_live" => args.why_live.push(next_arg(&mut i).to_string()),
             "-executable_path" => {
                 args.executable_path = Some(next_arg(&mut i).to_string())
             }

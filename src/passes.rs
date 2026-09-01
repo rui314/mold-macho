@@ -1100,6 +1100,91 @@ pub fn print_dependencies<E: Arch>(ctx: &Context<E>) {
     }
 }
 
+/// -why_live prints, for each symbol matching a -why_live pattern
+/// ("*" wildcards), the chain of references that kept it alive: the
+/// liveness walk's spanning tree read backwards, one "symbol from
+/// file" line per hop, ending at a dead-strip root. Only meaningful
+/// under -dead_strip, like ld64's option of the same name.
+fn print_why_live<E: Arch>(ctx: &Context<E>, pred: &[usize], live: &[bool]) {
+    if ctx.args.why_live.is_empty() {
+        return;
+    }
+
+    let matches = |pat: &str, name: &str| -> bool {
+        let mut parts = pat.split('*');
+        let first = parts.next().unwrap_or("");
+        if !name.starts_with(first) {
+            return false;
+        }
+        let mut pos = first.len();
+        let mut rest: Vec<&str> = parts.collect();
+        let last = rest.pop();
+        for part in rest {
+            match name[pos..].find(part) {
+                Some(i) => pos = pos + i + part.len(),
+                None => return false,
+            }
+        }
+        match last {
+            Some(l) => name.len() >= pos + l.len() && name.ends_with(l),
+            None => pos == name.len(),
+        }
+    };
+
+    // A displayable symbol for each live subsection: prefer an extern
+    // symbol defined at it, else any named local.
+    let mut name_of: std::collections::HashMap<usize, &str> = std::collections::HashMap::new();
+    for sym in &ctx.symtab.syms {
+        if !matches!(sym.origin, Origin::Obj(_)) || sym.name.is_empty() {
+            continue;
+        }
+        let Some(isec) = sym.isec else { continue };
+        let isec = ctx.resolve_isec(isec);
+        match name_of.entry(isec) {
+            std::collections::hash_map::Entry::Vacant(e) => {
+                e.insert(sym.name);
+            }
+            std::collections::hash_map::Entry::Occupied(mut e) => {
+                if sym.is_extern && sym.value == 0 {
+                    e.insert(sym.name);
+                }
+            }
+        }
+    }
+    let describe = |isec: usize| -> String {
+        let sec = &ctx.isecs[isec];
+        let name = name_of
+            .get(&isec)
+            .copied()
+            .map(String::from)
+            .unwrap_or_else(|| format!("{},{}", sec.hdr.segname(), sec.hdr.sectname()));
+        if sec.obj == usize::MAX {
+            return name;
+        }
+        format!("{} from {}", name, file_display(&ctx.objs[sec.obj]))
+    };
+
+    for sym in &ctx.symtab.syms {
+        if !matches!(sym.origin, Origin::Obj(_))
+            || !ctx.args.why_live.iter().any(|p| matches(p, sym.name))
+        {
+            continue;
+        }
+        let Some(isec) = sym.isec else { continue };
+        let mut isec = ctx.resolve_isec(isec);
+        if !live[isec] {
+            continue;
+        }
+        println!("{} from {}", sym.name, file_display(&ctx.objs[ctx.isecs[isec].obj]));
+        let mut indent = 1;
+        while pred[isec] != usize::MAX {
+            isec = pred[isec];
+            println!("{:indent$}{}", "", describe(isec), indent = indent * 2);
+            indent += 1;
+        }
+    }
+}
+
 /// -why_load reports what dragged each archive member into the link:
 /// "_symbol forced load of archive.a(member.o)", in ld64's wording.
 /// Members loaded unconditionally (-all_load, -force_load) are
@@ -1132,15 +1217,20 @@ fn file_display(obj: &crate::input_files::ObjectFile) -> String {
 /// Reachability follows relocations and unwind-info edges.
 pub fn dead_strip<E: Arch>(ctx: &mut Context<E>) {
     let mut live = vec![false; ctx.isecs.len()];
+    // For -why_live: who first marked each subsection (usize::MAX for
+    // roots), giving a spanning tree of the liveness walk.
+    let mut pred = vec![usize::MAX; ctx.isecs.len()];
     let mut stack: Vec<usize> = Vec::new();
     let redirects: Vec<usize> = (0..ctx.isecs.len()).map(|i| ctx.resolve_isec(i)).collect();
-    let mark = move |live: &mut Vec<bool>, stack: &mut Vec<usize>, id: usize| {
-        let id = redirects[id];
-        if !live[id] {
-            live[id] = true;
-            stack.push(id);
-        }
-    };
+    let mark =
+        move |live: &mut Vec<bool>, pred: &mut Vec<usize>, stack: &mut Vec<usize>, id: usize, from: usize| {
+            let id = redirects[id];
+            if !live[id] {
+                live[id] = true;
+                pred[id] = from;
+                stack.push(id);
+            }
+        };
 
     // Section-level roots. Sections of dead archive members are not
     // part of the link at all and must not be resurrected here.
@@ -1155,14 +1245,14 @@ pub fn dead_strip<E: Arch>(ctx: &mut Context<E>) {
         let keep_attr =
             isec.hdr.flags & (S_ATTR_NO_DEAD_STRIP | S_ATTR_LIVE_SUPPORT) != 0;
         if keep_type || keep_attr || isec.hdr.sectname() == "__objc_imageinfo" {
-            mark(&mut live, &mut stack, id);
+            mark(&mut live, &mut pred, &mut stack, id, usize::MAX);
         }
     }
 
     // Initializers converted to __init_offsets are roots; their source
     // sections are gone.
     for &(isec, _) in &ctx.init_funcs {
-        mark(&mut live, &mut stack, isec);
+        mark(&mut live, &mut pred, &mut stack, isec, usize::MAX);
     }
 
     // Symbol-level roots
@@ -1174,14 +1264,14 @@ pub fn dead_strip<E: Arch>(ctx: &mut Context<E>) {
                 && sym.is_defined());
         if is_root {
             if let Some(isec) = sym.isec {
-                mark(&mut live, &mut stack, isec);
+                mark(&mut live, &mut pred, &mut stack, isec, usize::MAX);
             }
         }
     }
     if ctx.args.output_type == MH_EXECUTE {
         if let Some(id) = ctx.symtab.get(&ctx.args.entry) {
             if let Some(isec) = ctx.symtab[id].isec {
-                mark(&mut live, &mut stack, isec);
+                mark(&mut live, &mut pred, &mut stack, isec, usize::MAX);
             }
         }
     }
@@ -1200,32 +1290,34 @@ pub fn dead_strip<E: Arch>(ctx: &mut Context<E>) {
                 RelocTarget::Sym(idx) => {
                     let sym = &ctx.symtab[ctx.objs[ctx.isecs[id].obj].syms[idx]];
                     if let Some(isec) = sym.isec {
-                        mark(&mut live, &mut stack, isec);
+                        mark(&mut live, &mut pred, &mut stack, isec, id);
                     }
                 }
-                RelocTarget::Section(isec) => mark(&mut live, &mut stack, isec),
+                RelocTarget::Section(isec) => mark(&mut live, &mut pred, &mut stack, isec, id),
             }
         }
 
         for &rec_idx in unwind_by_isec.get(&id).map(Vec::as_slice).unwrap_or(&[]) {
             let rec = &ctx.unwind_records[rec_idx];
             if let Some((lsda, _)) = rec.lsda {
-                mark(&mut live, &mut stack, lsda);
+                mark(&mut live, &mut pred, &mut stack, lsda, id);
             }
             let mut personality = rec.personality;
             if let Some(fde) = rec.fde {
                 if let Some((lsda, _)) = ctx.fdes[fde].lsda {
-                    mark(&mut live, &mut stack, lsda);
+                    mark(&mut live, &mut pred, &mut stack, lsda, id);
                 }
                 personality = personality.or(ctx.cies[ctx.fdes[fde].cie].personality);
             }
             if let Some(p) = personality {
                 if let Some(isec) = ctx.symtab[p].isec {
-                    mark(&mut live, &mut stack, isec);
+                    mark(&mut live, &mut pred, &mut stack, isec, id);
                 }
             }
         }
     }
+
+    print_why_live(ctx, &pred, &live);
 
     for (id, isec) in ctx.isecs.iter_mut().enumerate() {
         isec.is_alive = live[id] && isec.is_alive;
