@@ -50,6 +50,9 @@ pub enum ChunkKind {
     /// Selector references (pointers into __objc_methname) loaded by the
     /// synthesized objc stubs.
     ObjcSelrefs,
+    /// The merged __objc_imageinfo section: the Objective-C runtime
+    /// reads exactly one 8-byte record per image.
+    ObjcImageInfo,
     /// The __TEXT,__unwind_info section, generated from the objects'
     /// compact unwind records.
     UnwindInfo,
@@ -103,6 +106,7 @@ impl Chunk {
                         | ChunkKind::ObjcStubs
                         | ChunkKind::ObjcMethname
                         | ChunkKind::ObjcSelrefs
+                        | ChunkKind::ObjcImageInfo
                         | ChunkKind::UnwindInfo
                         | ChunkKind::EhFrame
                 ),

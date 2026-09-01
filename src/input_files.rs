@@ -19,6 +19,8 @@ pub struct ObjectFile {
     pub sect_hdrs: Vec<MachSection>,
     /// All of this object's subsections, sorted by input address.
     pub subsecs: Vec<usize>,
+    /// The flags word of the object's __objc_imageinfo, if it has one.
+    pub objc_image_info: Option<u32>,
     pub nlists: Vec<NList>,
     /// The symbol slot for each nlist entry.
     pub syms: Vec<SymbolId>,
@@ -148,9 +150,11 @@ pub fn parse_object<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile) -> u
 
     for (i, sect) in sect_hdrs.iter().enumerate() {
         // __eh_frame is re-synthesized from parsed CIE/FDE records, and
-        // is not copied through.
+        // __objc_imageinfo sections are merged into one synthesized
+        // record; neither is copied through.
         if is_discarded_section(sect)
             || (sect.segname() == "__TEXT" && sect.sectname() == "__eh_frame")
+            || sect.sectname() == "__objc_imageinfo"
         {
             continue;
         }
@@ -297,10 +301,19 @@ pub fn parse_object<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile) -> u
         );
     }
 
+    let objc_image_info = sect_hdrs
+        .iter()
+        .find(|s| s.sectname() == "__objc_imageinfo")
+        .map(|s| {
+            let off = s.offset as usize + 4;
+            u32::from_le_bytes(data[off..off + 4].try_into().unwrap())
+        });
+
     ctx.objs.push(ObjectFile {
         mf,
         sect_hdrs,
         subsecs,
+        objc_image_info,
         nlists,
         syms,
     });

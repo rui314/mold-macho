@@ -672,6 +672,32 @@ pub fn create_output_chunks<E: Arch>(ctx: &mut Context<E>) {
         ctx.chunks.push(chunk);
     }
 
+    // Merge the objects' __objc_imageinfo records: the Swift version
+    // must agree, the Swift language version is the newest, and the
+    // category-class-properties bit holds only if every Objective-C
+    // object has it.
+    let infos: Vec<u32> = ctx.objs.iter().filter_map(|o| o.objc_image_info).collect();
+    if !infos.is_empty() {
+        let mut swift_version = 0;
+        for &flags in &infos {
+            let v = (flags >> 8) & 0xff;
+            if swift_version == 0 {
+                swift_version = v;
+            } else if v != 0 && v != swift_version {
+                error!(ctx, "incompatible __objc_imageinfo swift versions");
+            }
+        }
+        let lang = infos.iter().map(|f| f >> 16).max().unwrap();
+        let cat = infos.iter().all(|f| f & 0x40 != 0);
+        let flags = (lang << 16) | (swift_version << 8) | if cat { 0x40 } else { 0 };
+
+        ctx.objc_image_info_flags = flags;
+        let mut chunk = Chunk::new("__DATA_CONST", "__objc_imageinfo", ChunkKind::ObjcImageInfo);
+        chunk.hdr.p2align = 2;
+        chunk.hdr.size = 8;
+        ctx.chunks.push(chunk);
+    }
+
     if !ctx.unwind_records.is_empty() {
         let mut chunk = Chunk::new("__TEXT", "__unwind_info", ChunkKind::UnwindInfo);
         chunk.hdr.p2align = 2;
@@ -1304,6 +1330,12 @@ pub fn copy_chunks<E: Arch>(ctx: &Context<E>, buf: &mut [u8]) {
                         buf[off..off + 8].copy_from_slice(&ctx.sym_addr(id).to_le_bytes());
                     }
                 }
+            }
+            ChunkKind::ObjcImageInfo => {
+                let off = chunk.hdr.fileoff as usize;
+                buf[off..off + 4].copy_from_slice(&0u32.to_le_bytes());
+                buf[off + 4..off + 8]
+                    .copy_from_slice(&ctx.objc_image_info_flags.to_le_bytes());
             }
             ChunkKind::ObjcStubs => {
                 let off = chunk.hdr.fileoff as usize;
