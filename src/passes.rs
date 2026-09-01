@@ -150,6 +150,9 @@ fn read_file<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile, force_load:
             let slice = input_files::get_fat_slice(ctx, mf);
             read_file(ctx, slice, force_load, weak);
         }
+        FileType::LlvmBitcode => {
+            input_files::parse_bitcode(ctx, mf);
+        }
         FileType::Empty => {}
         _ => fatal!(ctx, "{}: unknown file type", mf.name),
     }
@@ -251,8 +254,27 @@ pub fn resolve_archive_members<E: Arch>(ctx: &mut Context<E>) {
     let mut index: std::collections::HashMap<&'static str, usize> =
         std::collections::HashMap::new();
     for (i, mf) in lazy_objs.iter().enumerate() {
-        for name in input_files::defined_symbol_names(mf) {
-            index.entry(name).or_insert(i);
+        match get_file_type(mf) {
+            FileType::Object => {
+                for name in input_files::defined_symbol_names(mf) {
+                    index.entry(name).or_insert(i);
+                }
+            }
+            FileType::LlvmBitcode => {
+                let plugin = input_files::ensure_lto_plugin(ctx);
+                let (module, syms) =
+                    crate::lto::parse_module(&ctx.diag, &plugin, mf.data, &mf.name);
+                for ls in syms {
+                    if ls.is_defined && ls.is_extern {
+                        let name: &'static str = String::leak(ls.name);
+                        index.entry(name).or_insert(i);
+                    }
+                }
+                // SAFETY: the module was created above and is not used
+                // again.
+                unsafe { (plugin.module_dispose)(module as *mut _) };
+            }
+            _ => {}
         }
     }
 
@@ -272,10 +294,91 @@ pub fn resolve_archive_members<E: Arch>(ctx: &mut Context<E>) {
         for i in needed {
             if !loaded[i] {
                 loaded[i] = true;
-                input_files::parse_object(ctx, lazy_objs[i]);
+                match get_file_type(lazy_objs[i]) {
+                    FileType::LlvmBitcode => {
+                        input_files::parse_bitcode(ctx, lazy_objs[i]);
+                    }
+                    _ => {
+                        input_files::parse_object(ctx, lazy_objs[i]);
+                    }
+                }
             }
         }
     }
+}
+
+/// Compiles all registered bitcode modules into one Mach-O object and
+/// replaces the placeholder objects' symbol claims with the real ones.
+pub fn run_lto<E: Arch>(ctx: &mut Context<E>) {
+    if ctx.lto_modules.is_empty() {
+        return;
+    }
+    let plugin = ctx.lto_plugin.unwrap();
+
+    // SAFETY: libLTO calls with handles created by the same library.
+    let data = unsafe {
+        let cg = (plugin.codegen_create)();
+        if cg.is_null() {
+            fatal!(ctx, "lto_codegen_create failed: {}", plugin.error_message());
+        }
+        (plugin.codegen_set_pic_model)(cg, crate::lto::LTO_CODEGEN_PIC_MODEL_DYNAMIC);
+
+        for &(_, module) in &ctx.lto_modules {
+            if (plugin.codegen_add_module)(cg, module as *mut _) {
+                fatal!(ctx, "lto_codegen_add_module failed: {}", plugin.error_message());
+            }
+        }
+
+        // Everything the rest of the link can see must survive the LTO
+        // internalizer: every external symbol a bitcode module defines,
+        // plus the entry point.
+        let mut preserve: Vec<std::ffi::CString> = Vec::new();
+        for sym in &ctx.symtab.syms {
+            if let Origin::Obj(idx) = sym.origin {
+                if ctx.objs[idx].lto_module.is_some() && sym.is_extern {
+                    if let Ok(name) = std::ffi::CString::new(sym.name) {
+                        preserve.push(name);
+                    }
+                }
+            }
+        }
+        if let Ok(name) = std::ffi::CString::new(ctx.args.entry.as_str()) {
+            preserve.push(name);
+        }
+        for name in &preserve {
+            (plugin.codegen_add_must_preserve_symbol)(cg, name.as_ptr());
+        }
+
+        let mut size = 0usize;
+        let ptr = (plugin.codegen_compile)(cg, &mut size);
+        if ptr.is_null() {
+            fatal!(ctx, "lto_codegen_compile failed: {}", plugin.error_message());
+        }
+        std::slice::from_raw_parts(ptr as *const u8, size).to_vec()
+    };
+
+    // Release the placeholders' symbol claims; the compiled object
+    // provides the real definitions.
+    let modules = std::mem::take(&mut ctx.lto_modules);
+    for &(obj_idx, _) in &modules {
+        let ids = ctx.objs[obj_idx].syms.clone();
+        for id in ids {
+            let sym = &mut ctx.symtab[id];
+            if sym.origin == Origin::Obj(obj_idx) {
+                sym.origin = Origin::Undef;
+                sym.isec = None;
+                sym.value = 0;
+                sym.is_weak_def = false;
+            }
+        }
+    }
+
+    let mf = Box::leak(Box::new(crate::mapped_file::MappedFile {
+        name: "<LTO>".to_string(),
+        data: Vec::leak(data),
+        parent: None,
+    }));
+    input_files::parse_object(ctx, mf);
 }
 
 /// Converts surviving tentative definitions (common symbols) into real

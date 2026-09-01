@@ -24,6 +24,9 @@ pub struct ObjectFile {
     /// True if the object carries DWARF debug info, so the output gets
     /// debug stabs pointing back at it.
     pub has_debug_info: bool,
+    /// For a bitcode input, the lto_module handle: the object is a
+    /// placeholder that only claims symbols until LTO compiles it.
+    pub lto_module: Option<usize>,
     pub nlists: Vec<NList>,
     /// The symbol slot for each nlist entry.
     pub syms: Vec<SymbolId>,
@@ -337,7 +340,78 @@ pub fn parse_object<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile) -> u
         has_debug_info,
         nlists,
         syms,
+        lto_module: None,
     });
+    obj_idx
+}
+
+/// Loads the LTO plugin on first use.
+pub fn ensure_lto_plugin<E: Arch>(ctx: &mut Context<E>) -> crate::lto::Plugin {
+    if ctx.lto_plugin.is_none() {
+        ctx.lto_plugin = Some(crate::lto::load_plugin(
+            &ctx.diag,
+            ctx.args.lto_library.as_deref(),
+        ));
+    }
+    ctx.lto_plugin.unwrap()
+}
+
+/// Registers a bitcode input: a placeholder object that claims the
+/// module's symbols so resolution works, compiled for real by LTO once
+/// all inputs are known.
+pub fn parse_bitcode<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile) -> usize {
+    let plugin = ensure_lto_plugin(ctx);
+    let (module, lsyms) = crate::lto::parse_module(&ctx.diag, &plugin, mf.data, &mf.name);
+
+    let obj_idx = ctx.objs.len();
+    let mut syms = Vec::with_capacity(lsyms.len());
+
+    for ls in lsyms {
+        let name: &'static str = String::leak(ls.name);
+        if !ls.is_defined {
+            let id = ctx.symtab.intern(name);
+            ctx.symtab[id].is_used = true;
+            syms.push(id);
+            continue;
+        }
+        if !ls.is_extern {
+            syms.push(ctx.symtab.add_local(name));
+            continue;
+        }
+
+        let id = ctx.symtab.intern(name);
+        let sym = &ctx.symtab[id];
+        match sym.origin {
+            Origin::Obj(_) if !sym.is_weak_def && !ls.is_weak_def => {
+                error!(ctx, "duplicate symbol: {name}");
+            }
+            Origin::Obj(_) if ls.is_weak_def => {}
+            _ => {
+                let sym = &mut ctx.symtab[id];
+                sym.origin = Origin::Obj(obj_idx);
+                sym.isec = None;
+                sym.value = 0;
+                sym.is_extern = true;
+                sym.is_weak_def = ls.is_weak_def;
+                sym.is_private_extern = ls.is_private_extern;
+                sym.is_imported = false;
+                sym.is_common = false;
+            }
+        }
+        syms.push(id);
+    }
+
+    ctx.objs.push(ObjectFile {
+        mf,
+        sect_hdrs: Vec::new(),
+        subsecs: Vec::new(),
+        objc_image_info: None,
+        has_debug_info: false,
+        nlists: Vec::new(),
+        syms,
+        lto_module: Some(module),
+    });
+    ctx.lto_modules.push((obj_idx, module));
     obj_idx
 }
 

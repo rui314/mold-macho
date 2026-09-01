@@ -14,6 +14,9 @@ pub enum FileType {
     /// that ships in SDKs in place of the binary.
     Tapi,
     Fat,
+    /// An LLVM bitcode file, produced by -flto; compiled by libLTO at
+    /// link time.
+    LlvmBitcode,
 }
 
 pub fn get_file_type(mf: &MappedFile) -> FileType {
@@ -28,6 +31,11 @@ pub fn get_file_type(mf: &MappedFile) -> FileType {
 
     if data.starts_with(b"--- !tapi-tbd") || data.starts_with(b"---\narchs:") {
         return FileType::Tapi;
+    }
+
+    // Raw LLVM bitcode, or the bitcode wrapper header.
+    if data.starts_with(b"BC\xc0\xde") || data.starts_with(&0x0b17_c0deu32.to_le_bytes()) {
+        return FileType::LlvmBitcode;
     }
 
     if data.len() >= size_of::<MachHeader>() {

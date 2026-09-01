@@ -63,6 +63,8 @@ pub struct Args {
     /// Emit chained fixups instead of classic dyld info. None means
     /// "decide from the deployment target".
     pub fixup_chains: Option<bool>,
+    /// The libLTO to load for bitcode inputs (-lto_library).
+    pub lto_library: Option<String>,
     pub dynamic: bool,
     pub headerpad: u64,
     pub pagezero_size: u64,
@@ -96,6 +98,7 @@ impl Default for Args {
             compatibility_version: encode_version(1, 0, 0),
             map: None,
             fixup_chains: None,
+            lto_library: None,
             dynamic: true,
             headerpad: 0x100,
             pagezero_size: 0x1_0000_0000,
@@ -262,8 +265,10 @@ pub fn parse_args(diag: &Diagnostics, cmdline: &[String]) -> Args {
             // Ignored options
             "-demangle" | "-no_deduplicate" | "-no_uuid" => {}
 
+            "-lto_library" => args.lto_library = Some(next_arg(&mut i).to_string()),
+
             // Ignored options with an argument
-            "-lto_library" | "-mllvm" | "-dependency_info" | "-object_path_lto" => {
+            "-mllvm" | "-dependency_info" | "-object_path_lto" => {
                 next_arg(&mut i);
             }
 

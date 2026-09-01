@@ -28,6 +28,11 @@ pub struct Context<E: Arch> {
     /// Files already loaded, so a library named twice (command line
     /// plus auto-link) is read once.
     pub visited_files: std::collections::HashSet<String>,
+    /// The loaded libLTO, once a bitcode input has been seen.
+    pub lto_plugin: Option<crate::lto::Plugin>,
+    /// Bitcode modules registered for LTO: the pseudo object index and
+    /// the lto_module handle.
+    pub lto_modules: Vec<(usize, usize)>,
     /// Auto-link options (LC_LINKER_OPTION) collected from objects and
     /// not yet acted on, e.g. ["-lswiftCore"] or
     /// ["-framework", "Foundation"].
@@ -104,6 +109,8 @@ impl<E: Arch> Context<E> {
             symtab: SymbolTable::default(),
             isecs: Vec::new(),
             lazy_objs: Vec::new(),
+            lto_plugin: None,
+            lto_modules: Vec::new(),
             visited_files: std::collections::HashSet::new(),
             pending_linker_options: Vec::new(),
             unwind_records: Vec::new(),

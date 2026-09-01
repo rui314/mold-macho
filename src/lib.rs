@@ -8,6 +8,7 @@ pub mod error;
 pub mod filetype;
 pub mod input_files;
 pub mod input_sections;
+pub mod lto;
 pub mod macho;
 pub mod mapfile;
 pub mod mapped_file;
