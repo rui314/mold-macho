@@ -84,7 +84,12 @@ pub fn link<E: Arch>(cmdline: &[String], diag: &Diagnostics) -> Result<i32, Stri
     passes::read_input_files(&mut ctx);
     ctx.diag.checkpoint();
     passes::create_synthetic_symbols(&mut ctx);
-    passes::resolve_archive_members(&mut ctx);
+    loop {
+        passes::resolve_archive_members(&mut ctx);
+        if !passes::load_autolink_deps(&mut ctx) {
+            break;
+        }
+    }
     passes::convert_common_symbols(&mut ctx);
     passes::create_objc_msgsend_stubs(&mut ctx);
     passes::resolve_dylib_symbols(&mut ctx);

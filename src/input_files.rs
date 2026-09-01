@@ -102,6 +102,20 @@ pub fn parse_object<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile) -> u
                 }
             }
             LC_SYMTAB => symtab_cmd = Some(SymtabCommand::read_from(&data[off..])),
+            LC_LINKER_OPTION => {
+                // Auto-link requests: the object names libraries it
+                // needs, as NUL-terminated strings after a count.
+                let count = u32::from_le_bytes(data[off + 8..off + 12].try_into().unwrap());
+                let mut strs = Vec::with_capacity(count as usize);
+                let mut p = off + 12;
+                for _ in 0..count {
+                    let rest = &data[p..off + lc.cmdsize as usize];
+                    let len = rest.iter().position(|&b| b == 0).unwrap_or(rest.len());
+                    strs.push(String::from_utf8_lossy(&rest[..len]).into_owned());
+                    p += len + 1;
+                }
+                ctx.pending_linker_options.push(strs);
+            }
             _ => {}
         }
         off += lc.cmdsize as usize;

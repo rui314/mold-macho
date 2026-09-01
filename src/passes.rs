@@ -107,6 +107,11 @@ fn find_library<E: Arch>(ctx: &Context<E>, name: &str) -> Option<PathBuf> {
 }
 
 fn read_file<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile, force_load: bool, weak: bool) {
+    // A library may be named both on the command line and by auto-link
+    // options; load each file once.
+    if !ctx.visited_files.insert(mf.name.clone()) {
+        return;
+    }
     match get_file_type(mf) {
         FileType::Object => {
             input_files::parse_object(ctx, mf);
@@ -183,6 +188,48 @@ pub fn read_input_files<E: Arch>(ctx: &mut Context<E>) {
         }
     }
     ctx.args.inputs = inputs;
+}
+
+/// Acts on auto-link options (LC_LINKER_OPTION) collected from object
+/// files: each names a library or framework the object needs, as if it
+/// had been on the command line. Swift objects rely on this entirely;
+/// their link lines name no libraries at all. Loading a library can
+/// surface more objects with more options, so the caller iterates.
+pub fn load_autolink_deps<E: Arch>(ctx: &mut Context<E>) -> bool {
+    let mut progress = false;
+    loop {
+        let pending = std::mem::take(&mut ctx.pending_linker_options);
+        if pending.is_empty() {
+            return progress;
+        }
+        for opt in pending {
+            let strs: Vec<&str> = opt.iter().map(String::as_str).collect();
+            match strs.as_slice() {
+                [flag] if flag.starts_with("-l") => {
+                    let name = &flag[2..];
+                    match find_library(ctx, name) {
+                        Some(path) => {
+                            if let Some(mf) = MappedFile::open(&ctx.diag, &path) {
+                                read_file(ctx, mf, false, false);
+                                progress = true;
+                            }
+                        }
+                        None => crate::warn!(ctx, "auto-linked library not found: -l{name}"),
+                    }
+                }
+                ["-framework", name] => match find_framework(ctx, name) {
+                    Some(path) => {
+                        if let Some(mf) = MappedFile::open(&ctx.diag, &path) {
+                            read_file(ctx, mf, false, false);
+                            progress = true;
+                        }
+                    }
+                    None => crate::warn!(ctx, "auto-linked framework not found: {name}"),
+                },
+                _ => crate::warn!(ctx, "unknown auto-link option: {:?}", opt),
+            }
+        }
+    }
 }
 
 /// Loads archive members that define symbols still undefined, until no

@@ -25,6 +25,13 @@ pub struct Context<E: Arch> {
     /// Archive members not yet loaded; a member is loaded when it
     /// defines a symbol that is still undefined.
     pub lazy_objs: Vec<&'static crate::mapped_file::MappedFile>,
+    /// Files already loaded, so a library named twice (command line
+    /// plus auto-link) is read once.
+    pub visited_files: std::collections::HashSet<String>,
+    /// Auto-link options (LC_LINKER_OPTION) collected from objects and
+    /// not yet acted on, e.g. ["-lswiftCore"] or
+    /// ["-framework", "Foundation"].
+    pub pending_linker_options: Vec<Vec<String>>,
     /// Unwind records from all objects' __compact_unwind sections.
     pub unwind_records: Vec<crate::input_files::UnwindRecord>,
     /// DWARF CIEs and FDEs from all objects' __eh_frame sections.
@@ -97,6 +104,8 @@ impl<E: Arch> Context<E> {
             symtab: SymbolTable::default(),
             isecs: Vec::new(),
             lazy_objs: Vec::new(),
+            visited_files: std::collections::HashSet::new(),
+            pending_linker_options: Vec::new(),
             unwind_records: Vec::new(),
             cies: Vec::new(),
             fdes: Vec::new(),
