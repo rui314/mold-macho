@@ -54,6 +54,8 @@ pub struct Args {
     pub exported_symbols: Option<Vec<String>>,
     /// Symbols to remove from the exported set.
     pub unexported_symbols: Vec<String>,
+    pub current_version: u32,
+    pub compatibility_version: u32,
 
     pub dynamic: bool,
     pub headerpad: u64,
@@ -83,6 +85,8 @@ impl Default for Args {
             forced_undefined: Vec::new(),
             exported_symbols: None,
             unexported_symbols: Vec::new(),
+            current_version: encode_version(1, 0, 0),
+            compatibility_version: encode_version(1, 0, 0),
             dynamic: true,
             headerpad: 0x100,
             pagezero_size: 0x1_0000_0000,
@@ -207,6 +211,12 @@ pub fn parse_args(diag: &Diagnostics, cmdline: &[String]) -> Args {
                     Ok(text) => args.unexported_symbols.extend(symbol_list(&text)),
                     Err(_) => fatal!(diag, "cannot read -unexported_symbols_list: {path}"),
                 }
+            }
+            "-current_version" => {
+                args.current_version = parse_version(diag, next_arg(&mut i))
+            }
+            "-compatibility_version" => {
+                args.compatibility_version = parse_version(diag, next_arg(&mut i))
             }
             "-adhoc_codesign" => args.adhoc_codesign = true,
             "-no_adhoc_codesign" => args.adhoc_codesign = false,

@@ -387,8 +387,8 @@ fn create_id_dylib_cmd<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
         cmdsize: 0,
         nameoff: size_of::<DylibCommand>() as u32,
         timestamp: 0,
-        current_version: encode_version(1, 0, 0),
-        compatibility_version: encode_version(1, 0, 0),
+        current_version: ctx.args.current_version,
+        compatibility_version: ctx.args.compatibility_version,
     };
     let mut buf = to_vec(&cmd);
     append_string(&mut buf, name);
