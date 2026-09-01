@@ -67,6 +67,9 @@ impl Arch for Arm64 {
     const STUB_SIZE: u64 = 12;
     const UNWIND_MODE_DWARF: u32 = UNWIND_ARM64_MODE_DWARF;
     const OBJC_STUB_SIZE: u64 = 32;
+    const RELOC_UNSIGNED: u8 = ARM64_RELOC_UNSIGNED;
+    const RELOC_SUBTRACTOR: u8 = ARM64_RELOC_SUBTRACTOR;
+    const RELOC_GOTPC: u8 = ARM64_RELOC_POINTER_TO_GOT;
 
     fn classify_reloc(r_type: u8) -> crate::arch::RelocClass {
         use crate::arch::RelocClass;

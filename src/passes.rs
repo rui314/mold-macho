@@ -334,11 +334,12 @@ pub fn scan_objc_stubs<E: Arch>(ctx: &mut Context<E>) {
 /// Personality functions are referenced from __unwind_info through the
 /// GOT.
 pub fn scan_unwind_personalities<E: Arch>(ctx: &mut Context<E>) {
-    let personalities: Vec<_> = ctx
+    let mut personalities: Vec<_> = ctx
         .unwind_records
         .iter()
         .filter_map(|rec| rec.personality)
         .collect();
+    personalities.extend(ctx.cies.iter().filter_map(|cie| cie.personality));
     for id in personalities {
         add_got(ctx, id);
     }
@@ -522,6 +523,31 @@ pub fn create_output_chunks<E: Arch>(ctx: &mut Context<E>) {
         ctx.chunks.push(chunk);
     }
 
+    // Lay out the surviving DWARF records: live CIEs first, then FDEs.
+    // Their offsets are needed before layout, because the __unwind_info
+    // encoding embeds each FDE's offset.
+    if !ctx.fdes.is_empty() {
+        for fde in &ctx.fdes {
+            ctx.cies[fde.cie].is_alive = true;
+        }
+        let mut off = 0;
+        for cie in &mut ctx.cies {
+            if cie.is_alive {
+                cie.output_offset = off;
+                off += cie.data.len() as u32;
+            }
+        }
+        for fde in &mut ctx.fdes {
+            fde.output_offset = off;
+            off += fde.data.len() as u32;
+        }
+
+        let mut chunk = Chunk::new("__TEXT", "__eh_frame", ChunkKind::EhFrame);
+        chunk.hdr.p2align = 3;
+        chunk.hdr.size = off as u64;
+        ctx.chunks.push(chunk);
+    }
+
     ctx.chunks.push(Chunk::new("__LINKEDIT", "", ChunkKind::RebaseInfo));
     ctx.chunks.push(Chunk::new("__LINKEDIT", "", ChunkKind::BindInfo));
     ctx.chunks.push(Chunk::new("__LINKEDIT", "", ChunkKind::ExportTrie));
@@ -552,6 +578,7 @@ pub fn create_output_chunks<E: Arch>(ctx: &mut Context<E>) {
         let sect_rank = match c.kind {
             ChunkKind::MachHeader => 0,
             ChunkKind::UnwindInfo => 100,
+            ChunkKind::EhFrame => 101,
             ChunkKind::CodeSignature => u32::MAX,
             _ => 1 + output_section_rank(c.hdr.segname, &c.hdr.sectname),
         };
@@ -1061,6 +1088,7 @@ pub fn copy_chunks<E: Arch>(ctx: &Context<E>, buf: &mut [u8]) {
                 let off = chunk.hdr.fileoff as usize;
                 buf[off..off + data.len()].copy_from_slice(&data);
             }
+            ChunkKind::EhFrame => output_chunks::copy_eh_frame(ctx, buf),
             ChunkKind::RebaseInfo => {
                 let off = chunk.hdr.fileoff as usize;
                 buf[off..off + ctx.rebase_data.len()].copy_from_slice(&ctx.rebase_data);

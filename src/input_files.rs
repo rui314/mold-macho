@@ -88,6 +88,13 @@ pub fn parse_object<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile) -> u
             continue;
         }
 
+        // __eh_frame is not copied through; it is re-synthesized from
+        // parsed CIE/FDE records.
+        if sect.segname() == "__TEXT" && sect.sectname() == "__eh_frame" {
+            sections.push(None);
+            continue;
+        }
+
         let contents = if sect.section_type() == S_ZEROFILL {
             &[]
         } else {
@@ -122,11 +129,30 @@ pub fn parse_object<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile) -> u
         syms.push(parse_symbol(ctx, obj_idx, &sect_hdrs, &sections, strtab, nlist, &mf.name));
     }
 
+    let unwind_start = ctx.unwind_records.len();
     if let Some(hdr) = sect_hdrs
         .iter()
         .find(|s| s.segname() == "__LD" && s.sectname() == "__compact_unwind")
     {
         parse_compact_unwind(ctx, hdr, &sect_hdrs, &sections, &syms, &nlists, data, &mf.name);
+    }
+
+    if let Some(hdr) = sect_hdrs
+        .iter()
+        .find(|s| s.segname() == "__TEXT" && s.sectname() == "__eh_frame")
+    {
+        parse_eh_frame(
+            ctx,
+            obj_idx,
+            hdr,
+            &sect_hdrs,
+            &sections,
+            &syms,
+            &nlists,
+            data,
+            unwind_start,
+            &mf.name,
+        );
     }
 
     ctx.objs.push(ObjectFile {
@@ -243,6 +269,9 @@ pub struct UnwindRecord {
     /// The language-specific data area: an input section and an offset
     /// within it.
     pub lsda: Option<(usize, u32)>,
+    /// For a record synthesized from DWARF unwind info, the FDE it
+    /// points to (an index into `ctx.fdes`).
+    pub fde: Option<usize>,
 }
 
 /// Parses a __LD,__compact_unwind section into unwind records. The
@@ -284,6 +313,7 @@ fn parse_compact_unwind<E: Arch>(
             }),
             personality: None,
             lsda: None,
+            fde: None,
         });
     }
 
@@ -364,6 +394,290 @@ fn parse_compact_unwind<E: Arch>(
         rec.isec != usize::MAX && (rec.encoding & UNWIND_MODE_MASK) != E::UNWIND_MODE_DWARF
     });
     ctx.unwind_records.extend(records);
+}
+
+/// A DWARF Common Information Entry from an object's __eh_frame.
+#[derive(Debug)]
+pub struct Cie {
+    pub obj: usize,
+    pub input_addr: u32,
+    /// Contents with subtraction pairs already applied.
+    pub data: Vec<u8>,
+    pub personality: Option<SymbolId>,
+    /// Offset of the personality cell within this CIE.
+    pub personality_offset: u32,
+    /// Size of the LSDA pointer declared by the augmentation ('L'), or
+    /// 0 if none.
+    pub lsda_size: u8,
+    pub output_offset: u32,
+    pub is_alive: bool,
+}
+
+/// A DWARF Frame Description Entry from an object's __eh_frame.
+#[derive(Debug)]
+pub struct Fde {
+    pub obj: usize,
+    pub input_addr: u32,
+    pub data: Vec<u8>,
+    /// Index into `ctx.cies`.
+    pub cie: usize,
+    /// The function the FDE describes.
+    pub isec: usize,
+    pub func_offset: u32,
+    pub code_len: u32,
+    pub lsda: Option<(usize, u32)>,
+    pub output_offset: u32,
+}
+
+fn read_uleb_at(data: &[u8], pos: &mut usize) -> u64 {
+    let mut val = 0;
+    let mut shift = 0;
+    loop {
+        let byte = data[*pos];
+        *pos += 1;
+        val |= ((byte & 0x7f) as u64) << shift;
+        if byte & 0x80 == 0 {
+            return val;
+        }
+        shift += 7;
+    }
+}
+
+/// Parses a __TEXT,__eh_frame section. Unlike other sections it is not
+/// copied through: the linker re-synthesizes it, keeping only FDEs for
+/// functions that have no compact unwind record, patching each CIE's
+/// personality cell to be GOT-relative, and dropping the rest.
+#[allow(clippy::too_many_arguments)]
+fn parse_eh_frame<E: Arch>(
+    ctx: &mut Context<E>,
+    obj_idx: usize,
+    hdr: &MachSection,
+    sect_hdrs: &[MachSection],
+    sections: &[Option<usize>],
+    syms: &[SymbolId],
+    nlists: &[NList],
+    data: &'static [u8],
+    new_unwind_start: usize,
+    file_name: &str,
+) {
+    let mut contents =
+        data[hdr.offset as usize..(hdr.offset as u64 + hdr.size) as usize].to_vec();
+    let rels: Vec<MachRel> = read_array(data, hdr.reloff as usize, hdr.nreloc as usize);
+
+    // Pre-apply subtraction pairs so record contents become
+    // self-relative; leave GOT-relative personality references for
+    // later.
+    let mut i = 0;
+    while i < rels.len() {
+        let r1 = rels[i];
+        if r1.r_type() == E::RELOC_SUBTRACTOR {
+            let r2 = rels[i + 1];
+            i += 2;
+            if r2.r_type() != E::RELOC_UNSIGNED || !r1.is_extern() || !r2.is_extern() {
+                fatal!(ctx, "{file_name}: __eh_frame: unsupported relocation pair");
+            }
+            let target1 = nlists[r1.r_symbolnum() as usize].n_value;
+            let target2 = nlists[r2.r_symbolnum() as usize].n_value;
+            let loc = &mut contents[r1.r_address as usize..];
+            let delta = target2.wrapping_sub(target1);
+            match r1.r_length() {
+                2 => {
+                    let val = u32::from_le_bytes(loc[..4].try_into().unwrap());
+                    loc[..4].copy_from_slice(&val.wrapping_add(delta as u32).to_le_bytes());
+                }
+                3 => {
+                    let val = u64::from_le_bytes(loc[..8].try_into().unwrap());
+                    let add = delta as u32 as i32 as i64 as u64;
+                    loc[..8].copy_from_slice(&val.wrapping_add(add).to_le_bytes());
+                }
+                _ => fatal!(ctx, "{file_name}: __eh_frame: invalid relocation size"),
+            }
+        } else if r1.r_type() == E::RELOC_GOTPC {
+            i += 1;
+        } else {
+            fatal!(ctx, "{file_name}: __eh_frame: unknown relocation type");
+        }
+    }
+
+    // Split the section into records: a zero ID marks a CIE, anything
+    // else is an FDE pointing back at its CIE.
+    let first_cie = ctx.cies.len();
+    let mut fdes: Vec<(u32, Vec<u8>)> = Vec::new();
+    let mut pos = 0;
+    while pos < contents.len() {
+        let len = u32::from_le_bytes(contents[pos..pos + 4].try_into().unwrap()) as usize;
+        if len == 0xffff_ffff {
+            fatal!(ctx, "{file_name}: __eh_frame: extended length is not supported");
+        }
+        let rec = contents[pos..pos + 4 + len].to_vec();
+        let id = u32::from_le_bytes(rec[4..8].try_into().unwrap());
+        let input_addr = hdr.addr as u32 + pos as u32;
+        if id == 0 {
+            ctx.cies.push(Cie {
+                obj: obj_idx,
+                input_addr,
+                data: rec,
+                personality: None,
+                personality_offset: 0,
+                lsda_size: 0,
+                output_offset: 0,
+                is_alive: false,
+            });
+        } else {
+            fdes.push((input_addr, rec));
+        }
+        pos += 4 + len;
+    }
+
+    // Validate CIE augmentations and record LSDA encodings.
+    let diag = ctx.diag.clone();
+    for cie in &mut ctx.cies[first_cie..] {
+        let data = &cie.data;
+        if data.get(9).copied() != Some(b'z') {
+            continue;
+        }
+        let aug_start = 9;
+        let aug_end = aug_start + data[aug_start..].iter().position(|&b| b == 0).unwrap();
+        let mut pos = aug_end + 1;
+        read_uleb_at(data, &mut pos); // code alignment
+        read_uleb_at(data, &mut pos); // data alignment
+        read_uleb_at(data, &mut pos); // return address register
+        read_uleb_at(data, &mut pos); // augmentation data length
+        for &c in &data[aug_start + 1..aug_end] {
+            match c {
+                b'L' => {
+                    cie.lsda_size = match data[pos] & 0xf {
+                        0x3 => 4,  // DW_EH_PE_sdata4... actually udata4
+                        0xb => 4,  // DW_EH_PE_sdata4
+                        0x0 => 8,  // DW_EH_PE_absptr
+                        enc => fatal!(
+                            diag,
+                            "{file_name}: __eh_frame: unknown LSDA encoding: {enc:#x}"
+                        ),
+                    };
+                    pos += 1;
+                }
+                b'P' => {
+                    // DW_EH_PE_indirect | DW_EH_PE_pcrel | DW_EH_PE_sdata4
+                    if data[pos] != 0x9b {
+                        fatal!(
+                            diag,
+                            "{file_name}: __eh_frame: unknown personality encoding: {:#x}",
+                            data[pos]
+                        );
+                    }
+                    pos += 5;
+                }
+                b'R' => pos += 1,
+                _ => fatal!(diag, "{file_name}: __eh_frame: unknown augmentation"),
+            }
+        }
+    }
+
+    // Personality references appear as GOT-relative relocations inside
+    // a CIE.
+    for r in &rels {
+        if r.r_type() != E::RELOC_GOTPC {
+            continue;
+        }
+        let addr = hdr.addr as u32 + r.r_address;
+        let Some(cie) = ctx.cies[first_cie..].iter_mut().find(|c| {
+            c.input_addr <= addr && addr < c.input_addr + c.data.len() as u32
+        }) else {
+            fatal!(diag, "{file_name}: __eh_frame: stray personality relocation");
+        };
+        if !r.is_extern() {
+            fatal!(diag, "{file_name}: __eh_frame: unsupported personality reference");
+        }
+        cie.personality = Some(syms[r.r_symbolnum() as usize]);
+        cie.personality_offset = addr - cie.input_addr;
+    }
+
+    // Functions that already have a compact unwind record don't need
+    // their FDE; the compact record wins.
+    let covered: std::collections::HashSet<(usize, u32)> = ctx.unwind_records
+        [new_unwind_start..]
+        .iter()
+        .map(|rec| (rec.isec, rec.input_offset))
+        .collect();
+
+    for (input_addr, rec) in fdes {
+        let cie_off = u32::from_le_bytes(rec[4..8].try_into().unwrap());
+        let cie_addr = input_addr + 4 - cie_off;
+        let Some(cie) = ctx.cies[first_cie..]
+            .iter()
+            .position(|c| c.input_addr == cie_addr)
+        else {
+            fatal!(ctx, "{file_name}: __eh_frame: FDE with an invalid CIE pointer");
+        };
+        let cie = first_cie + cie;
+
+        // The function address: the pre-applied pc_begin field is
+        // relative to itself.
+        let pc_begin = i64::from_le_bytes(rec[8..16].try_into().unwrap());
+        let func_addr = (input_addr as u64 + 8).wrapping_add_signed(pc_begin);
+        let code_len = u64::from_le_bytes(rec[16..24].try_into().unwrap()) as u32;
+
+        let Some(sect_idx) = sect_hdrs
+            .iter()
+            .position(|sec| sec.addr <= func_addr && func_addr < sec.addr + sec.size)
+        else {
+            fatal!(ctx, "{file_name}: __eh_frame: FDE with an invalid function");
+        };
+        let Some(isec) = sections[sect_idx] else {
+            continue;
+        };
+        let func_offset = (func_addr - sect_hdrs[sect_idx].addr) as u32;
+
+        if covered.contains(&(isec, func_offset)) {
+            continue;
+        }
+
+        // The LSDA pointer, if the CIE declares one: also pre-applied to
+        // be self-relative.
+        let mut lsda = None;
+        if ctx.cies[cie].lsda_size != 0 {
+            let mut pos = 24;
+            read_uleb_at(&rec, &mut pos);
+            let cell = i32::from_le_bytes(rec[pos..pos + 4].try_into().unwrap());
+            let lsda_addr = (input_addr as u64 + pos as u64).wrapping_add_signed(cell as i64);
+            let Some(idx) = sect_hdrs
+                .iter()
+                .position(|sec| sec.addr <= lsda_addr && lsda_addr < sec.addr + sec.size)
+            else {
+                fatal!(ctx, "{file_name}: __eh_frame: FDE with an invalid LSDA");
+            };
+            let Some(lsda_isec) = sections[idx] else {
+                fatal!(ctx, "{file_name}: __eh_frame: LSDA in a discarded section");
+            };
+            lsda = Some((lsda_isec, (lsda_addr - sect_hdrs[idx].addr) as u32));
+        }
+
+        let fde_idx = ctx.fdes.len();
+        ctx.fdes.push(Fde {
+            obj: obj_idx,
+            input_addr,
+            data: rec,
+            cie,
+            isec,
+            func_offset,
+            code_len,
+            lsda: lsda.map(|(i, o)| (i, o)),
+            output_offset: 0,
+        });
+
+        // Synthesize a compact unwind record pointing at the FDE so that
+        // the unwinder can find it through __unwind_info.
+        ctx.unwind_records.push(UnwindRecord {
+            isec,
+            input_offset: func_offset,
+            code_len,
+            encoding: 0,
+            personality: None,
+            lsda: None,
+            fde: Some(fde_idx),
+        });
+    }
 }
 
 /// Splits an archive into its members. Members use the BSD convention:

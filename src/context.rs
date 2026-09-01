@@ -27,6 +27,9 @@ pub struct Context<E: Arch> {
     pub lazy_objs: Vec<&'static crate::mapped_file::MappedFile>,
     /// Unwind records from all objects' __compact_unwind sections.
     pub unwind_records: Vec<crate::input_files::UnwindRecord>,
+    /// DWARF CIEs and FDEs from all objects' __eh_frame sections.
+    pub cies: Vec<crate::input_files::Cie>,
+    pub fdes: Vec<crate::input_files::Fde>,
     pub chunks: Vec<Chunk>,
     pub segments: Vec<OutputSegment>,
     pub symtab_data: SymtabData,
@@ -76,6 +79,8 @@ impl<E: Arch> Context<E> {
             isecs: Vec::new(),
             lazy_objs: Vec::new(),
             unwind_records: Vec::new(),
+            cies: Vec::new(),
+            fdes: Vec::new(),
             chunks: Vec::new(),
             segments: Vec::new(),
             symtab_data: SymtabData::default(),

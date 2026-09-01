@@ -53,6 +53,9 @@ pub enum ChunkKind {
     /// The __TEXT,__unwind_info section, generated from the objects'
     /// compact unwind records.
     UnwindInfo,
+    /// The re-synthesized __TEXT,__eh_frame section, holding the DWARF
+    /// unwind records that compact unwind can't express.
+    EhFrame,
     /// The rebase opcode stream for LC_DYLD_INFO, in __LINKEDIT.
     RebaseInfo,
     /// The bind opcode stream for LC_DYLD_INFO, in __LINKEDIT.
@@ -98,6 +101,7 @@ impl Chunk {
                         | ChunkKind::ObjcMethname
                         | ChunkKind::ObjcSelrefs
                         | ChunkKind::UnwindInfo
+                        | ChunkKind::EhFrame
                 ),
             },
             kind,
@@ -654,6 +658,14 @@ pub fn encode_unwind_info<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
     let func_addr =
         |r: &crate::input_files::UnwindRecord| ctx.isec_addr(r.isec) + r.input_offset as u64;
 
+    // Records synthesized from DWARF unwind info encode the FDE's
+    // offset in __eh_frame in the low 24 bits.
+    for rec in &mut records {
+        if let Some(fde) = rec.fde {
+            rec.encoding = E::UNWIND_MODE_DWARF | (ctx.fdes[fde].output_offset & 0xff_ffff);
+        }
+    }
+
     // Assign personality indices, encoded in bits 28-29 of the encoding.
     let mut personalities: Vec<SymbolId> = Vec::new();
     for rec in &mut records {
@@ -790,6 +802,62 @@ pub fn encode_unwind_info<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
     buf.extend_from_slice(&lsda);
     buf.extend_from_slice(&page2);
     buf
+}
+
+/// Writes the re-synthesized __eh_frame section: live CIEs with their
+/// personality cells rewritten to be GOT-relative, then live FDEs with
+/// their CIE pointer, function pointer and LSDA pointer re-targeted.
+pub fn copy_eh_frame<E: Arch>(ctx: &Context<E>, buf: &mut [u8]) {
+    let chunk_idx = find_chunk(ctx, |k| matches!(k, ChunkKind::EhFrame)).unwrap();
+    let chunk = &ctx.chunks[chunk_idx];
+    let base_off = chunk.hdr.fileoff as usize;
+    let base_addr = chunk.hdr.addr;
+
+    for cie in &ctx.cies {
+        if !cie.is_alive {
+            continue;
+        }
+        let off = base_off + cie.output_offset as usize;
+        buf[off..off + cie.data.len()].copy_from_slice(&cie.data);
+
+        if let Some(personality) = cie.personality {
+            let cell_addr = base_addr + cie.output_offset as u64 + cie.personality_offset as u64;
+            let val = ctx.sym_got_addr(personality).wrapping_sub(cell_addr) as u32;
+            let cell = off + cie.personality_offset as usize;
+            buf[cell..cell + 4].copy_from_slice(&val.to_le_bytes());
+        }
+    }
+
+    for fde in &ctx.fdes {
+        let off = base_off + fde.output_offset as usize;
+        let fde_addr = base_addr + fde.output_offset as u64;
+        buf[off..off + fde.data.len()].copy_from_slice(&fde.data);
+
+        // The CIE pointer is the distance back to the owning CIE.
+        let cie_ptr = fde.output_offset + 4 - ctx.cies[fde.cie].output_offset;
+        buf[off + 4..off + 8].copy_from_slice(&cie_ptr.to_le_bytes());
+
+        // pc_begin: self-relative pointer to the function.
+        let func_addr = ctx.isec_addr(fde.isec) + fde.func_offset as u64;
+        let pc_begin = func_addr.wrapping_sub(fde_addr + 8) as i64;
+        buf[off + 8..off + 16].copy_from_slice(&pc_begin.to_le_bytes());
+
+        if let Some((lsda_isec, lsda_off)) = fde.lsda {
+            let mut pos = 24;
+            // Skip the augmentation data length.
+            while buf[off + pos] & 0x80 != 0 {
+                pos += 1;
+            }
+            pos += 1;
+            let cell_addr = fde_addr + pos as u64;
+            let val = (ctx.isec_addr(lsda_isec) + lsda_off as u64).wrapping_sub(cell_addr);
+            match ctx.cies[fde.cie].lsda_size {
+                4 => buf[off + pos..off + pos + 4].copy_from_slice(&(val as u32).to_le_bytes()),
+                8 => buf[off + pos..off + pos + 8].copy_from_slice(&val.to_le_bytes()),
+                _ => unreachable!(),
+            }
+        }
+    }
 }
 
 /// Returns the size of the code signature given the file offset it will

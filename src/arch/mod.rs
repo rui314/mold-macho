@@ -37,6 +37,11 @@ pub trait Arch: Copy + Default + Send + Sync + 'static {
     const UNWIND_MODE_DWARF: u32;
     /// The size of one __objc_stubs entry.
     const OBJC_STUB_SIZE: u64;
+    /// The relocation types for a plain absolute word, a subtraction
+    /// pair, and a GOT-relative pointer.
+    const RELOC_UNSIGNED: u8;
+    const RELOC_SUBTRACTOR: u8;
+    const RELOC_GOTPC: u8;
 
     /// Classifies a relocation type by how it uses its target.
     fn classify_reloc(r_type: u8) -> RelocClass;
