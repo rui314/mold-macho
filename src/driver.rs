@@ -102,6 +102,7 @@ pub fn link<E: Arch>(cmdline: &[String], diag: &Diagnostics) -> Result<i32, Stri
         }
     }
     passes::sweep_dead_files(&mut ctx);
+    passes::convert_init_offsets(&mut ctx);
     passes::merge_literals(&mut ctx);
     passes::create_synthetic_symbols(&mut ctx);
     passes::convert_common_symbols(&mut ctx);

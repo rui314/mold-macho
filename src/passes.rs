@@ -686,6 +686,45 @@ pub fn convert_common_symbols<E: Arch>(ctx: &mut Context<E>) {
     }
 }
 
+/// With -init_offsets, replaces __mod_init_func's absolute pointers
+/// (which each need a rebase) with 32-bit image-relative offsets in a
+/// __TEXT,__init_offsets section (type S_INIT_FUNC_OFFSETS), which
+/// dyld runs the same way but never has to fix up.
+pub fn convert_init_offsets<E: Arch>(ctx: &mut Context<E>) {
+    if !ctx.args.init_offsets {
+        return;
+    }
+    for i in 0..ctx.isecs.len() {
+        if ctx.isecs[i].hdr.section_type() != S_MOD_INIT_FUNC_POINTERS
+            || !ctx.isecs[i].is_alive
+        {
+            continue;
+        }
+        let mut relocs = ctx.isecs[i].relocs.clone();
+        relocs.sort_by_key(|r| r.offset);
+        for rel in relocs {
+            let obj = ctx.isecs[i].obj;
+            let target = match ctx.reloc_target_sym(obj, &rel) {
+                Some(id) => {
+                    let sym = &ctx.symtab[id];
+                    match sym.isec {
+                        Some(isec) => (ctx.resolve_isec(isec), sym.value),
+                        None => continue,
+                    }
+                }
+                None => match rel.target {
+                    crate::input_sections::RelocTarget::Section(isec) => {
+                        (ctx.resolve_isec(isec), rel.addend as u64)
+                    }
+                    _ => continue,
+                },
+            };
+            ctx.init_funcs.push(target);
+        }
+        ctx.isecs[i].is_alive = false;
+    }
+}
+
 /// Hides the subsections of archive members that resolution left
 /// dead, so nothing of theirs reaches the output.
 pub fn sweep_dead_files<E: Arch>(ctx: &mut Context<E>) {
@@ -855,6 +894,12 @@ pub fn dead_strip<E: Arch>(ctx: &mut Context<E>) {
         if keep_type || keep_attr || isec.hdr.sectname() == "__objc_imageinfo" {
             mark(&mut live, &mut stack, id);
         }
+    }
+
+    // Initializers converted to __init_offsets are roots; their source
+    // sections are gone.
+    for &(isec, _) in &ctx.init_funcs {
+        mark(&mut live, &mut stack, isec);
     }
 
     // Symbol-level roots
@@ -1351,6 +1396,14 @@ pub fn create_output_chunks<E: Arch>(ctx: &mut Context<E>) {
         // GOT's.
         chunk.hdr.reserved1 = ctx.stub_syms.len() as u32;
         chunk.hdr.size = ctx.got_syms.len() as u64 * 8;
+        ctx.chunks.push(chunk);
+    }
+
+    if !ctx.init_funcs.is_empty() {
+        let mut chunk = Chunk::new("__TEXT", "__init_offsets", ChunkKind::InitOffsets);
+        chunk.hdr.flags = S_INIT_FUNC_OFFSETS;
+        chunk.hdr.p2align = 2;
+        chunk.hdr.size = ctx.init_funcs.len() as u64 * 4;
         ctx.chunks.push(chunk);
     }
 
@@ -2513,6 +2566,12 @@ fn copy_chunk<E: Arch>(ctx: &Context<E>, chunk: &Chunk, buf: &mut [u8]) {
             buf[4..8].copy_from_slice(&ctx.objc_image_info_flags.to_le_bytes());
         }
         ChunkKind::SectCreate { data } => buf[..data.len()].copy_from_slice(data),
+        ChunkKind::InitOffsets => {
+            for (i, &(isec, off)) in ctx.init_funcs.iter().enumerate() {
+                let val = (ctx.isec_addr(isec) + off - ctx.args.pagezero_size) as u32;
+                buf[i * 4..i * 4 + 4].copy_from_slice(&val.to_le_bytes());
+            }
+        }
         ChunkKind::ObjcStubs => E::write_objc_stubs(ctx, chunk.hdr.addr, buf),
         ChunkKind::ObjcMethname => {
             buf[..ctx.objc_methname_data.len()].copy_from_slice(&ctx.objc_methname_data);

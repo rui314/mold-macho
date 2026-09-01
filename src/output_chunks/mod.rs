@@ -68,6 +68,9 @@ pub enum ChunkKind {
     ObjcImageInfo,
     /// A section created from a file by -sectcreate.
     SectCreate { data: &'static [u8] },
+    /// __TEXT,__init_offsets: 32-bit image-relative initializer
+    /// offsets, replacing __mod_init_func's absolute pointers.
+    InitOffsets,
     /// The __TEXT,__unwind_info section, generated from the objects'
     /// compact unwind records.
     UnwindInfo,
@@ -126,6 +129,7 @@ impl Chunk {
                         | ChunkKind::ObjcSelrefs
                         | ChunkKind::ObjcImageInfo
                         | ChunkKind::SectCreate { .. }
+                        | ChunkKind::InitOffsets
                         | ChunkKind::UnwindInfo
                         | ChunkKind::EhFrame
                 ),

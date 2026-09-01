@@ -81,6 +81,9 @@ pub struct Args {
     pub deduplicate: bool,
     /// Emit LC_FUNCTION_STARTS (on by default).
     pub function_starts: bool,
+    /// -init_offsets: emit initializers as 32-bit image offsets
+    /// (__init_offsets) instead of absolute pointers (__mod_init_func).
+    pub init_offsets: bool,
     /// Compute a content-hash LC_UUID (on by default; -no_uuid leaves
     /// it zeroed - dyld refuses executables without the load command).
     pub uuid: bool,
@@ -138,6 +141,7 @@ impl Default for Args {
             strip_locals: false,
             deduplicate: true,
             function_starts: true,
+            init_offsets: false,
             uuid: true,
             suppress_warnings: false,
             undefined_dynamic_lookup: false,
@@ -395,6 +399,7 @@ pub fn parse_args(diag: &Diagnostics, cmdline: &[String]) -> Args {
 
             "-no_deduplicate" => args.deduplicate = false,
             "-function_starts" => args.function_starts = true,
+            "-init_offsets" => args.init_offsets = true,
             "-no_function_starts" => args.function_starts = false,
 
             "-no_uuid" => args.uuid = false,
