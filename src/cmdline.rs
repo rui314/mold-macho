@@ -138,6 +138,26 @@ pub fn parse_args(diag: &Diagnostics, cmdline: &[String]) -> Args {
             "-weak_library" => args
                 .inputs
                 .push(InputArg::WeakFile(next_arg(&mut i).to_string())),
+            "-filelist" => {
+                // A file listing one input path per line, optionally
+                // with a directory prefix after a comma.
+                let arg = next_arg(&mut i).to_string();
+                let (path, dir) = match arg.split_once(',') {
+                    Some((path, dir)) => (path.to_string(), format!("{dir}/")),
+                    None => (arg, String::new()),
+                };
+                match std::fs::read_to_string(&path) {
+                    Ok(text) => {
+                        for line in text.lines() {
+                            if !line.is_empty() {
+                                args.inputs.push(InputArg::File(format!("{dir}{line}")));
+                            }
+                        }
+                    }
+                    Err(_) => fatal!(diag, "cannot read -filelist file: {path}"),
+                }
+            }
+            "-F" => args.framework_paths.push(next_arg(&mut i).to_string()),
             "-dylib" => args.output_type = MH_DYLIB,
             "-bundle" => args.output_type = MH_BUNDLE,
             "-rpath" => args.rpaths.push(next_arg(&mut i).to_string()),
