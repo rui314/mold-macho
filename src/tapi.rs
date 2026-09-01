@@ -20,6 +20,10 @@ pub struct TbdFile {
     pub current_version: u32,
     pub exports: Vec<String>,
     pub weak_exports: Vec<String>,
+    /// Exports that are thread-local variables (listed separately in
+    /// .tbd files; a TLV can only be referenced through TLV
+    /// relocations).
+    pub tlv_exports: Vec<String>,
     /// Install names of reexported libraries described in *other* files
     /// (reexports inlined as documents in this file are already merged
     /// into `exports`).
@@ -91,6 +95,7 @@ pub fn parse(diag: &Diagnostics, mf: &MappedFile) -> TbdFile {
         current_version: crate::macho::encode_version(1, 0, 0),
         exports: Vec::new(),
         weak_exports: Vec::new(),
+        tlv_exports: Vec::new(),
         external_reexports: Vec::new(),
     };
 
@@ -123,6 +128,7 @@ pub fn parse(diag: &Diagnostics, mf: &MappedFile) -> TbdFile {
         read_lists(doc, "objc-eh-types", &mut tbd.exports, "_OBJC_EHTYPE_$_");
         read_lists(doc, "objc-ivars", &mut tbd.exports, "_OBJC_IVAR_$_");
         read_lists(doc, "weak-symbols", &mut tbd.weak_exports, "");
+        read_lists(doc, "thread-local-symbols", &mut tbd.tlv_exports, "");
     }
 
     // Reexported libraries not inlined as documents live in files of

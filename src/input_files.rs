@@ -85,6 +85,8 @@ pub struct DylibFile {
     /// symbol binds to this dylib, even without -dead_strip_dylibs.
     pub is_dead_strippable: bool,
     pub exports: std::collections::HashSet<String>,
+    /// The subset of exports that are thread-local variables.
+    pub tlv_exports: std::collections::HashSet<String>,
 }
 
 /// Returns true for sections that don't become part of the output image.
@@ -1140,15 +1142,24 @@ pub fn parse_dylib_binary<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile
     }
 
     let mut exports = std::collections::HashSet::new();
+    let mut tlv_exports = std::collections::HashSet::new();
     if let (Some(sym), Some(dysym)) = (symtab_cmd, dysymtab_cmd) {
         let nlists: Vec<NList> = read_array(data, sym.symoff as usize, sym.nsyms as usize);
         let strtab = &data[sym.stroff as usize..(sym.stroff + sym.strsize) as usize];
         // SAFETY: input files are leaked, so the string table lives for
         // the rest of the process.
         let strtab: &'static [u8] = unsafe { std::mem::transmute(strtab) };
+        // A TLV export is recognizable by its section: n_sect names a
+        // S_THREAD_LOCAL_VARIABLES section (the __thread_vars
+        // descriptors).
+        let tlv_sects = thread_local_section_ordinals(data, &hdr);
         let range = dysym.iextdefsym as usize..(dysym.iextdefsym + dysym.nextdefsym) as usize;
         for nlist in &nlists[range] {
-            exports.insert(symbol_name(strtab, nlist).to_string());
+            let name = symbol_name(strtab, nlist).to_string();
+            if tlv_sects.contains(&nlist.n_sect) {
+                tlv_exports.insert(name.clone());
+            }
+            exports.insert(name);
         }
     }
 
@@ -1167,13 +1178,16 @@ pub fn parse_dylib_binary<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile
         match crate::filetype::get_file_type(dep) {
             crate::filetype::FileType::Tapi => {
                 let dep_tbd = tapi::parse(&ctx.diag, dep);
+                tlv_exports.extend(dep_tbd.tlv_exports.iter().cloned());
+                exports.extend(dep_tbd.tlv_exports);
                 exports.extend(dep_tbd.exports);
                 exports.extend(dep_tbd.weak_exports);
                 queue.extend(dep_tbd.external_reexports);
             }
             crate::filetype::FileType::Dylib => {
-                let (dep_exports, dep_reexports) = dylib_binary_exports(&ctx.diag, dep);
+                let (dep_exports, dep_tlvs, dep_reexports) = dylib_binary_exports(&ctx.diag, dep);
                 exports.extend(dep_exports);
+                tlv_exports.extend(dep_tlvs);
                 queue.extend(dep_reexports);
             }
             _ => crate::warn!(ctx, "{}: unsupported reexported library: {}", mf.name, name),
@@ -1195,8 +1209,33 @@ pub fn parse_dylib_binary<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile
             is_needed: false,
             is_dead_strippable: hdr.flags & MH_DEAD_STRIPPABLE_DYLIB != 0,
             exports,
+            tlv_exports,
         },
     )
+}
+
+/// Returns the 1-based ordinals of S_THREAD_LOCAL_VARIABLES sections.
+fn thread_local_section_ordinals(data: &[u8], hdr: &MachHeader) -> Vec<u8> {
+    let mut ordinals = Vec::new();
+    let mut ordinal = 0u8;
+    let mut off = size_of::<MachHeader>();
+    for _ in 0..hdr.ncmds {
+        let lc = LoadCommand::read_from(&data[off..]);
+        if lc.cmd == LC_SEGMENT_64 {
+            let seg = SegmentCommand::read_from(&data[off..]);
+            for i in 0..seg.nsects as usize {
+                let sect = MachSection::read_from(
+                    &data[off + size_of::<SegmentCommand>() + i * size_of::<MachSection>()..],
+                );
+                ordinal += 1;
+                if sect.flags & SECTION_TYPE == S_THREAD_LOCAL_VARIABLES {
+                    ordinals.push(ordinal);
+                }
+            }
+        }
+        off += lc.cmdsize as usize;
+    }
+    ordinals
 }
 
 /// Reads a dylib binary's exported symbols and reexported install
@@ -1204,7 +1243,7 @@ pub fn parse_dylib_binary<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile
 fn dylib_binary_exports(
     _diag: &crate::error::Diagnostics,
     mf: &'static MappedFile,
-) -> (Vec<String>, Vec<String>) {
+) -> (Vec<String>, Vec<String>, Vec<String>) {
     let data = mf.data;
     let hdr = MachHeader::read_from(data);
     let mut symtab_cmd = None;
@@ -1229,18 +1268,24 @@ fn dylib_binary_exports(
     }
 
     let mut exports = Vec::new();
+    let mut tlv_exports = Vec::new();
     if let (Some(sym), Some(dysym)) = (symtab_cmd, dysymtab_cmd) {
         let nlists: Vec<NList> = read_array(data, sym.symoff as usize, sym.nsyms as usize);
         let strtab = &data[sym.stroff as usize..(sym.stroff + sym.strsize) as usize];
         // SAFETY: input files are leaked, so the string table lives for
         // the rest of the process.
         let strtab: &'static [u8] = unsafe { std::mem::transmute(strtab) };
+        let tlv_sects = thread_local_section_ordinals(data, &hdr);
         let range = dysym.iextdefsym as usize..(dysym.iextdefsym + dysym.nextdefsym) as usize;
         for nlist in &nlists[range] {
-            exports.push(symbol_name(strtab, nlist).to_string());
+            let name = symbol_name(strtab, nlist).to_string();
+            if tlv_sects.contains(&nlist.n_sect) {
+                tlv_exports.push(name.clone());
+            }
+            exports.push(name);
         }
     }
-    (exports, reexports)
+    (exports, tlv_exports, reexports)
 }
 
 /// Locates the stub or binary for a reexported library's install name
@@ -1278,6 +1323,9 @@ pub fn parse_dylib<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile) -> us
     let mut exports: std::collections::HashSet<String> =
         tbd.exports.into_iter().collect();
     exports.extend(tbd.weak_exports);
+    let mut tlv_exports: std::collections::HashSet<String> =
+        tbd.tlv_exports.into_iter().collect();
+    exports.extend(tlv_exports.iter().cloned());
 
     // A dylib's reexported libraries resolve through it in the two-level
     // namespace, so their exports count as this dylib's. Reexports not
@@ -1296,6 +1344,8 @@ pub fn parse_dylib<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile) -> us
         let dep_tbd = tapi::parse(&ctx.diag, dep);
         exports.extend(dep_tbd.exports);
         exports.extend(dep_tbd.weak_exports);
+        tlv_exports.extend(dep_tbd.tlv_exports.iter().cloned());
+        exports.extend(dep_tbd.tlv_exports);
         queue.extend(dep_tbd.external_reexports);
     }
 
@@ -1313,6 +1363,7 @@ pub fn parse_dylib<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile) -> us
             is_needed: false,
             is_dead_strippable: false,
             exports,
+            tlv_exports,
         },
     )
 }

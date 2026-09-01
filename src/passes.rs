@@ -1119,6 +1119,20 @@ pub fn scan_relocs<E: Arch>(ctx: &mut Context<E>) {
 
     for (id, class) in classes {
         let sym = &ctx.symtab[id];
+
+        // Thread-locals live behind __thread_vars descriptors, so the
+        // reference kind must agree with the symbol: a TLV load of
+        // ordinary data would treat the variable's bytes as a
+        // descriptor, and an ordinary load of a TLV would read the
+        // descriptor as data. ld64 rejects both directions.
+        if is_thread_local_sym(ctx, id) != matches!(class, RelocClass::Tlv) {
+            fatal!(
+                ctx,
+                "illegal thread local variable reference to regular symbol `{}`",
+                sym.name
+            );
+        }
+
         match class {
             RelocClass::Branch if sym.is_imported => {
                 // A stub jumps through the symbol's GOT slot.
@@ -1129,6 +1143,22 @@ pub fn scan_relocs<E: Arch>(ctx: &mut Context<E>) {
             RelocClass::Tlv => add_thread_ptr(ctx, id),
             _ => {}
         }
+    }
+}
+
+/// True if the symbol resolves to a TLV descriptor: a definition in a
+/// S_THREAD_LOCAL_VARIABLES section, or a dylib export listed as
+/// thread-local. Symbols left to runtime lookup pass as either.
+fn is_thread_local_sym<E: Arch>(ctx: &Context<E>, id: crate::symbol::SymbolId) -> bool {
+    let sym = &ctx.symtab[id];
+    match sym.origin {
+        crate::symbol::Origin::Obj(_) => sym.isec.is_some_and(|isec| {
+            ctx.isecs[isec].hdr.flags & SECTION_TYPE == S_THREAD_LOCAL_VARIABLES
+        }),
+        crate::symbol::Origin::Dylib(idx) => {
+            idx != usize::MAX && ctx.dylibs[idx].tlv_exports.contains(sym.name)
+        }
+        _ => false,
     }
 }
 
