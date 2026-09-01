@@ -523,14 +523,16 @@ pub fn parse_dylib_binary<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile
     }
 
     let idx = ctx.dylibs.len();
-    ctx.dylibs.push(DylibFile {
-        install_name,
-        current_version,
-        compatibility_version,
-        dylib_idx: idx as i32 + 1,
-        exports,
-    });
-    idx
+    add_dylib(
+        ctx,
+        DylibFile {
+            install_name,
+            current_version,
+            compatibility_version,
+            dylib_idx: idx as i32 + 1,
+            exports,
+        },
+    )
 }
 
 /// Locates the stub or binary for a reexported library's install name
@@ -586,12 +588,31 @@ pub fn parse_dylib<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile) -> us
         queue.extend(dep_tbd.external_reexports);
     }
 
-    ctx.dylibs.push(DylibFile {
-        install_name: tbd.install_name,
-        current_version: tbd.current_version,
-        compatibility_version: encode_version(1, 0, 0),
-        dylib_idx: idx as i32 + 1,
-        exports,
-    });
-    idx
+    add_dylib(
+        ctx,
+        DylibFile {
+            install_name: tbd.install_name,
+            current_version: tbd.current_version,
+            compatibility_version: encode_version(1, 0, 0),
+            dylib_idx: idx as i32 + 1,
+            exports,
+        },
+    )
+}
+
+/// Registers a dylib, deduplicating by install name: several libraries
+/// (libc, libm, ...) are stubs for the same /usr/lib/libSystem.B.dylib,
+/// and dyld refuses an image that lists one install name twice.
+fn add_dylib<E: Arch>(ctx: &mut Context<E>, dylib: DylibFile) -> usize {
+    if let Some(idx) = ctx
+        .dylibs
+        .iter()
+        .position(|d| d.install_name == dylib.install_name)
+    {
+        let exports = dylib.exports;
+        ctx.dylibs[idx].exports.extend(exports);
+        return idx;
+    }
+    ctx.dylibs.push(dylib);
+    ctx.dylibs.len() - 1
 }
