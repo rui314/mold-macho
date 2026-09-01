@@ -73,6 +73,9 @@ pub struct DylibFile {
     /// True if loaded with LC_LOAD_WEAK_DYLIB: dyld tolerates the
     /// library missing at load time.
     pub is_weak: bool,
+    /// True if re-exported (LC_REEXPORT_DYLIB): this image's clients
+    /// resolve the library's exports through this image.
+    pub is_reexported: bool,
     pub exports: std::collections::HashSet<String>,
 }
 
@@ -1092,6 +1095,7 @@ pub fn parse_dylib_binary<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile
     let mut compatibility_version = encode_version(1, 0, 0);
     let mut symtab_cmd = None;
     let mut dysymtab_cmd = None;
+    let mut reexports: Vec<String> = Vec::new();
 
     let mut off = size_of::<MachHeader>();
     for _ in 0..hdr.ncmds {
@@ -1107,6 +1111,12 @@ pub fn parse_dylib_binary<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile
             }
             LC_SYMTAB => symtab_cmd = Some(SymtabCommand::read_from(&data[off..])),
             LC_DYSYMTAB => dysymtab_cmd = Some(DysymtabCommand::read_from(&data[off..])),
+            LC_REEXPORT_DYLIB => {
+                let cmd = DylibCommand::read_from(&data[off..]);
+                let name = &data[off + cmd.nameoff as usize..off + cmd.cmdsize as usize];
+                let len = name.iter().position(|&b| b == 0).unwrap_or(name.len());
+                reexports.push(String::from_utf8_lossy(&name[..len]).into_owned());
+            }
             _ => {}
         }
         off += lc.cmdsize as usize;
@@ -1129,6 +1139,34 @@ pub fn parse_dylib_binary<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile
         }
     }
 
+    // A dylib's clients see its reexported libraries' exports through
+    // it; merge them in, following the chain.
+    let mut queue = reexports;
+    let mut visited = std::collections::HashSet::new();
+    while let Some(name) = queue.pop() {
+        if !visited.insert(name.clone()) {
+            continue;
+        }
+        let Some(dep) = find_reexport_file(ctx, &name) else {
+            crate::warn!(ctx, "{}: reexported library not found: {}", mf.name, name);
+            continue;
+        };
+        match crate::filetype::get_file_type(dep) {
+            crate::filetype::FileType::Tapi => {
+                let dep_tbd = tapi::parse(&ctx.diag, dep);
+                exports.extend(dep_tbd.exports);
+                exports.extend(dep_tbd.weak_exports);
+                queue.extend(dep_tbd.external_reexports);
+            }
+            crate::filetype::FileType::Dylib => {
+                let (dep_exports, dep_reexports) = dylib_binary_exports(&ctx.diag, dep);
+                exports.extend(dep_exports);
+                queue.extend(dep_reexports);
+            }
+            _ => crate::warn!(ctx, "{}: unsupported reexported library: {}", mf.name, name),
+        }
+    }
+
     let idx = ctx.dylibs.len();
     let priority = ctx.next_priority();
     add_dylib(
@@ -1140,9 +1178,54 @@ pub fn parse_dylib_binary<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile
             dylib_idx: idx as i32 + 1,
             priority,
             is_weak: false,
+            is_reexported: false,
             exports,
         },
     )
+}
+
+/// Reads a dylib binary's exported symbols and reexported install
+/// names, for following reexport chains.
+fn dylib_binary_exports(
+    _diag: &crate::error::Diagnostics,
+    mf: &'static MappedFile,
+) -> (Vec<String>, Vec<String>) {
+    let data = mf.data;
+    let hdr = MachHeader::read_from(data);
+    let mut symtab_cmd = None;
+    let mut dysymtab_cmd = None;
+    let mut reexports = Vec::new();
+
+    let mut off = size_of::<MachHeader>();
+    for _ in 0..hdr.ncmds {
+        let lc = LoadCommand::read_from(&data[off..]);
+        match lc.cmd {
+            LC_SYMTAB => symtab_cmd = Some(SymtabCommand::read_from(&data[off..])),
+            LC_DYSYMTAB => dysymtab_cmd = Some(DysymtabCommand::read_from(&data[off..])),
+            LC_REEXPORT_DYLIB => {
+                let cmd = DylibCommand::read_from(&data[off..]);
+                let name = &data[off + cmd.nameoff as usize..off + cmd.cmdsize as usize];
+                let len = name.iter().position(|&b| b == 0).unwrap_or(name.len());
+                reexports.push(String::from_utf8_lossy(&name[..len]).into_owned());
+            }
+            _ => {}
+        }
+        off += lc.cmdsize as usize;
+    }
+
+    let mut exports = Vec::new();
+    if let (Some(sym), Some(dysym)) = (symtab_cmd, dysymtab_cmd) {
+        let nlists: Vec<NList> = read_array(data, sym.symoff as usize, sym.nsyms as usize);
+        let strtab = &data[sym.stroff as usize..(sym.stroff + sym.strsize) as usize];
+        // SAFETY: input files are leaked, so the string table lives for
+        // the rest of the process.
+        let strtab: &'static [u8] = unsafe { std::mem::transmute(strtab) };
+        let range = dysym.iextdefsym as usize..(dysym.iextdefsym + dysym.nextdefsym) as usize;
+        for nlist in &nlists[range] {
+            exports.push(symbol_name(strtab, nlist).to_string());
+        }
+    }
+    (exports, reexports)
 }
 
 /// Locates the stub or binary for a reexported library's install name
@@ -1151,14 +1234,17 @@ fn find_reexport_file<E: Arch>(
     ctx: &Context<E>,
     install_name: &str,
 ) -> Option<&'static MappedFile> {
-    let roots: Vec<String> = if ctx.args.syslibroot.is_empty() {
-        vec![String::new()]
-    } else {
-        ctx.args.syslibroot.clone()
-    };
+    // Try under each syslibroot, then the raw path: reexports between
+    // freshly built dylibs use absolute install names outside any SDK.
+    let mut roots: Vec<String> = ctx.args.syslibroot.clone();
+    roots.push(String::new());
 
     for root in &roots {
-        let base = std::path::Path::new(root).join(install_name.trim_start_matches('/'));
+        let base = if root.is_empty() {
+            std::path::PathBuf::from(install_name)
+        } else {
+            std::path::Path::new(root).join(install_name.trim_start_matches('/'))
+        };
         let mut candidates = vec![base.with_extension("tbd")];
         candidates.push(std::path::PathBuf::from(format!("{}.tbd", base.display())));
         candidates.push(base);
@@ -1208,6 +1294,7 @@ pub fn parse_dylib<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile) -> us
             dylib_idx: idx as i32 + 1,
             priority,
             is_weak: false,
+            is_reexported: false,
             exports,
         },
     )

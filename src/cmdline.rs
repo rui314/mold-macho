@@ -23,6 +23,10 @@ pub enum InputArg {
     /// `-weak_library path`: a dylib whose absence is tolerated at load
     /// time.
     WeakFile(String),
+    /// `-reexport-lfoo` / `-reexport_library path`: a dylib whose
+    /// exports this dylib re-exports as its own.
+    ReexportLib(String),
+    ReexportFile(String),
 }
 
 /// Parsed command line arguments.
@@ -264,6 +268,12 @@ pub fn parse_args(diag: &Diagnostics, cmdline: &[String]) -> Args {
             "-weak_library" => args
                 .inputs
                 .push(InputArg::WeakFile(next_arg(&mut i).to_string())),
+            "-reexport_library" => args
+                .inputs
+                .push(InputArg::ReexportFile(next_arg(&mut i).to_string())),
+            "-sub_library" => args
+                .inputs
+                .push(InputArg::ReexportLib(next_arg(&mut i).to_string())),
             "-filelist" => {
                 // A file listing one input path per line, optionally
                 // with a directory prefix after a comma.
@@ -401,7 +411,9 @@ pub fn parse_args(diag: &Diagnostics, cmdline: &[String]) -> Args {
             }
 
             _ => {
-                if let Some(name) = opt.strip_prefix("-weak-l") {
+                if let Some(name) = opt.strip_prefix("-reexport-l") {
+                    args.inputs.push(InputArg::ReexportLib(name.to_string()));
+                } else if let Some(name) = opt.strip_prefix("-weak-l") {
                     args.inputs.push(InputArg::Lib(name.to_string(), true));
                 } else if let Some(name) = opt.strip_prefix("-l") {
                     args.inputs.push(InputArg::Lib(name.to_string(), false));

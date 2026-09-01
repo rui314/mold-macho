@@ -123,6 +123,7 @@ fn collect_file<E: Arch>(
     mf: &'static MappedFile,
     force_load: bool,
     weak: bool,
+    reexport: bool,
     out: &mut Vec<PendingObject>,
 ) {
     // A library may be named both on the command line and by auto-link
@@ -141,15 +142,13 @@ fn collect_file<E: Arch>(
         }
         FileType::Tapi => {
             let idx = input_files::parse_dylib(ctx, mf);
-            if weak {
-                ctx.dylibs[idx].is_weak = true;
-            }
+            ctx.dylibs[idx].is_weak |= weak;
+            ctx.dylibs[idx].is_reexported |= reexport;
         }
         FileType::Dylib => {
             let idx = input_files::parse_dylib_binary(ctx, mf);
-            if weak {
-                ctx.dylibs[idx].is_weak = true;
-            }
+            ctx.dylibs[idx].is_weak |= weak;
+            ctx.dylibs[idx].is_reexported |= reexport;
         }
         FileType::Archive => {
             // Every member is parsed eagerly; whether it is *live* -
@@ -180,7 +179,7 @@ fn collect_file<E: Arch>(
         }
         FileType::Fat => {
             let slice = input_files::get_fat_slice(ctx, mf);
-            collect_file(ctx, slice, force_load, weak, out);
+            collect_file(ctx, slice, force_load, weak, reexport, out);
         }
         FileType::LlvmBitcode => {
             input_files::parse_bitcode(ctx, mf, true);
@@ -211,27 +210,38 @@ pub fn read_input_files<E: Arch>(ctx: &mut Context<E>) {
         match arg {
             InputArg::File(path) => {
                 let mf = MappedFile::must_open(&ctx.diag, Path::new(path));
-                collect_file(ctx, mf, false, false, &mut queue);
+                collect_file(ctx, mf, false, false, false, &mut queue);
             }
             InputArg::ForceLoad(path) => {
                 let mf = MappedFile::must_open(&ctx.diag, Path::new(path));
-                collect_file(ctx, mf, true, false, &mut queue);
+                collect_file(ctx, mf, true, false, false, &mut queue);
             }
             InputArg::WeakFile(path) => {
                 let mf = MappedFile::must_open(&ctx.diag, Path::new(path));
-                collect_file(ctx, mf, false, true, &mut queue);
+                collect_file(ctx, mf, false, true, false, &mut queue);
             }
+            InputArg::ReexportFile(path) => {
+                let mf = MappedFile::must_open(&ctx.diag, Path::new(path));
+                collect_file(ctx, mf, false, false, true, &mut queue);
+            }
+            InputArg::ReexportLib(name) => match find_library(ctx, name) {
+                Some(path) => {
+                    let mf = MappedFile::must_open(&ctx.diag, &path);
+                    collect_file(ctx, mf, false, false, true, &mut queue);
+                }
+                None => error!(ctx, "library not found: -reexport-l{name}"),
+            },
             InputArg::Lib(name, weak) => match find_library(ctx, name) {
                 Some(path) => {
                     let mf = MappedFile::must_open(&ctx.diag, &path);
-                    collect_file(ctx, mf, false, *weak, &mut queue);
+                    collect_file(ctx, mf, false, *weak, false, &mut queue);
                 }
                 None => error!(ctx, "library not found: -l{name}"),
             },
             InputArg::Framework(name, weak) => match find_framework(ctx, name) {
                 Some(path) => {
                     let mf = MappedFile::must_open(&ctx.diag, &path);
-                    collect_file(ctx, mf, false, *weak, &mut queue);
+                    collect_file(ctx, mf, false, *weak, false, &mut queue);
                 }
                 None => error!(ctx, "framework not found: {name}"),
             },
@@ -269,7 +279,7 @@ pub fn load_autolink_deps<E: Arch>(ctx: &mut Context<E>) -> bool {
                 match find_library(ctx, name) {
                     Some(path) => {
                         if let Some(mf) = MappedFile::open(&ctx.diag, &path) {
-                            collect_file(ctx, mf, false, false, &mut queue);
+                            collect_file(ctx, mf, false, false, false, &mut queue);
                         }
                     }
                     None => crate::warn!(ctx, "auto-linked library not found: -l{name}"),
@@ -278,7 +288,7 @@ pub fn load_autolink_deps<E: Arch>(ctx: &mut Context<E>) -> bool {
             ["-framework", name] => match find_framework(ctx, name) {
                 Some(path) => {
                     if let Some(mf) = MappedFile::open(&ctx.diag, &path) {
-                        collect_file(ctx, mf, false, false, &mut queue);
+                        collect_file(ctx, mf, false, false, false, &mut queue);
                     }
                 }
                 None => crate::warn!(ctx, "auto-linked framework not found: {name}"),

@@ -368,7 +368,9 @@ fn create_source_version_cmd<E: Arch>(_ctx: &Context<E>) -> Vec<u8> {
 
 fn create_load_dylib_cmd(dylib: &crate::input_files::DylibFile) -> Vec<u8> {
     let cmd = DylibCommand {
-        cmd: if dylib.is_weak {
+        cmd: if dylib.is_reexported {
+            LC_REEXPORT_DYLIB
+        } else if dylib.is_weak {
             LC_LOAD_WEAK_DYLIB
         } else {
             LC_LOAD_DYLIB
@@ -544,7 +546,9 @@ pub fn copy_mach_header<E: Arch>(ctx: &Context<E>, buf: &mut [u8]) {
     let mut hdr = hdr;
     match ctx.args.output_type {
         MH_EXECUTE => hdr.flags |= MH_PIE,
-        MH_DYLIB => hdr.flags |= MH_NO_REEXPORTED_DYLIBS,
+        MH_DYLIB if !ctx.dylibs.iter().any(|d| d.is_reexported) => {
+            hdr.flags |= MH_NO_REEXPORTED_DYLIBS
+        }
         _ => {}
     }
     if ctx.symtab.syms.iter().any(|sym| {
