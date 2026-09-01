@@ -49,6 +49,11 @@ pub struct Args {
     /// Symbols to treat as undefined from the start (-u), forcing
     /// archive members that define them to be linked.
     pub forced_undefined: Vec<String>,
+    /// If set, only these symbols are exported (-exported_symbols_list
+    /// or -exported_symbol).
+    pub exported_symbols: Option<Vec<String>>,
+    /// Symbols to remove from the exported set.
+    pub unexported_symbols: Vec<String>,
 
     pub dynamic: bool,
     pub headerpad: u64,
@@ -76,6 +81,8 @@ impl Default for Args {
             all_load: false,
             load_objc: false,
             forced_undefined: Vec::new(),
+            exported_symbols: None,
+            unexported_symbols: Vec::new(),
             dynamic: true,
             headerpad: 0x100,
             pagezero_size: 0x1_0000_0000,
@@ -104,6 +111,16 @@ fn parse_platform(diag: &Diagnostics, arg: &str) -> u32 {
         "macos" | "macosx" => PLATFORM_MACOS,
         _ => fatal!(diag, "unsupported platform: {arg}"),
     }
+}
+
+/// Parses a symbol list file: one symbol per line, '#' starts a
+/// comment.
+fn symbol_list(text: &str) -> Vec<String> {
+    text.lines()
+        .map(|line| line.split('#').next().unwrap_or("").trim())
+        .filter(|line| !line.is_empty())
+        .map(String::from)
+        .collect()
 }
 
 pub fn parse_args(diag: &Diagnostics, cmdline: &[String]) -> Args {
@@ -168,6 +185,28 @@ pub fn parse_args(diag: &Diagnostics, cmdline: &[String]) -> Args {
             "-rpath" => args.rpaths.push(next_arg(&mut i).to_string()),
             "-install_name" | "-dylib_install_name" => {
                 args.install_name = Some(next_arg(&mut i).to_string())
+            }
+            "-exported_symbol" => args
+                .exported_symbols
+                .get_or_insert_with(Vec::new)
+                .push(next_arg(&mut i).to_string()),
+            "-exported_symbols_list" => {
+                let path = next_arg(&mut i).to_string();
+                let list = args.exported_symbols.get_or_insert_with(Vec::new);
+                match std::fs::read_to_string(&path) {
+                    Ok(text) => list.extend(symbol_list(&text)),
+                    Err(_) => fatal!(diag, "cannot read -exported_symbols_list: {path}"),
+                }
+            }
+            "-unexported_symbol" => args
+                .unexported_symbols
+                .push(next_arg(&mut i).to_string()),
+            "-unexported_symbols_list" => {
+                let path = next_arg(&mut i).to_string();
+                match std::fs::read_to_string(&path) {
+                    Ok(text) => args.unexported_symbols.extend(symbol_list(&text)),
+                    Err(_) => fatal!(diag, "cannot read -unexported_symbols_list: {path}"),
+                }
             }
             "-adhoc_codesign" => args.adhoc_codesign = true,
             "-no_adhoc_codesign" => args.adhoc_codesign = false,

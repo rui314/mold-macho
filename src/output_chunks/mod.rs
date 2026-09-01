@@ -617,6 +617,14 @@ pub fn encode_export_trie<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
         {
             continue;
         }
+        if let Some(exported) = &ctx.args.exported_symbols {
+            if !exported.iter().any(|pat| pat == sym.name) {
+                continue;
+            }
+        }
+        if ctx.args.unexported_symbols.iter().any(|pat| pat == sym.name) {
+            continue;
+        }
         let flags = if sym.is_weak_def {
             EXPORT_SYMBOL_FLAGS_WEAK_DEFINITION
         } else {
