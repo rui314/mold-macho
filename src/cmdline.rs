@@ -262,8 +262,20 @@ pub fn parse_args(diag: &Diagnostics, cmdline: &[String]) -> Args {
                 .inputs
                 .push(InputArg::ForceLoad(next_arg(&mut i).to_string())),
 
-            // Ignored options
-            "-demangle" | "-no_deduplicate" | "-no_uuid" => {}
+            // The default library search behavior already matches
+            // -search_paths_first: each path is tried for both a dylib
+            // and an archive before moving to the next.
+            "-search_paths_first" => {}
+
+            // Reserve enough header padding that install_name_tool can
+            // grow install names in place.
+            "-headerpad_max_install_names" => {
+                args.headerpad = args.headerpad.max(1024);
+            }
+
+            // Ignored options. ld64 takes -O<n> as a linker
+            // optimization level hint.
+            "-demangle" | "-no_deduplicate" | "-no_uuid" | "-O0" | "-O1" | "-O2" | "-O3" => {}
 
             "-lto_library" => args.lto_library = Some(next_arg(&mut i).to_string()),
 
