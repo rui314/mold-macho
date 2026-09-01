@@ -135,6 +135,9 @@ pub struct Args {
     /// -umbrella: declare this dylib a subframework of the named
     /// umbrella framework (LC_SUB_FRAMEWORK).
     pub umbrella: Option<String>,
+    /// -oso_prefix: prefix to strip from N_OSO stab paths ("."  means
+    /// the current directory).
+    pub oso_prefix: Option<String>,
     pub pagezero_size: u64,
 }
 
@@ -191,6 +194,7 @@ impl Default for Args {
             headerpad: 0x100,
             search_dylibs_first: false,
             umbrella: None,
+            oso_prefix: None,
             pagezero_size: 0x1_0000_0000,
         }
     }
@@ -451,6 +455,7 @@ pub fn parse_args(diag: &Diagnostics, cmdline: &[String]) -> Args {
             "-search_paths_first" => args.search_dylibs_first = false,
             "-search_dylibs_first" => args.search_dylibs_first = true,
             "-umbrella" => args.umbrella = Some(next_arg(&mut i).to_string()),
+            "-oso_prefix" => args.oso_prefix = Some(next_arg(&mut i).to_string()),
 
             // Reserve enough header padding that install_name_tool can
             // grow install names in place.

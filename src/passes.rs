@@ -1714,11 +1714,21 @@ pub fn compute_symtab<E: Arch>(ctx: &mut Context<E>) {
                 },
                 None,
             ));
-            let oso_name = match obj.mf.parent {
+            let mut oso_name = match obj.mf.parent {
                 Some(parent) if parent.name.starts_with('/') => obj.mf.name.clone(),
                 Some(_) | None if obj.mf.name.starts_with('/') => obj.mf.name.clone(),
                 _ => format!("{cwd}/{}", obj.mf.name),
             };
+            // -oso_prefix strips a leading path from every N_OSO, so
+            // debug builds relocated to another machine (or built in a
+            // sandbox) can still find their objects relative to a
+            // debugger's source map. "." means the current directory.
+            if let Some(prefix) = &ctx.args.oso_prefix {
+                let prefix: &str = if prefix == "." { &format!("{cwd}/") } else { prefix };
+                if let Some(rest) = oso_name.strip_prefix(prefix) {
+                    oso_name = rest.to_string();
+                }
+            }
             data.entries.push((
                 NList {
                     n_strx: add_string(&mut data.strtab, &oso_name),
