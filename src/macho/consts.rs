@@ -21,6 +21,8 @@ pub const MH_BUNDLE: u32 = 8;
 
 // Mach header flags
 pub const MH_NOUNDEFS: u32 = 0x1;
+pub const MH_BINDATLOAD: u32 = 0x8;
+pub const MH_APP_EXTENSION_SAFE: u32 = 0x0200_0000;
 pub const MH_DYLDLINK: u32 = 0x4;
 pub const MH_TWOLEVEL: u32 = 0x80;
 pub const MH_PIE: u32 = 0x20_0000;
@@ -103,6 +105,7 @@ pub const N_INDR: u8 = 0xa;
 
 // Stab symbol types, for debug entries in the symbol table
 pub const N_GSYM: u8 = 0x20;
+pub const N_AST: u8 = 0x32;
 pub const N_FUN: u8 = 0x24;
 pub const N_STSYM: u8 = 0x26;
 pub const N_SO: u8 = 0x64;

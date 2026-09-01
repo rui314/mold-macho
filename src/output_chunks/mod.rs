@@ -539,6 +539,12 @@ pub fn copy_mach_header<E: Arch>(ctx: &Context<E>, buf: &mut [u8]) {
     }) {
         hdr.flags |= MH_WEAK_DEFINES;
     }
+    if ctx.args.bind_at_load {
+        hdr.flags |= MH_BINDATLOAD;
+    }
+    if ctx.args.application_extension {
+        hdr.flags |= MH_APP_EXTENSION_SAFE;
+    }
     if ctx
         .chunks
         .iter()
