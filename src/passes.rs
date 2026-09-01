@@ -760,7 +760,10 @@ pub fn convert_common_symbols<E: Arch>(ctx: &mut Context<E>) {
 /// __TEXT,__init_offsets section (type S_INIT_FUNC_OFFSETS), which
 /// dyld runs the same way but never has to fix up.
 pub fn convert_init_offsets<E: Arch>(ctx: &mut Context<E>) {
-    if !ctx.args.init_offsets {
+    // ld64 turns this on implicitly with chained fixups: the point of
+    // chains is a fixup-free __DATA_CONST, and absolute initializer
+    // pointers would drag rebases back in.
+    if !ctx.args.init_offsets && !ctx.use_chained_fixups() {
         return;
     }
     for i in 0..ctx.isecs.len() {
