@@ -83,6 +83,9 @@ pub struct Args {
     /// -sectcreate: sections to synthesize from files:
     /// (segment, section, path).
     pub sectcreate: Vec<(String, String, String)>,
+    /// -Z: do not search the standard library and framework
+    /// directories.
+    pub no_standard_dirs: bool,
     /// -x: strip non-global symbols from the output symbol table.
     pub strip_locals: bool,
     /// Fold identical functions (on by default; -no_deduplicate turns
@@ -153,6 +156,7 @@ impl Default for Args {
             lto_library: None,
             stack_size: 0,
             sectcreate: Vec::new(),
+            no_standard_dirs: false,
             strip_locals: false,
             deduplicate: true,
             function_starts: true,
@@ -342,6 +346,7 @@ pub fn parse_args(diag: &Diagnostics, cmdline: &[String]) -> Args {
                 args.sectcreate.push((seg, sect, file));
             }
             "-x" => args.strip_locals = true,
+            "-Z" => args.no_standard_dirs = true,
             "-undefined" => match next_arg(&mut i) {
                 "error" => args.undefined_dynamic_lookup = false,
                 "dynamic_lookup" => args.undefined_dynamic_lookup = true,

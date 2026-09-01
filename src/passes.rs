@@ -40,11 +40,13 @@ fn library_search_dirs<E: Arch>(ctx: &Context<E>) -> Vec<PathBuf> {
         }
     }
 
-    if ctx.args.syslibroot.is_empty() {
-        dirs.push(PathBuf::from("/usr/lib"));
-    } else {
-        for root in &ctx.args.syslibroot {
-            dirs.push(Path::new(root).join("usr/lib"));
+    if !ctx.args.no_standard_dirs {
+        if ctx.args.syslibroot.is_empty() {
+            dirs.push(PathBuf::from("/usr/lib"));
+        } else {
+            for root in &ctx.args.syslibroot {
+                dirs.push(Path::new(root).join("usr/lib"));
+            }
         }
     }
     dirs
@@ -69,13 +71,15 @@ fn framework_search_dirs<E: Arch>(ctx: &Context<E>) -> Vec<PathBuf> {
         }
     }
 
-    if ctx.args.syslibroot.is_empty() {
-        dirs.push(PathBuf::from("/System/Library/Frameworks"));
-        dirs.push(PathBuf::from("/Library/Frameworks"));
-    } else {
-        for root in &ctx.args.syslibroot {
-            dirs.push(Path::new(root).join("System/Library/Frameworks"));
-            dirs.push(Path::new(root).join("Library/Frameworks"));
+    if !ctx.args.no_standard_dirs {
+        if ctx.args.syslibroot.is_empty() {
+            dirs.push(PathBuf::from("/System/Library/Frameworks"));
+            dirs.push(PathBuf::from("/Library/Frameworks"));
+        } else {
+            for root in &ctx.args.syslibroot {
+                dirs.push(Path::new(root).join("System/Library/Frameworks"));
+                dirs.push(Path::new(root).join("Library/Frameworks"));
+            }
         }
     }
     dirs
