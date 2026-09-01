@@ -121,6 +121,30 @@ pub fn print_map<E: Arch>(ctx: &Context<E>) {
     let mut order: Vec<usize> = (0..syms.len()).collect();
     order.sort_by_key(|&i| (syms[i].0, syms[i].1));
 
+    // Symbols removed by -dead_strip appear in their own section
+    // with "<<dead>>" in the address column, the way ld64 reports
+    // them; sizes are the atom extents they would have had.
+    let mut dead: Vec<(usize, u64, usize, &str)> = Vec::new();
+    if ctx.args.dead_strip {
+        for i in 0..ctx.symtab.syms.len() {
+            let sym = &ctx.symtab[i];
+            let Origin::Obj(obj) = sym.origin else {
+                continue;
+            };
+            let Some(isec) = sym.isec else { continue };
+            let isec = ctx.resolve_isec(isec);
+            if ctx.isecs[isec].is_alive
+                || !ctx.objs[obj].is_alive
+                || sym.name.is_empty()
+                || (!sym.is_extern && (sym.name.starts_with('l') || sym.name.starts_with('L')))
+            {
+                continue;
+            }
+            dead.push((file_no[obj], sym.value, isec, sym.name));
+        }
+        dead.sort();
+    }
+
     let _ = writeln!(out, "# Symbols:");
     let _ = writeln!(out, "# Address\tSize    \tFile  Name");
     if ctx.args.output_type == crate::macho::MH_EXECUTE {
@@ -129,5 +153,21 @@ pub fn print_map<E: Arch>(ctx: &Context<E>) {
     for idx in order {
         let (addr, file, name, _, _) = syms[idx];
         let _ = writeln!(out, "0x{addr:08X}\t0x{:08X}\t[{file:3}] {name}", sizes[idx]);
+    }
+
+    if !dead.is_empty() {
+        let _ = writeln!(out, "# Dead Stripped Symbols:");
+        let _ = writeln!(out, "#        \tSize    \tFile  Name");
+        for (i, &(file, value, isec, name)) in dead.iter().enumerate() {
+            let end = match dead.get(i + 1) {
+                Some(&(_, next_value, next_isec, _)) if next_isec == isec => next_value,
+                _ => ctx.isecs[isec].size,
+            };
+            let _ = writeln!(
+                out,
+                "<<dead>> \t0x{:08X}\t[{file:3}] {name}",
+                end.saturating_sub(value)
+            );
+        }
     }
 }
