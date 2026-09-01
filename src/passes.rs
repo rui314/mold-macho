@@ -1043,6 +1043,19 @@ pub fn compute_symtab<E: Arch>(ctx: &mut Context<E>) {
         off
     };
 
+    // Swift AST paths for the debugger (-add_ast_path), as N_AST stabs.
+    for path in &ctx.args.add_ast_paths {
+        let n_strx = add_string(&mut data.strtab, path);
+        data.entries.push((
+            NList {
+                n_strx,
+                n_type: N_AST,
+                ..Default::default()
+            },
+            None,
+        ));
+    }
+
     // Debug stabs. Mach-O binaries don't carry DWARF; instead, for each
     // object with debug info the symbol table gets stab entries telling
     // the debugger where the object file is (N_OSO) and where its
