@@ -78,7 +78,7 @@ fn read_lists(doc: &str, key: &str, out: &mut Vec<String>, prefix: &str) {
     }
 }
 
-fn parse_version(val: &str) -> u32 {
+pub fn parse_version(val: &str) -> u32 {
     let mut nums = val.split('.').map(|s| s.parse().unwrap_or(0));
     let major = nums.next().unwrap_or(1);
     let minor = nums.next().unwrap_or(0);

@@ -1217,7 +1217,8 @@ pub fn parse_dylib_binary<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile
         };
         match crate::filetype::get_file_type(dep) {
             crate::filetype::FileType::Tapi => {
-                let dep_tbd = tapi::parse(&ctx.diag, dep);
+                let mut dep_tbd = tapi::parse(&ctx.diag, dep);
+                interpret_ld_symbols(ctx, &mut dep_tbd);
                 tlv_exports.extend(dep_tbd.tlv_exports.iter().cloned());
                 exports.extend(dep_tbd.tlv_exports);
                 exports.extend(dep_tbd.exports);
@@ -1414,8 +1415,68 @@ fn find_reexport_file<E: Arch>(
     None
 }
 
+/// Interprets a .tbd's "$ld$..." export names. These are not symbols
+/// but directives to the linker, invented so a stub library could
+/// change shape per deployment target without a file format change:
+/// $ld$add$os<ver>$<sym> exports <sym> only when the target equals
+/// <ver>, $ld$hide$os<ver>$<sym> hides one, $ld$install_name$os<ver>$
+/// <name> substitutes the recorded install name, and
+/// $ld$previous$<name>$<compat>$<platform>$<lo>$<hi>$<sym>$ applies
+/// <name> when the target platform matches and lo <= minos < hi
+/// (the per-symbol form never worked in ld64 and is ignored, as sold
+/// found). Apple uses these when a symbol moves between libraries:
+/// old targets keep binding it where it used to live.
+fn interpret_ld_symbols<E: Arch>(ctx: &Context<E>, tbd: &mut tapi::TbdFile) {
+    let minos = ctx.args.platform_minos;
+    let mut added: Vec<String> = Vec::new();
+    let mut hidden: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut install_name: Option<String> = None;
+
+    for name in &tbd.exports {
+        if let Some(rest) = name.strip_prefix("$ld$previous$") {
+            let f: Vec<&str> = rest.split('$').collect();
+            if f.len() < 6 {
+                crate::warn!(ctx, "malformed linker directive: {name}");
+            } else if f[5].is_empty()
+                && f[2].parse::<u32>() == Ok(ctx.args.platform)
+                && tapi::parse_version(f[3]) <= minos
+                && minos < tapi::parse_version(f[4])
+            {
+                install_name = Some(f[0].to_string());
+            }
+        } else if let Some(rest) = name.strip_prefix("$ld$add$os") {
+            if let Some((ver, sym)) = rest.split_once('$') {
+                if tapi::parse_version(ver) == minos {
+                    added.push(sym.to_string());
+                }
+            }
+        } else if let Some(rest) = name.strip_prefix("$ld$hide$os") {
+            if let Some((ver, sym)) = rest.split_once('$') {
+                if tapi::parse_version(ver) == minos {
+                    hidden.insert(sym.to_string());
+                }
+            }
+        } else if let Some(rest) = name.strip_prefix("$ld$install_name$os") {
+            if let Some((ver, new_name)) = rest.split_once('$') {
+                if tapi::parse_version(ver) == minos {
+                    install_name = Some(new_name.to_string());
+                }
+            }
+        }
+    }
+
+    tbd.exports
+        .retain(|n| !n.starts_with("$ld$") && !hidden.contains(n));
+    tbd.weak_exports.retain(|n| !hidden.contains(n));
+    tbd.exports.extend(added);
+    if let Some(name) = install_name {
+        tbd.install_name = name;
+    }
+}
+
 pub fn parse_dylib<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile) -> usize {
-    let tbd = tapi::parse(&ctx.diag, mf);
+    let mut tbd = tapi::parse(&ctx.diag, mf);
+    interpret_ld_symbols(ctx, &mut tbd);
     let idx = ctx.dylibs.len();
     let mut exports: std::collections::HashSet<String> =
         tbd.exports.into_iter().collect();
@@ -1442,7 +1503,8 @@ pub fn parse_dylib<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile) -> us
             crate::warn!(ctx, "{}: reexported library not found: {}", mf.name, name);
             continue;
         };
-        let dep_tbd = tapi::parse(&ctx.diag, dep);
+        let mut dep_tbd = tapi::parse(&ctx.diag, dep);
+        interpret_ld_symbols(ctx, &mut dep_tbd);
         exports.extend(dep_tbd.exports);
         exports.extend(dep_tbd.weak_exports);
         tlv_exports.extend(dep_tbd.tlv_exports.iter().cloned());
