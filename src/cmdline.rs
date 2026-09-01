@@ -153,6 +153,9 @@ pub struct Args {
     /// install names stands for at link time (defaults to the output
     /// path when linking an executable).
     pub executable_path: Option<String>,
+    /// -object_path_lto: keep the LTO-compiled object at this path for
+    /// the debugger.
+    pub object_path_lto: Option<String>,
     pub pagezero_size: u64,
     /// True when -pagezero_size was given explicitly (it is an error
     /// anywhere but a main executable).
@@ -218,6 +221,7 @@ impl Default for Args {
             export_dynamic: false,
             order_files: Vec::new(),
             executable_path: None,
+            object_path_lto: None,
             pagezero_size: 0x1_0000_0000,
             explicit_pagezero: false,
         }
@@ -525,7 +529,12 @@ pub fn parse_args(diag: &Diagnostics, cmdline: &[String]) -> Args {
             }
 
             // Ignored options with an argument
-            "-mllvm" | "-object_path_lto" => {
+            "-object_path_lto" => {
+                args.object_path_lto = Some(next_arg(&mut i).to_string())
+            }
+
+            // Ignored options with an argument
+            "-mllvm" => {
                 next_arg(&mut i);
             }
 

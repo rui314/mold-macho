@@ -704,6 +704,17 @@ pub fn run_lto<E: Arch>(ctx: &mut Context<E>) -> bool {
         std::slice::from_raw_parts(ptr as *const u8, size).to_vec()
     };
 
+    // -object_path_lto keeps the machine-code object LTO produced.
+    // Debug info stays in object files on Mach-O (the executable only
+    // gets stabs pointing at them), and for LTO code that object
+    // exists only inside the linker - Xcode passes a path under the
+    // dSYM staging directory so dsymutil can find it afterwards.
+    if let Some(path) = &ctx.args.object_path_lto {
+        if std::fs::write(path, &data).is_err() {
+            fatal!(ctx, "-object_path_lto: cannot write {path}");
+        }
+    }
+
     // Retire the placeholders: the compiled object provides the real
     // definitions, so they must neither claim nor reference anything in
     // the next resolution round.
