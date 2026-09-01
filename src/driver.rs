@@ -2,6 +2,7 @@
 
 use crate::arch::Arch;
 use crate::cmdline;
+use crate::dead_strip;
 use crate::context::Context;
 use crate::error::Diagnostics;
 use crate::output_file;
@@ -122,7 +123,7 @@ pub fn link<E: Arch>(cmdline: &[String], diag: &Diagnostics) -> Result<i32, Stri
     passes::dead_strip_dylibs(&mut ctx);
     ctx.diag.checkpoint();
     if ctx.args.dead_strip {
-        passes::dead_strip(&mut ctx);
+        dead_strip::dead_strip(&mut ctx);
     }
     if ctx.args.deduplicate {
         crate::icf::fold_identical_code(&mut ctx);

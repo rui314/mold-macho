@@ -3,6 +3,7 @@
 pub mod arch;
 pub mod cmdline;
 pub mod context;
+pub mod dead_strip;
 pub mod driver;
 pub mod error;
 pub mod filetype;
