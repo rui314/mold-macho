@@ -27,6 +27,9 @@ pub enum InputArg {
     /// exports this dylib re-exports as its own.
     ReexportLib(String),
     ReexportFile(String),
+    /// `-hidden-lfoo`: an archive whose external symbols are demoted
+    /// to private externals.
+    HiddenLib(String),
 }
 
 /// Parsed command line arguments.
@@ -439,6 +442,8 @@ pub fn parse_args(diag: &Diagnostics, cmdline: &[String]) -> Args {
             _ => {
                 if let Some(name) = opt.strip_prefix("-reexport-l") {
                     args.inputs.push(InputArg::ReexportLib(name.to_string()));
+                } else if let Some(name) = opt.strip_prefix("-hidden-l") {
+                    args.inputs.push(InputArg::HiddenLib(name.to_string()));
                 } else if let Some(name) = opt.strip_prefix("-weak-l") {
                     args.inputs.push(InputArg::Lib(name.to_string(), true));
                 } else if let Some(name) = opt.strip_prefix("-l") {

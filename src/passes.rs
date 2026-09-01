@@ -111,6 +111,7 @@ fn find_library<E: Arch>(ctx: &Context<E>, name: &str) -> Option<PathBuf> {
 struct PendingObject {
     mf: &'static MappedFile,
     alive: bool,
+    hidden: bool,
     priority: u32,
 }
 
@@ -118,12 +119,14 @@ struct PendingObject {
 /// immediately (they are cheap and order-sensitive); objects and
 /// archive members are queued for parallel staging; bitcode is
 /// registered immediately since libLTO calls are kept on one thread.
+#[allow(clippy::too_many_arguments)]
 fn collect_file<E: Arch>(
     ctx: &mut Context<E>,
     mf: &'static MappedFile,
     force_load: bool,
     weak: bool,
     reexport: bool,
+    hidden: bool,
     out: &mut Vec<PendingObject>,
 ) {
     // A library may be named both on the command line and by auto-link
@@ -137,6 +140,7 @@ fn collect_file<E: Arch>(
             out.push(PendingObject {
                 mf,
                 alive: true,
+                hidden,
                 priority,
             });
         }
@@ -171,6 +175,7 @@ fn collect_file<E: Arch>(
                         out.push(PendingObject {
                             mf: member,
                             alive,
+                            hidden,
                             priority,
                         });
                     }
@@ -179,7 +184,7 @@ fn collect_file<E: Arch>(
         }
         FileType::Fat => {
             let slice = input_files::get_fat_slice(ctx, mf);
-            collect_file(ctx, slice, force_load, weak, reexport, out);
+            collect_file(ctx, slice, force_load, weak, reexport, hidden, out);
         }
         FileType::LlvmBitcode => {
             input_files::parse_bitcode(ctx, mf, true);
@@ -196,7 +201,7 @@ fn load_pending<E: Arch>(ctx: &mut Context<E>, pending: Vec<PendingObject>) {
     let diag = ctx.diag.clone();
     let staged: Vec<input_files::StagedObject> = pending
         .par_iter()
-        .map(|p| input_files::stage_object::<E>(&diag, p.mf, p.alive, p.priority))
+        .map(|p| input_files::stage_object::<E>(&diag, p.mf, p.alive, p.hidden, p.priority))
         .collect();
     for st in staged {
         input_files::integrate_object(ctx, st);
@@ -210,38 +215,45 @@ pub fn read_input_files<E: Arch>(ctx: &mut Context<E>) {
         match arg {
             InputArg::File(path) => {
                 let mf = MappedFile::must_open(&ctx.diag, Path::new(path));
-                collect_file(ctx, mf, false, false, false, &mut queue);
+                collect_file(ctx, mf, false, false, false, false, &mut queue);
             }
             InputArg::ForceLoad(path) => {
                 let mf = MappedFile::must_open(&ctx.diag, Path::new(path));
-                collect_file(ctx, mf, true, false, false, &mut queue);
+                collect_file(ctx, mf, true, false, false, false, &mut queue);
             }
             InputArg::WeakFile(path) => {
                 let mf = MappedFile::must_open(&ctx.diag, Path::new(path));
-                collect_file(ctx, mf, false, true, false, &mut queue);
+                collect_file(ctx, mf, false, true, false, false, &mut queue);
             }
             InputArg::ReexportFile(path) => {
                 let mf = MappedFile::must_open(&ctx.diag, Path::new(path));
-                collect_file(ctx, mf, false, false, true, &mut queue);
+                collect_file(ctx, mf, false, false, true, false, &mut queue);
             }
             InputArg::ReexportLib(name) => match find_library(ctx, name) {
                 Some(path) => {
                     let mf = MappedFile::must_open(&ctx.diag, &path);
-                    collect_file(ctx, mf, false, false, true, &mut queue);
+                    collect_file(ctx, mf, false, false, true, false, &mut queue);
                 }
                 None => error!(ctx, "library not found: -reexport-l{name}"),
+            },
+            InputArg::HiddenLib(name) => match find_library(ctx, name) {
+                Some(path) => {
+                    let mf = MappedFile::must_open(&ctx.diag, &path);
+                    collect_file(ctx, mf, false, false, false, true, &mut queue);
+                }
+                None => error!(ctx, "library not found: -hidden-l{name}"),
             },
             InputArg::Lib(name, weak) => match find_library(ctx, name) {
                 Some(path) => {
                     let mf = MappedFile::must_open(&ctx.diag, &path);
-                    collect_file(ctx, mf, false, *weak, false, &mut queue);
+                    collect_file(ctx, mf, false, *weak, false, false, &mut queue);
                 }
                 None => error!(ctx, "library not found: -l{name}"),
             },
             InputArg::Framework(name, weak) => match find_framework(ctx, name) {
                 Some(path) => {
                     let mf = MappedFile::must_open(&ctx.diag, &path);
-                    collect_file(ctx, mf, false, *weak, false, &mut queue);
+                    collect_file(ctx, mf, false, *weak, false, false, &mut queue);
                 }
                 None => error!(ctx, "framework not found: {name}"),
             },
@@ -279,7 +291,7 @@ pub fn load_autolink_deps<E: Arch>(ctx: &mut Context<E>) -> bool {
                 match find_library(ctx, name) {
                     Some(path) => {
                         if let Some(mf) = MappedFile::open(&ctx.diag, &path) {
-                            collect_file(ctx, mf, false, false, false, &mut queue);
+                            collect_file(ctx, mf, false, false, false, false, &mut queue);
                         }
                     }
                     None => crate::warn!(ctx, "auto-linked library not found: -l{name}"),
@@ -288,7 +300,7 @@ pub fn load_autolink_deps<E: Arch>(ctx: &mut Context<E>) -> bool {
             ["-framework", name] => match find_framework(ctx, name) {
                 Some(path) => {
                     if let Some(mf) = MappedFile::open(&ctx.diag, &path) {
-                        collect_file(ctx, mf, false, false, false, &mut queue);
+                        collect_file(ctx, mf, false, false, false, false, &mut queue);
                     }
                 }
                 None => crate::warn!(ctx, "auto-linked framework not found: {name}"),
@@ -452,7 +464,8 @@ fn do_resolve<E: Arch>(ctx: &mut Context<E>, only_alive: bool) {
             sym.is_imported = false;
             sym.is_common = false;
             sym.is_weak_def = is_weak;
-            sym.is_private_extern = nlist.n_type & N_PEXT != 0;
+            sym.is_private_extern =
+                nlist.n_type & N_PEXT != 0 || ctx.objs[obj_idx].hidden;
             sym.no_dead_strip =
                 nlist.n_desc & (N_NO_DEAD_STRIP | REFERENCED_DYNAMICALLY) != 0;
 

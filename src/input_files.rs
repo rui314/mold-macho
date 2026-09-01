@@ -22,6 +22,9 @@ pub struct ObjectFile {
     /// LC_LINKER_OPTION auto-link requests, acted on only if the file
     /// is live.
     pub linker_options: Vec<Vec<String>>,
+    /// -hidden-l: this file's external definitions become private
+    /// externals.
+    pub hidden: bool,
     /// Section headers in ordinal order (all segments' sections
     /// concatenated in load command order).
     pub sect_hdrs: Vec<MachSection>,
@@ -93,6 +96,7 @@ fn is_discarded_section(hdr: &MachSection) -> bool {
 pub struct StagedObject {
     pub mf: &'static MappedFile,
     pub alive: bool,
+    pub hidden: bool,
     pub priority: u32,
     pub sect_hdrs: Vec<MachSection>,
     pub linker_options: Vec<Vec<String>>,
@@ -112,6 +116,7 @@ pub fn stage_object<E: Arch>(
     diag: &crate::error::Diagnostics,
     mf: &'static MappedFile,
     alive: bool,
+    hidden: bool,
     priority: u32,
 ) -> StagedObject {
     let data = mf.data;
@@ -351,6 +356,7 @@ pub fn stage_object<E: Arch>(
     StagedObject {
         mf,
         alive,
+        hidden,
         priority,
         sect_hdrs,
         linker_options,
@@ -430,6 +436,7 @@ pub fn integrate_object<E: Arch>(ctx: &mut Context<E>, staged: StagedObject) -> 
         is_alive: staged.alive,
         priority: staged.priority,
         linker_options: staged.linker_options,
+        hidden: staged.hidden,
         sect_hdrs: staged.sect_hdrs,
         subsecs: staged.subsecs.into_iter().map(|i| i + isec_base).collect(),
         objc_image_info: staged.objc_image_info,
@@ -445,7 +452,7 @@ pub fn integrate_object<E: Arch>(ctx: &mut Context<E>, staged: StagedObject) -> 
 pub fn parse_object<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile, alive: bool) -> usize {
     let priority = ctx.next_priority();
     let diag = ctx.diag.clone();
-    let staged = stage_object::<E>(&diag, mf, alive, priority);
+    let staged = stage_object::<E>(&diag, mf, alive, false, priority);
     integrate_object(ctx, staged)
 }
 
@@ -498,6 +505,7 @@ pub fn parse_bitcode<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile, ali
         is_alive: alive,
         priority,
         linker_options: Vec::new(),
+        hidden: false,
         sect_hdrs: Vec::new(),
         subsecs: Vec::new(),
         objc_image_info: None,
