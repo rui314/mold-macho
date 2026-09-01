@@ -533,12 +533,59 @@ pub fn parse_dylib_binary<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile
     idx
 }
 
+/// Locates the stub or binary for a reexported library's install name
+/// under the syslibroot.
+fn find_reexport_file<E: Arch>(
+    ctx: &Context<E>,
+    install_name: &str,
+) -> Option<&'static MappedFile> {
+    let roots: Vec<String> = if ctx.args.syslibroot.is_empty() {
+        vec![String::new()]
+    } else {
+        ctx.args.syslibroot.clone()
+    };
+
+    for root in &roots {
+        let base = std::path::Path::new(root).join(install_name.trim_start_matches('/'));
+        let mut candidates = vec![base.with_extension("tbd")];
+        candidates.push(std::path::PathBuf::from(format!("{}.tbd", base.display())));
+        candidates.push(base);
+        for path in candidates {
+            if let Some(mf) = MappedFile::open(&ctx.diag, &path) {
+                return Some(mf);
+            }
+        }
+    }
+    None
+}
+
 pub fn parse_dylib<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile) -> usize {
     let tbd = tapi::parse(&ctx.diag, mf);
     let idx = ctx.dylibs.len();
     let mut exports: std::collections::HashSet<String> =
         tbd.exports.into_iter().collect();
     exports.extend(tbd.weak_exports);
+
+    // A dylib's reexported libraries resolve through it in the two-level
+    // namespace, so their exports count as this dylib's. Reexports not
+    // inlined in this .tbd are separate files, possibly reexporting
+    // further.
+    let mut queue = tbd.external_reexports;
+    let mut visited = std::collections::HashSet::new();
+    while let Some(name) = queue.pop() {
+        if !visited.insert(name.clone()) {
+            continue;
+        }
+        let Some(dep) = find_reexport_file(ctx, &name) else {
+            crate::warn!(ctx, "{}: reexported library not found: {}", mf.name, name);
+            continue;
+        };
+        let dep_tbd = tapi::parse(&ctx.diag, dep);
+        exports.extend(dep_tbd.exports);
+        exports.extend(dep_tbd.weak_exports);
+        queue.extend(dep_tbd.external_reexports);
+    }
+
     ctx.dylibs.push(DylibFile {
         install_name: tbd.install_name,
         current_version: tbd.current_version,

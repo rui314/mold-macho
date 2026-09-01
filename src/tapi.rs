@@ -20,6 +20,10 @@ pub struct TbdFile {
     pub current_version: u32,
     pub exports: Vec<String>,
     pub weak_exports: Vec<String>,
+    /// Install names of reexported libraries described in *other* files
+    /// (reexports inlined as documents in this file are already merged
+    /// into `exports`).
+    pub external_reexports: Vec<String>,
 }
 
 /// Strips a YAML scalar's surrounding quotes, if any.
@@ -87,17 +91,28 @@ pub fn parse(diag: &Diagnostics, mf: &MappedFile) -> TbdFile {
         current_version: crate::macho::encode_version(1, 0, 0),
         exports: Vec::new(),
         weak_exports: Vec::new(),
+        external_reexports: Vec::new(),
     };
 
+    let mut doc_names = Vec::new();
+    let mut reexports = Vec::new();
+
     for (i, doc) in text.split("\n---").enumerate() {
-        if i == 0 {
-            for line in doc.lines() {
-                if let Some(val) = line.strip_prefix("install-name:") {
+        for line in doc.lines() {
+            if let Some(val) = line.strip_prefix("install-name:") {
+                doc_names.push(unquote(val).to_string());
+                if i == 0 {
                     tbd.install_name = unquote(val).to_string();
-                } else if let Some(val) = line.strip_prefix("current-version:") {
+                }
+            } else if i == 0 {
+                if let Some(val) = line.strip_prefix("current-version:") {
                     tbd.current_version = parse_version(unquote(val));
                 }
             }
+        }
+
+        if i == 0 {
+            read_lists(doc, "libraries", &mut reexports, "");
         }
 
         // Merge the exported symbols of every document. Objective-C
@@ -109,6 +124,13 @@ pub fn parse(diag: &Diagnostics, mf: &MappedFile) -> TbdFile {
         read_lists(doc, "objc-ivars", &mut tbd.exports, "_OBJC_IVAR_$_");
         read_lists(doc, "weak-symbols", &mut tbd.weak_exports, "");
     }
+
+    // Reexported libraries not inlined as documents live in files of
+    // their own and must be loaded separately.
+    tbd.external_reexports = reexports
+        .into_iter()
+        .filter(|name| !doc_names.contains(name))
+        .collect();
 
     if tbd.install_name.is_empty() {
         fatal!(diag, "{}: no install-name in .tbd file", mf.name);
