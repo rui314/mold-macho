@@ -343,6 +343,23 @@ fn create_dylinker_cmd() -> Vec<u8> {
     buf
 }
 
+fn create_id_dylib_cmd<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
+    let name = ctx.args.install_name.as_deref().unwrap_or(&ctx.args.output);
+    let cmd = DylibCommand {
+        cmd: LC_ID_DYLIB,
+        cmdsize: 0,
+        nameoff: size_of::<DylibCommand>() as u32,
+        timestamp: 0,
+        current_version: encode_version(1, 0, 0),
+        compatibility_version: encode_version(1, 0, 0),
+    };
+    let mut buf = to_vec(&cmd);
+    append_string(&mut buf, name);
+    let size = buf.len() as u32;
+    buf[4..8].copy_from_slice(&size.to_le_bytes());
+    buf
+}
+
 fn create_main_cmd<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
     // The entry point is a file offset into __TEXT, whose file offset
     // is zero.
@@ -385,8 +402,14 @@ pub fn create_load_commands<E: Arch>(ctx: &Context<E>) -> Vec<Vec<u8>> {
         vec.push(create_load_dylib_cmd(dylib));
     }
 
-    vec.push(create_dylinker_cmd());
-    vec.push(create_main_cmd(ctx));
+    match ctx.args.output_type {
+        MH_EXECUTE => {
+            vec.push(create_dylinker_cmd());
+            vec.push(create_main_cmd(ctx));
+        }
+        MH_DYLIB => vec.push(create_id_dylib_cmd(ctx)),
+        _ => {}
+    }
 
     if let Some(idx) = find_chunk(ctx, |k| matches!(k, ChunkKind::CodeSignature)) {
         vec.push(create_code_signature_cmd(ctx, idx));
@@ -408,7 +431,7 @@ pub fn copy_mach_header<E: Arch>(ctx: &Context<E>, buf: &mut [u8]) {
         magic: MH_MAGIC_64,
         cputype: E::CPUTYPE,
         cpusubtype: E::CPUSUBTYPE,
-        filetype: MH_EXECUTE,
+        filetype: ctx.args.output_type,
         ncmds: cmds.len() as u32,
         sizeofcmds: cmds.iter().map(Vec::len).sum::<usize>() as u32,
         flags: MH_NOUNDEFS | MH_DYLDLINK | MH_TWOLEVEL,
@@ -416,7 +439,11 @@ pub fn copy_mach_header<E: Arch>(ctx: &Context<E>, buf: &mut [u8]) {
     };
 
     let mut hdr = hdr;
-    hdr.flags |= MH_PIE;
+    match ctx.args.output_type {
+        MH_EXECUTE => hdr.flags |= MH_PIE,
+        MH_DYLIB => hdr.flags |= MH_NO_REEXPORTED_DYLIBS,
+        _ => {}
+    }
     if ctx
         .chunks
         .iter()
@@ -826,7 +853,12 @@ pub fn write_code_signature<E: Arch>(ctx: &Context<E>, buf: &mut [u8]) {
     push_be64(&mut sig, 0); // code limit 64
     push_be64(&mut sig, text.cmd.fileoff); // exec segment base
     push_be64(&mut sig, text.cmd.filesize); // exec segment limit
-    push_be64(&mut sig, CS_EXECSEG_MAIN_BINARY); // exec segment flags
+    let exec_seg_flags = if ctx.args.output_type == MH_EXECUTE {
+        CS_EXECSEG_MAIN_BINARY
+    } else {
+        0
+    };
+    push_be64(&mut sig, exec_seg_flags); // exec segment flags
 
     sig.extend_from_slice(ident.as_bytes());
     sig.resize(sig.len() + ident_size as usize - ident.len(), 0);

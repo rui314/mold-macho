@@ -472,6 +472,67 @@ pub fn get_fat_slice<E: Arch>(
     fatal!(ctx, "{}: fat file does not contain {}", mf.name, E::NAME);
 }
 
+/// Parses a Mach-O dylib binary: its identity from LC_ID_DYLIB and its
+/// exported symbols. The defined-external range of the symbol table
+/// serves as the export list; the authoritative source is the export
+/// trie, but the symbol table matches it for the dylibs we link against.
+pub fn parse_dylib_binary<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile) -> usize {
+    let data = mf.data;
+    let hdr = MachHeader::read_from(data);
+
+    let mut install_name = String::new();
+    let mut current_version = encode_version(1, 0, 0);
+    let mut compatibility_version = encode_version(1, 0, 0);
+    let mut symtab_cmd = None;
+    let mut dysymtab_cmd = None;
+
+    let mut off = size_of::<MachHeader>();
+    for _ in 0..hdr.ncmds {
+        let lc = LoadCommand::read_from(&data[off..]);
+        match lc.cmd {
+            LC_ID_DYLIB => {
+                let cmd = DylibCommand::read_from(&data[off..]);
+                let name = &data[off + cmd.nameoff as usize..off + cmd.cmdsize as usize];
+                let len = name.iter().position(|&b| b == 0).unwrap_or(name.len());
+                install_name = String::from_utf8_lossy(&name[..len]).into_owned();
+                current_version = cmd.current_version;
+                compatibility_version = cmd.compatibility_version;
+            }
+            LC_SYMTAB => symtab_cmd = Some(SymtabCommand::read_from(&data[off..])),
+            LC_DYSYMTAB => dysymtab_cmd = Some(DysymtabCommand::read_from(&data[off..])),
+            _ => {}
+        }
+        off += lc.cmdsize as usize;
+    }
+
+    if install_name.is_empty() {
+        fatal!(ctx, "{}: dylib has no LC_ID_DYLIB", mf.name);
+    }
+
+    let mut exports = std::collections::HashSet::new();
+    if let (Some(sym), Some(dysym)) = (symtab_cmd, dysymtab_cmd) {
+        let nlists: Vec<NList> = read_array(data, sym.symoff as usize, sym.nsyms as usize);
+        let strtab = &data[sym.stroff as usize..(sym.stroff + sym.strsize) as usize];
+        // SAFETY: input files are leaked, so the string table lives for
+        // the rest of the process.
+        let strtab: &'static [u8] = unsafe { std::mem::transmute(strtab) };
+        let range = dysym.iextdefsym as usize..(dysym.iextdefsym + dysym.nextdefsym) as usize;
+        for nlist in &nlists[range] {
+            exports.insert(symbol_name(strtab, nlist).to_string());
+        }
+    }
+
+    let idx = ctx.dylibs.len();
+    ctx.dylibs.push(DylibFile {
+        install_name,
+        current_version,
+        compatibility_version,
+        dylib_idx: idx as i32 + 1,
+        exports,
+    });
+    idx
+}
+
 pub fn parse_dylib<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile) -> usize {
     let tbd = tapi::parse(&ctx.diag, mf);
     let idx = ctx.dylibs.len();

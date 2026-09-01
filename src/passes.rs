@@ -70,6 +70,9 @@ fn read_file<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile) {
         FileType::Tapi => {
             input_files::parse_dylib(ctx, mf);
         }
+        FileType::Dylib => {
+            input_files::parse_dylib_binary(ctx, mf);
+        }
         FileType::Archive => {
             // Archive members are loaded lazily: a member is loaded only
             // once it defines a symbol that is undefined at resolution
@@ -268,12 +271,25 @@ fn add_got<E: Arch>(ctx: &mut Context<E>, id: crate::symbol::SymbolId) {
 
 /// Defines the symbols the linker itself provides.
 pub fn create_synthetic_symbols<E: Arch>(ctx: &mut Context<E>) {
-    let id = ctx.symtab.intern("__mh_execute_header");
+    if ctx.args.output_type == MH_EXECUTE {
+        let id = ctx.symtab.intern("__mh_execute_header");
+        let sym = &mut ctx.symtab[id];
+        if !sym.is_defined() {
+            sym.origin = Origin::Synthetic;
+            sym.value = ctx.args.pagezero_size;
+            sym.is_extern = true;
+        }
+    }
+
+    // ___dso_handle identifies the image; C++ static destructors pass it
+    // to __cxa_atexit. It resolves to the mach header but is never
+    // exported.
+    let id = ctx.symtab.intern("___dso_handle");
     let sym = &mut ctx.symtab[id];
     if !sym.is_defined() {
         sym.origin = Origin::Synthetic;
         sym.value = ctx.args.pagezero_size;
-        sym.is_extern = true;
+        sym.is_extern = false;
     }
 }
 
@@ -844,6 +860,9 @@ fn build_bind_info<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
 
 /// Resolves the entry point symbol.
 pub fn resolve_entry<E: Arch>(ctx: &mut Context<E>) {
+    if ctx.args.output_type != MH_EXECUTE {
+        return;
+    }
     match ctx.symtab.get(&ctx.args.entry) {
         Some(id) if ctx.symtab[id].is_defined() => ctx.entry_addr = ctx.sym_addr(id),
         _ => error!(ctx, "undefined symbol for entry point: {}", ctx.args.entry),

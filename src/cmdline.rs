@@ -20,6 +20,9 @@ pub enum InputArg {
 #[derive(Debug)]
 pub struct Args {
     pub output: String,
+    /// The output file type: MH_EXECUTE, MH_DYLIB or MH_BUNDLE.
+    pub output_type: u32,
+    pub install_name: Option<String>,
     pub arch: Option<String>,
     pub entry: String,
     pub platform: u32,
@@ -38,6 +41,8 @@ impl Default for Args {
     fn default() -> Self {
         Args {
             output: "a.out".to_string(),
+            output_type: MH_EXECUTE,
+            install_name: None,
             arch: None,
             entry: "_main".to_string(),
             platform: PLATFORM_MACOS,
@@ -103,6 +108,10 @@ pub fn parse_args(diag: &Diagnostics, cmdline: &[String]) -> Args {
             "-syslibroot" => args.syslibroot.push(next_arg(&mut i).to_string()),
             "-L" => args.library_paths.push(next_arg(&mut i).to_string()),
             "-l" => args.inputs.push(InputArg::Lib(next_arg(&mut i).to_string())),
+            "-dylib" => args.output_type = MH_DYLIB,
+            "-install_name" | "-dylib_install_name" => {
+                args.install_name = Some(next_arg(&mut i).to_string())
+            }
             "-adhoc_codesign" => args.adhoc_codesign = true,
             "-no_adhoc_codesign" => args.adhoc_codesign = false,
             "-dynamic" => args.dynamic = true,
@@ -135,6 +144,12 @@ pub fn parse_args(diag: &Diagnostics, cmdline: &[String]) -> Args {
             }
         }
         i += 1;
+    }
+
+    // A dylib is loaded at an arbitrary address; only a main executable
+    // reserves the low 4 GiB against NULL dereferences.
+    if args.output_type != MH_EXECUTE {
+        args.pagezero_size = 0;
     }
 
     args
