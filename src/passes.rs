@@ -1531,45 +1531,78 @@ pub fn create_output_chunks<E: Arch>(ctx: &mut Context<E>) {
         }
     }
 
-    // Compute each input section's offset within its output section,
-    // inserting range-extension thunks into large executable sections.
-    for chunk_idx in 0..ctx.chunks.len() {
-        let ChunkKind::Output { isecs, .. } = &ctx.chunks[chunk_idx].kind else {
-            continue;
-        };
-        let isecs = isecs.clone();
-
-        let total: u64 = isecs.iter().map(|&id| ctx.isecs[id].size + 16).sum();
-        let is_exec = ctx.chunks[chunk_idx].hdr.flags
-            & (S_ATTR_PURE_INSTRUCTIONS | S_ATTR_SOME_INSTRUCTIONS)
-            != 0;
-        let thunks = if is_exec && total > E::BRANCH_RANGE / 2 {
-            crate::thunks::create_range_extension_thunks::<E>(ctx, &isecs)
-        } else {
-            let mut off = 0;
-            for &id in &isecs {
-                let isec = &mut ctx.isecs[id];
-                off = align_to(off, 1 << isec.hdr.p2align);
-                isec.output_offset = off;
-                off += isec.size;
+    // Compute each input section's offset within its output section.
+    // Following mold's design, sections lay out in parallel: each
+    // output section's offsets depend only on its own members, so the
+    // per-section prefix sums run on all cores and the results are
+    // written back serially. The exception is a __TEXT section big
+    // enough to need range-extension thunks, whose creation scans and
+    // annotates relocations; those (at most one per link in practice)
+    // stay on the serial path.
+    {
+        use rayon::prelude::*;
+        let mut thunked: Vec<usize> = Vec::new();
+        let mut plain: Vec<(usize, Vec<usize>)> = Vec::new();
+        for chunk_idx in 0..ctx.chunks.len() {
+            let ChunkKind::Output { isecs, .. } = &ctx.chunks[chunk_idx].kind else {
+                continue;
+            };
+            let total: u64 = isecs.iter().map(|&id| ctx.isecs[id].size + 16).sum();
+            let is_exec = ctx.chunks[chunk_idx].hdr.flags
+                & (S_ATTR_PURE_INSTRUCTIONS | S_ATTR_SOME_INSTRUCTIONS)
+                != 0;
+            if is_exec && total > E::BRANCH_RANGE / 2 {
+                thunked.push(chunk_idx);
+            } else {
+                plain.push((chunk_idx, isecs.clone()));
             }
-            Vec::new()
-        };
+        }
 
-        let end = match thunks.last() {
-            Some(t) => t.offset + t.syms.len() as u64 * E::THUNK_SIZE,
-            None => 0,
-        };
-        let chunk = &mut ctx.chunks[chunk_idx];
-        let data_end = isecs
-            .last()
-            .map(|&id| ctx.isecs[id].output_offset + ctx.isecs[id].size)
-            .unwrap_or(0);
-        chunk.hdr.size = end.max(data_end);
-        let ChunkKind::Output { thunks: t, .. } = &mut chunk.kind else {
-            unreachable!()
-        };
-        *t = thunks;
+        let offsets: Vec<(usize, Vec<u64>, u64)> = plain
+            .par_iter()
+            .map(|(chunk_idx, isecs)| {
+                let mut offs = Vec::with_capacity(isecs.len());
+                let mut off = 0;
+                for &id in isecs {
+                    let isec = &ctx.isecs[id];
+                    off = align_to(off, 1 << isec.hdr.p2align);
+                    offs.push(off);
+                    off += isec.size;
+                }
+                (*chunk_idx, offs, off)
+            })
+            .collect();
+        for (chunk_idx, offs, size) in offsets {
+            let ChunkKind::Output { isecs, .. } = &ctx.chunks[chunk_idx].kind else {
+                unreachable!()
+            };
+            for (&id, off) in isecs.clone().iter().zip(offs) {
+                ctx.isecs[id].output_offset = off;
+            }
+            ctx.chunks[chunk_idx].hdr.size = size;
+        }
+
+        for chunk_idx in thunked {
+            let ChunkKind::Output { isecs, .. } = &ctx.chunks[chunk_idx].kind else {
+                unreachable!()
+            };
+            let isecs = isecs.clone();
+            let thunks = crate::thunks::create_range_extension_thunks::<E>(ctx, &isecs);
+            let end = match thunks.last() {
+                Some(t) => t.offset + t.syms.len() as u64 * E::THUNK_SIZE,
+                None => 0,
+            };
+            let data_end = isecs
+                .last()
+                .map(|&id| ctx.isecs[id].output_offset + ctx.isecs[id].size)
+                .unwrap_or(0);
+            let chunk = &mut ctx.chunks[chunk_idx];
+            chunk.hdr.size = end.max(data_end);
+            let ChunkKind::Output { thunks: t, .. } = &mut chunk.kind else {
+                unreachable!()
+            };
+            *t = thunks;
+        }
     }
 
     if !ctx.stub_syms.is_empty() {
