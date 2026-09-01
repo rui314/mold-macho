@@ -1517,6 +1517,17 @@ pub fn create_output_chunks<E: Arch>(ctx: &mut Context<E>) {
     }
     ctx.args.sectcreate = sectcreate;
 
+    // -add_empty_section synthesizes a zero-length section, giving
+    // tools a named anchor (its section$start/end addresses) without
+    // any content.
+    let empties = std::mem::take(&mut ctx.args.add_empty_section);
+    for (seg, sect) in &empties {
+        let segname: &'static str = String::leak(seg.clone());
+        let chunk = Chunk::new(segname, sect, ChunkKind::SectCreate { data: &[] });
+        ctx.chunks.push(chunk);
+    }
+    ctx.args.add_empty_section = empties;
+
     // Merge the objects' __objc_imageinfo records: the Swift version
     // must agree, the Swift language version is the newest, and the
     // category-class-properties bit holds only if every Objective-C

@@ -83,6 +83,9 @@ pub struct Args {
     /// -sectcreate: sections to synthesize from files:
     /// (segment, section, path).
     pub sectcreate: Vec<(String, String, String)>,
+    /// -add_empty_section: zero-length sections to synthesize:
+    /// (segment, section).
+    pub add_empty_section: Vec<(String, String)>,
     /// -r: produce a relocatable object instead of a final image.
     pub relocatable: bool,
     /// -flat_namespace: bind imports by name across all loaded images
@@ -167,6 +170,7 @@ impl Default for Args {
             lto_library: None,
             stack_size: 0,
             sectcreate: Vec::new(),
+            add_empty_section: Vec::new(),
             relocatable: false,
             flat_namespace: false,
             no_standard_dirs: false,
@@ -359,6 +363,11 @@ pub fn parse_args(diag: &Diagnostics, cmdline: &[String]) -> Args {
                 let sect = next_arg(&mut i).to_string();
                 let file = next_arg(&mut i).to_string();
                 args.sectcreate.push((seg, sect, file));
+            }
+            "-add_empty_section" => {
+                let seg = next_arg(&mut i).to_string();
+                let sect = next_arg(&mut i).to_string();
+                args.add_empty_section.push((seg, sect));
             }
             "-x" => args.strip_locals = true,
             "-Z" => args.no_standard_dirs = true,
