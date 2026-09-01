@@ -393,6 +393,7 @@ pub fn create_output_chunks<E: Arch>(ctx: &mut Context<E>) {
 
     ctx.chunks.push(Chunk::new("__LINKEDIT", "", ChunkKind::RebaseInfo));
     ctx.chunks.push(Chunk::new("__LINKEDIT", "", ChunkKind::BindInfo));
+    ctx.chunks.push(Chunk::new("__LINKEDIT", "", ChunkKind::ExportTrie));
     ctx.chunks.push(Chunk::new("__LINKEDIT", "", ChunkKind::Symtab));
     if !ctx.stub_syms.is_empty() || !ctx.got_syms.is_empty() {
         let mut chunk = Chunk::new("__LINKEDIT", "", ChunkKind::IndirectSymtab);
@@ -607,6 +608,7 @@ pub fn assign_offsets<E: Arch>(ctx: &mut Context<E>) {
                 ChunkKind::UnwindInfo => output_chunks::encode_unwind_info(ctx).len() as u64,
                 ChunkKind::RebaseInfo => ctx.rebase_data.len() as u64,
                 ChunkKind::BindInfo => ctx.bind_data.len() as u64,
+                ChunkKind::ExportTrie => output_chunks::encode_export_trie(ctx).len() as u64,
                 ChunkKind::CodeSignature => {
                     cursor = align_to(cursor, 16);
                     code_signature_size(&ctx.args.output, cursor)
@@ -616,7 +618,7 @@ pub fn assign_offsets<E: Arch>(ctx: &mut Context<E>) {
             let chunk = &mut ctx.chunks[idx];
             let p2align = match chunk.kind {
                 ChunkKind::Symtab | ChunkKind::Strtab | ChunkKind::RebaseInfo
-                | ChunkKind::BindInfo => 3,
+                | ChunkKind::BindInfo | ChunkKind::ExportTrie => 3,
                 ChunkKind::IndirectSymtab => 2,
                 ChunkKind::CodeSignature => 4,
                 _ => chunk.hdr.p2align,
@@ -902,6 +904,11 @@ pub fn copy_chunks<E: Arch>(ctx: &Context<E>, buf: &mut [u8]) {
             ChunkKind::BindInfo => {
                 let off = chunk.hdr.fileoff as usize;
                 buf[off..off + ctx.bind_data.len()].copy_from_slice(&ctx.bind_data);
+            }
+            ChunkKind::ExportTrie => {
+                let data = output_chunks::encode_export_trie(ctx);
+                let off = chunk.hdr.fileoff as usize;
+                buf[off..off + data.len()].copy_from_slice(&data);
             }
             ChunkKind::IndirectSymtab => {
                 let mut off = chunk.hdr.fileoff as usize;

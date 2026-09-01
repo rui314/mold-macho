@@ -50,6 +50,8 @@ pub enum ChunkKind {
     RebaseInfo,
     /// The bind opcode stream for LC_DYLD_INFO, in __LINKEDIT.
     BindInfo,
+    /// The export trie in __LINKEDIT: dyld's index of exported symbols.
+    ExportTrie,
     /// The indirect symbol table in __LINKEDIT.
     IndirectSymtab,
     /// The symbol table in __LINKEDIT.
@@ -238,6 +240,12 @@ fn create_dyld_info_cmd<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
             cmd.bind_size = ctx.chunks[idx].hdr.size as u32;
         }
     }
+    if let Some(idx) = find_chunk(ctx, |k| matches!(k, ChunkKind::ExportTrie)) {
+        if ctx.chunks[idx].hdr.size > 0 {
+            cmd.export_off = ctx.chunks[idx].hdr.fileoff as u32;
+            cmd.export_size = ctx.chunks[idx].hdr.size as u32;
+        }
+    }
     to_vec(&cmd)
 }
 
@@ -403,11 +411,12 @@ pub fn copy_mach_header<E: Arch>(ctx: &Context<E>, buf: &mut [u8]) {
         filetype: MH_EXECUTE,
         ncmds: cmds.len() as u32,
         sizeofcmds: cmds.iter().map(Vec::len).sum::<usize>() as u32,
-        flags: MH_NOUNDEFS | MH_DYLDLINK | MH_TWOLEVEL | MH_PIE,
+        flags: MH_NOUNDEFS | MH_DYLDLINK | MH_TWOLEVEL,
         reserved: 0,
     };
 
     let mut hdr = hdr;
+    hdr.flags |= MH_PIE;
     if ctx
         .chunks
         .iter()
@@ -439,6 +448,153 @@ pub fn copy_symtab<E: Arch>(ctx: &Context<E>, buf: &mut [u8]) {
     let chunk = &ctx.chunks[find_chunk(ctx, |k| matches!(k, ChunkKind::Strtab)).unwrap()];
     let off = chunk.hdr.fileoff as usize;
     buf[off..off + ctx.symtab_data.strtab.len()].copy_from_slice(&ctx.symtab_data.strtab);
+}
+
+/// A node of the export trie under construction.
+#[derive(Default)]
+struct TrieNode {
+    children: Vec<(String, TrieNode)>,
+    /// (flags, image-relative address) for an exported symbol ending
+    /// here.
+    export: Option<(u32, u64)>,
+    offset: usize,
+}
+
+impl TrieNode {
+    fn insert(&mut self, name: &str, export: (u32, u64)) {
+        for (label, child) in &mut self.children {
+            let common = name
+                .bytes()
+                .zip(label.bytes())
+                .take_while(|(a, b)| a == b)
+                .count();
+            if common == 0 {
+                continue;
+            }
+            if common < label.len() {
+                // Split the edge: "foobar" -> "foo" + "bar".
+                let rest = label[common..].to_string();
+                *label = label[..common].to_string();
+                let old = std::mem::take(child);
+                child.children.push((rest, old));
+            }
+            if common == name.len() {
+                child.export = Some(export);
+            } else {
+                child.insert(&name[common..], export);
+            }
+            return;
+        }
+        let mut node = TrieNode::default();
+        node.export = Some(export);
+        self.children.push((name.to_string(), node));
+    }
+}
+
+fn uleb_len(mut val: u64) -> usize {
+    let mut len = 1;
+    while val >= 0x80 {
+        val >>= 7;
+        len += 1;
+    }
+    len
+}
+
+/// Encodes the export trie: dyld's index of the image's exported
+/// symbols. It is a radix tree; each node holds an optional terminal
+/// payload (flags and the symbol's image-relative address, both ULEB128)
+/// and edges labeled with NUL-terminated string fragments pointing at
+/// child nodes by ULEB128 offset within the trie. Since offsets are
+/// variable-length, sizing iterates to a fixed point.
+pub fn encode_export_trie<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
+    let base = ctx.args.pagezero_size;
+    let mut root = TrieNode::default();
+    let mut any = false;
+
+    for id in 0..ctx.symtab.syms.len() {
+        let sym = &ctx.symtab[id];
+        if !sym.is_extern
+            || !matches!(
+                sym.origin,
+                crate::symbol::Origin::Obj(_) | crate::symbol::Origin::Synthetic
+            )
+        {
+            continue;
+        }
+        let flags = if sym.is_weak_def {
+            EXPORT_SYMBOL_FLAGS_WEAK_DEFINITION
+        } else {
+            0
+        };
+        root.insert(sym.name, (flags, ctx.sym_addr(id) - base));
+        any = true;
+    }
+    if !any {
+        return Vec::new();
+    }
+
+    // Nodes in pre-order, as raw pointers to sidestep the borrow of the
+    // recursive structure.
+    fn flatten(node: &mut TrieNode, out: &mut Vec<*mut TrieNode>) {
+        out.push(node);
+        node.children.sort_by(|a, b| a.0.cmp(&b.0));
+        for (_, child) in &mut node.children {
+            flatten(child, out);
+        }
+    }
+    let mut nodes = Vec::new();
+    flatten(&mut root, &mut nodes);
+
+    // Assign node offsets until they stop moving.
+    loop {
+        let mut changed = false;
+        let mut off = 0;
+        for &node in &nodes {
+            // SAFETY: the nodes all live in `root`, which outlives this
+            // loop, and each is visited once per iteration.
+            let node = unsafe { &mut *node };
+            if node.offset != off {
+                node.offset = off;
+                changed = true;
+            }
+            let terminal_size = match node.export {
+                Some((flags, addr)) => uleb_len(flags as u64) + uleb_len(addr),
+                None => 0,
+            };
+            off += uleb_len(terminal_size as u64) + terminal_size + 1;
+            for (label, child) in &node.children {
+                off += label.len() + 1 + uleb_len(child.offset as u64);
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    let mut buf = Vec::new();
+    for &node in &nodes {
+        // SAFETY: as above.
+        let node = unsafe { &*node };
+        match node.export {
+            Some((flags, addr)) => {
+                let terminal_size = uleb_len(flags as u64) + uleb_len(addr);
+                crate::util::write_uleb(&mut buf, terminal_size as u64);
+                crate::util::write_uleb(&mut buf, flags as u64);
+                crate::util::write_uleb(&mut buf, addr);
+            }
+            None => buf.push(0),
+        }
+        buf.push(node.children.len() as u8);
+        for (label, child) in &node.children {
+            buf.extend_from_slice(label.as_bytes());
+            buf.push(0);
+            crate::util::write_uleb(&mut buf, child.offset as u64);
+        }
+    }
+    while buf.len() % 8 != 0 {
+        buf.push(0);
+    }
+    buf
 }
 
 /// Encodes the __unwind_info section from the compact unwind records.

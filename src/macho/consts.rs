@@ -171,6 +171,9 @@ pub const UNWIND_MODE_MASK: u32 = 0x0f00_0000;
 pub const UNWIND_ARM64_MODE_DWARF: u32 = 0x0300_0000;
 pub const UNWIND_X86_64_MODE_DWARF: u32 = 0x0400_0000;
 
+// Export trie symbol flags
+pub const EXPORT_SYMBOL_FLAGS_WEAK_DEFINITION: u32 = 0x04;
+
 // Magic values in the indirect symbol table
 pub const INDIRECT_SYMBOL_LOCAL: u32 = 0x8000_0000;
 pub const INDIRECT_SYMBOL_ABS: u32 = 0x4000_0000;
