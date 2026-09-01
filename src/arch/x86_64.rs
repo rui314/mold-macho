@@ -53,11 +53,20 @@ impl Arch for X86_64 {
         false
     }
 
+    // GOT_LOAD marks "movq sym@GOTPCREL(%rip), %reg" (opcode 0x8b,
+    // REX prefix before it); with a local target the load of the
+    // slot's content is the same as computing the address, so the
+    // opcode becomes lea (0x8d). Anything else keeps the GOT.
+    fn can_relax_got_load(data: &[u8], offset: u32, _r_type: u8) -> bool {
+        offset >= 2 && data.get(offset as usize - 2) == Some(&0x8b)
+    }
+
     fn classify_reloc(r_type: u8) -> crate::arch::RelocClass {
         use crate::arch::RelocClass;
         match r_type {
             X86_64_RELOC_BRANCH => RelocClass::Branch,
-            X86_64_RELOC_GOT_LOAD | X86_64_RELOC_GOT => RelocClass::Got,
+            X86_64_RELOC_GOT_LOAD => RelocClass::GotLoad,
+            X86_64_RELOC_GOT => RelocClass::Got,
             X86_64_RELOC_TLV => RelocClass::Tlv,
             _ => RelocClass::Plain,
         }
@@ -171,6 +180,21 @@ impl Arch for X86_64 {
         let mut i = 0;
         while i < rels.len() {
             let r = &rels[i];
+            // A GOT load of a local symbol relaxes: the movq that
+            // reads the slot (opcode 0x8b) becomes a leaq (0x8d) of
+            // the target itself. The opcode sits before the fixup, so
+            // it is rewritten before the slice below is taken.
+            let mut relaxed_got_load = false;
+            if r.r_type == X86_64_RELOC_GOT_LOAD
+                && r.offset >= 2
+                && buf[r.offset as usize - 2] == 0x8b
+                && ctx
+                    .reloc_target_sym(obj, r)
+                    .is_some_and(|id| !ctx.symtab[id].is_imported)
+            {
+                buf[r.offset as usize - 2] = 0x8d;
+                relaxed_got_load = true;
+            }
             let loc = &mut buf[r.offset as usize..];
             let s = ctx.reloc_target_addr(obj, r);
             let a = r.addend;
@@ -215,6 +239,11 @@ impl Arch for X86_64 {
                         .wrapping_add_signed(a)
                         .wrapping_sub(p + 4)
                         .wrapping_sub(reloc_bias(r.r_type) as u64);
+                    write32(loc, val as u32);
+                }
+                X86_64_RELOC_GOT_LOAD if relaxed_got_load => {
+                    debug_assert!(r.size == 4);
+                    let val = s.wrapping_add_signed(a).wrapping_sub(p + 4);
                     write32(loc, val as u32);
                 }
                 X86_64_RELOC_GOT_LOAD | X86_64_RELOC_GOT => {

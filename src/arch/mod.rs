@@ -22,6 +22,9 @@ pub enum RelocClass {
     Branch,
     /// A reference through the GOT.
     Got,
+    /// A load through the GOT that can relax to a direct address
+    /// computation when the target is local.
+    GotLoad,
     /// A reference to a thread-local variable pointer.
     Tlv,
     /// A direct reference.
@@ -57,6 +60,10 @@ pub trait Arch: Copy + Default + Send + Sync + 'static {
 
     /// Classifies a relocation type by how it uses its target.
     fn classify_reloc(r_type: u8) -> RelocClass;
+
+    /// True if the GotLoad relocation at `offset` sits on the
+    /// instruction shape the relaxation rewrites.
+    fn can_relax_got_load(data: &[u8], offset: u32, r_type: u8) -> bool;
 
     /// Writes the __stubs section: for each symbol in `ctx.stub_syms`, a
     /// jump through the symbol's __got slot. `addr` is the section's

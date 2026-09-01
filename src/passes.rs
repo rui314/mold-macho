@@ -1404,7 +1404,16 @@ pub fn scan_relocs<E: Arch>(ctx: &mut Context<E>) {
         }
         for rel in &isec.relocs {
             if let Some(id) = ctx.reloc_target_sym(isec.obj, rel) {
-                classes.push((id, E::classify_reloc(rel.r_type)));
+                let mut class = E::classify_reloc(rel.r_type);
+                // A relaxable GOT load of a local symbol needs no
+                // slot at all; an unrelaxable one is an ordinary GOT
+                // reference.
+                if class == RelocClass::GotLoad
+                    && !E::can_relax_got_load(isec.data, rel.offset, rel.r_type)
+                {
+                    class = RelocClass::Got;
+                }
+                classes.push((id, class));
             }
         }
     }
@@ -1432,6 +1441,7 @@ pub fn scan_relocs<E: Arch>(ctx: &mut Context<E>) {
                 add_got(ctx, id);
             }
             RelocClass::Got => add_got(ctx, id),
+            RelocClass::GotLoad if sym.is_imported => add_got(ctx, id),
             RelocClass::Tlv => add_thread_ptr(ctx, id),
             _ => {}
         }

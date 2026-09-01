@@ -80,13 +80,23 @@ impl Arch for Arm64 {
         !matches!(r_type, ARM64_RELOC_UNSIGNED | ARM64_RELOC_SUBTRACTOR)
     }
 
+    // Both halves of an adrp+ldr GOT load relax together: the adrp
+    // keeps its shape and the ldr becomes an add, so the pair-wide
+    // answer is always yes (the ldr's shape is verified when the
+    // rewrite happens - compilers emit nothing else for these
+    // relocations).
+    fn can_relax_got_load(_data: &[u8], _offset: u32, _r_type: u8) -> bool {
+        true
+    }
+
     fn classify_reloc(r_type: u8) -> crate::arch::RelocClass {
         use crate::arch::RelocClass;
         match r_type {
             ARM64_RELOC_BRANCH26 => RelocClass::Branch,
-            ARM64_RELOC_GOT_LOAD_PAGE21
-            | ARM64_RELOC_GOT_LOAD_PAGEOFF12
-            | ARM64_RELOC_POINTER_TO_GOT => RelocClass::Got,
+            ARM64_RELOC_GOT_LOAD_PAGE21 | ARM64_RELOC_GOT_LOAD_PAGEOFF12 => {
+                RelocClass::GotLoad
+            }
+            ARM64_RELOC_POINTER_TO_GOT => RelocClass::Got,
             ARM64_RELOC_TLVP_LOAD_PAGE21 | ARM64_RELOC_TLVP_LOAD_PAGEOFF12 => RelocClass::Tlv,
             _ => RelocClass::Plain,
         }
@@ -303,14 +313,34 @@ impl Arch for Arm64 {
                 ARM64_RELOC_PAGEOFF12 => {
                     write_add_ldst(loc, s.wrapping_add_signed(a));
                 }
+                // A GOT load of a local symbol relaxes to computing
+                // the address directly: the adrp retargets from the
+                // slot's page to the symbol's, and the ldr becomes
+                // "add Xn, Xm, #pageoff".
                 ARM64_RELOC_GOT_LOAD_PAGE21 => {
-                    let g = ctx.sym_got_addr(ctx.reloc_target_sym(obj, r).unwrap());
-                    let val = read32(loc) | page_offset(g.wrapping_add_signed(a), p);
+                    let id = ctx.reloc_target_sym(obj, r).unwrap();
+                    let target = if ctx.symtab[id].is_imported {
+                        ctx.sym_got_addr(id)
+                    } else {
+                        s
+                    };
+                    let val = read32(loc) | page_offset(target.wrapping_add_signed(a), p);
                     write32(loc, val);
                 }
                 ARM64_RELOC_GOT_LOAD_PAGEOFF12 => {
-                    let g = ctx.sym_got_addr(ctx.reloc_target_sym(obj, r).unwrap());
-                    write_add_ldst(loc, g.wrapping_add_signed(a));
+                    let id = ctx.reloc_target_sym(obj, r).unwrap();
+                    if ctx.symtab[id].is_imported {
+                        let g = ctx.sym_got_addr(id);
+                        write_add_ldst(loc, g.wrapping_add_signed(a));
+                    } else {
+                        let insn = read32(loc);
+                        if insn & 0xffc0_0000 != 0xf940_0000 {
+                            fatal!(ctx, "unexpected instruction under GOT_LOAD_PAGEOFF12");
+                        }
+                        let target = s.wrapping_add_signed(a);
+                        let add = 0x9100_0000 | (insn & 0x3ff) | ((target as u32 & 0xfff) << 10);
+                        write32(loc, add);
+                    }
                 }
                 ARM64_RELOC_POINTER_TO_GOT => {
                     let g = ctx.sym_got_addr(ctx.reloc_target_sym(obj, r).unwrap());
