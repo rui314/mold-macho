@@ -81,6 +81,9 @@ pub struct DylibFile {
     pub is_reexported: bool,
     /// -needed-l: keep the load command even under -dead_strip_dylibs.
     pub is_needed: bool,
+    /// MH_DEAD_STRIPPABLE_DYLIB: drop the load command whenever no
+    /// symbol binds to this dylib, even without -dead_strip_dylibs.
+    pub is_dead_strippable: bool,
     pub exports: std::collections::HashSet<String>,
 }
 
@@ -1190,6 +1193,7 @@ pub fn parse_dylib_binary<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile
             is_weak: false,
             is_reexported: false,
             is_needed: false,
+            is_dead_strippable: hdr.flags & MH_DEAD_STRIPPABLE_DYLIB != 0,
             exports,
         },
     )
@@ -1307,6 +1311,7 @@ pub fn parse_dylib<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile) -> us
             is_weak: false,
             is_reexported: false,
             is_needed: false,
+            is_dead_strippable: false,
             exports,
         },
     )

@@ -1061,13 +1061,19 @@ pub fn dead_strip<E: Arch>(ctx: &mut Context<E>) {
 /// load-command ordinal, so surviving dylibs are renumbered and symbol
 /// origins remapped.
 pub fn dead_strip_dylibs<E: Arch>(ctx: &mut Context<E>) {
-    if !ctx.args.dead_strip_dylibs {
+    // A dylib built with -mark_dead_strippable_dylib asks every
+    // linker to drop it when unused, so those are stripped even
+    // without -dead_strip_dylibs.
+    let strippable = |dylib: &crate::input_files::DylibFile| {
+        ctx.args.dead_strip_dylibs || dylib.is_dead_strippable
+    };
+    if !ctx.dylibs.iter().any(|d| strippable(d)) {
         return;
     }
 
     let mut used = vec![false; ctx.dylibs.len()];
     for (i, dylib) in ctx.dylibs.iter().enumerate() {
-        used[i] = dylib.is_needed;
+        used[i] = dylib.is_needed || !strippable(dylib);
     }
     for sym in &ctx.symtab.syms {
         if let Origin::Dylib(idx) = sym.origin {

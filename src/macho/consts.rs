@@ -28,6 +28,7 @@ pub const MH_TWOLEVEL: u32 = 0x80;
 pub const MH_PIE: u32 = 0x20_0000;
 pub const MH_HAS_TLV_DESCRIPTORS: u32 = 0x80_0000;
 pub const MH_NO_REEXPORTED_DYLIBS: u32 = 0x10_0000;
+pub const MH_DEAD_STRIPPABLE_DYLIB: u32 = 0x40_0000;
 pub const MH_SUBSECTIONS_VIA_SYMBOLS: u32 = 0x2000;
 pub const MH_WEAK_DEFINES: u32 = 0x8000;
 pub const MH_BINDS_TO_WEAK: u32 = 0x1_0000;

@@ -562,8 +562,13 @@ pub fn copy_mach_header<E: Arch>(ctx: &Context<E>, buf: &mut [u8]) {
     let mut hdr = hdr;
     match ctx.args.output_type {
         MH_EXECUTE => hdr.flags |= MH_PIE,
-        MH_DYLIB if !ctx.dylibs.iter().any(|d| d.is_reexported) => {
-            hdr.flags |= MH_NO_REEXPORTED_DYLIBS
+        MH_DYLIB => {
+            if !ctx.dylibs.iter().any(|d| d.is_reexported) {
+                hdr.flags |= MH_NO_REEXPORTED_DYLIBS;
+            }
+            if ctx.args.mark_dead_strippable_dylib {
+                hdr.flags |= MH_DEAD_STRIPPABLE_DYLIB;
+            }
         }
         _ => {}
     }

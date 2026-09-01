@@ -138,6 +138,9 @@ pub struct Args {
     /// -oso_prefix: prefix to strip from N_OSO stab paths ("."  means
     /// the current directory).
     pub oso_prefix: Option<String>,
+    /// -mark_dead_strippable_dylib: mark the output dylib as
+    /// removable when a client binds nothing from it.
+    pub mark_dead_strippable_dylib: bool,
     pub pagezero_size: u64,
 }
 
@@ -195,6 +198,7 @@ impl Default for Args {
             search_dylibs_first: false,
             umbrella: None,
             oso_prefix: None,
+            mark_dead_strippable_dylib: false,
             pagezero_size: 0x1_0000_0000,
         }
     }
@@ -456,6 +460,7 @@ pub fn parse_args(diag: &Diagnostics, cmdline: &[String]) -> Args {
             "-search_dylibs_first" => args.search_dylibs_first = true,
             "-umbrella" => args.umbrella = Some(next_arg(&mut i).to_string()),
             "-oso_prefix" => args.oso_prefix = Some(next_arg(&mut i).to_string()),
+            "-mark_dead_strippable_dylib" => args.mark_dead_strippable_dylib = true,
 
             // Reserve enough header padding that install_name_tool can
             // grow install names in place.
