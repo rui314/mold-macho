@@ -491,8 +491,10 @@ pub fn create_load_commands<E: Arch>(ctx: &Context<E>) -> Vec<Vec<u8>> {
     vec.push(create_build_version_cmd(ctx));
     vec.push(create_source_version_cmd(ctx));
 
-    if find_chunk(ctx, |k| matches!(k, ChunkKind::FunctionStarts)).is_some() {
-        vec.push(create_function_starts_cmd(ctx));
+    if let Some(idx) = find_chunk(ctx, |k| matches!(k, ChunkKind::FunctionStarts)) {
+        if ctx.chunks[idx].hdr.size > 0 {
+            vec.push(create_function_starts_cmd(ctx));
+        }
     }
 
     for dylib in &ctx.dylibs {

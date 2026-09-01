@@ -75,6 +75,11 @@ pub struct Args {
     /// Fold identical functions (on by default; -no_deduplicate turns
     /// it off).
     pub deduplicate: bool,
+    /// Emit LC_FUNCTION_STARTS (on by default).
+    pub function_starts: bool,
+    /// Compute a content-hash LC_UUID (on by default; -no_uuid leaves
+    /// it zeroed - dyld refuses executables without the load command).
+    pub uuid: bool,
     /// -w: suppress warnings.
     pub suppress_warnings: bool,
     /// -undefined dynamic_lookup: leave unresolved symbols to be looked
@@ -128,6 +133,8 @@ impl Default for Args {
             sectcreate: Vec::new(),
             strip_locals: false,
             deduplicate: true,
+            function_starts: true,
+            uuid: true,
             suppress_warnings: false,
             undefined_dynamic_lookup: false,
             dead_strip_dylibs: false,
@@ -377,10 +384,14 @@ pub fn parse_args(diag: &Diagnostics, cmdline: &[String]) -> Args {
             }
 
             "-no_deduplicate" => args.deduplicate = false,
+            "-function_starts" => args.function_starts = true,
+            "-no_function_starts" => args.function_starts = false,
+
+            "-no_uuid" => args.uuid = false,
 
             // Ignored options. ld64 takes -O<n> as a linker
             // optimization level hint.
-            "-demangle" | "-no_uuid" | "-O0" | "-O1" | "-O2" | "-O3" => {}
+            "-demangle" | "-O0" | "-O1" | "-O2" | "-O3" => {}
 
             "-lto_library" => args.lto_library = Some(next_arg(&mut i).to_string()),
 

@@ -2413,6 +2413,9 @@ fn write_fixup_chains<E: Arch>(ctx: &Context<E>, buf: &mut [u8]) {
 /// image base. Debuggers and crash reporters use it to attribute
 /// addresses to functions even for stripped binaries.
 fn build_function_starts<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
+    if !ctx.args.function_starts {
+        return Vec::new();
+    }
     let mut addrs: Vec<u64> = Vec::new();
     for sym in &ctx.symtab.syms {
         if !matches!(sym.origin, Origin::Obj(_)) {
@@ -2606,13 +2609,15 @@ pub fn copy_chunks<E: Arch>(ctx: &Context<E>, buf: &mut [u8]) {
     })
     .map_or(buf.len(), |idx| ctx.chunks[idx].hdr.fileoff as usize);
 
-    let mut hash = [0; 32];
-    crate::util::sha256(&buf[..sig_start], &mut hash);
-    let mut uuid: [u8; 16] = hash[..16].try_into().unwrap();
-    uuid[6] = (uuid[6] & 0x0f) | 0x40; // version 4
-    uuid[8] = (uuid[8] & 0x3f) | 0x80; // RFC 4122 variant
-    *ctx.uuid.lock().unwrap() = uuid;
-    output_chunks::copy_mach_header(ctx, buf);
+    if ctx.args.uuid {
+        let mut hash = [0; 32];
+        crate::util::sha256(&buf[..sig_start], &mut hash);
+        let mut uuid: [u8; 16] = hash[..16].try_into().unwrap();
+        uuid[6] = (uuid[6] & 0x0f) | 0x40; // version 4
+        uuid[8] = (uuid[8] & 0x3f) | 0x80; // RFC 4122 variant
+        *ctx.uuid.lock().unwrap() = uuid;
+        output_chunks::copy_mach_header(ctx, buf);
+    }
 
     if ctx.args.adhoc_codesign {
         output_chunks::write_code_signature(ctx, buf);
