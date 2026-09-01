@@ -26,18 +26,21 @@ use crate::symbol::Origin;
 use crate::util::align_to;
 
 pub fn link<E: Arch>(ctx: &mut Context<E>) {
-    // Lay out the merged sections from address zero.
+    // Lay out the merged sections from address zero, zero-fill
+    // sections last: an object's file image mirrors its address
+    // space (each section's file offset is the segment's plus its
+    // address), so content sections must precede the sections that
+    // occupy addresses but no file bytes.
     let mut addr: u64 = 0;
-    let mut section_chunks: Vec<usize> = Vec::new();
-    for idx in 0..ctx.chunks.len() {
-        if !matches!(ctx.chunks[idx].kind, ChunkKind::Output { .. }) {
-            continue;
-        }
+    let mut section_chunks: Vec<usize> = (0..ctx.chunks.len())
+        .filter(|&idx| matches!(ctx.chunks[idx].kind, ChunkKind::Output { .. }))
+        .collect();
+    section_chunks.sort_by_key(|&idx| ctx.chunks[idx].is_zerofill());
+    for &idx in &section_chunks {
         let chunk = &mut ctx.chunks[idx];
         addr = align_to(addr, 1 << chunk.hdr.p2align);
         chunk.hdr.addr = addr;
         addr += chunk.hdr.size;
-        section_chunks.push(idx);
     }
     let vmsize = addr;
 
@@ -295,10 +298,12 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
             sect_offsets.push(0u64);
             continue;
         }
-        off = align_to(off, 1 << chunk.hdr.p2align);
-        chunk.hdr.fileoff = off;
-        sect_offsets.push(off);
-        off += chunk.hdr.size;
+        // Mirror the address layout so the segment's filesize can
+        // never exceed its vmsize.
+        let fileoff = seg_fileoff + chunk.hdr.addr;
+        chunk.hdr.fileoff = fileoff;
+        sect_offsets.push(fileoff);
+        off = fileoff + chunk.hdr.size;
     }
     // The synthetic compact-unwind section sits last.
     let mut cu_off = 0u64;

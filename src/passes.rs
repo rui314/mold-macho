@@ -215,9 +215,19 @@ fn collect_file<E: Arch>(
 fn load_pending<E: Arch>(ctx: &mut Context<E>, pending: Vec<PendingObject>) {
     use rayon::prelude::*;
     let diag = ctx.diag.clone();
+    let keep_debug = ctx.args.relocatable;
     let staged: Vec<input_files::StagedObject> = pending
         .par_iter()
-        .map(|p| input_files::stage_object::<E>(&diag, p.mf, p.alive, p.hidden, p.priority))
+        .map(|p| {
+            input_files::stage_object::<E>(
+                &diag,
+                p.mf,
+                p.alive,
+                p.hidden,
+                p.priority,
+                keep_debug,
+            )
+        })
         .collect();
     for st in staged {
         input_files::integrate_object(ctx, st);
@@ -1647,12 +1657,17 @@ pub fn create_output_chunks<E: Arch>(ctx: &mut Context<E>) {
                         thunks: vec![],
                     },
                 );
-                chunk.hdr.flags = ctx.isecs[i].hdr.flags & !S_ATTR_DEBUG;
+                // A final image never contains debug sections, so the
+                // attribute is dropped; a relocatable output keeps it,
+                // marking the carried DWARF for the next link.
+                let attr_mask = if ctx.args.relocatable { !0 } else { !S_ATTR_DEBUG };
+                chunk.hdr.flags = ctx.isecs[i].hdr.flags & attr_mask;
                 ctx.chunks.push(chunk);
                 ctx.chunks.len() - 1
             }
         };
 
+        let attr_mask = if ctx.args.relocatable { !0 } else { !S_ATTR_DEBUG };
         let chunk = &mut ctx.chunks[chunk_idx];
         chunk.hdr.p2align = chunk.hdr.p2align.max(ctx.isecs[i].hdr.p2align);
         // __thread_vars contains pointers but clang emits it with an
@@ -1660,7 +1675,7 @@ pub fn create_output_chunks<E: Arch>(ctx: &mut Context<E>) {
         if chunk.hdr.flags & SECTION_TYPE == S_THREAD_LOCAL_VARIABLES {
             chunk.hdr.p2align = chunk.hdr.p2align.max(3);
         }
-        chunk.hdr.flags |= ctx.isecs[i].hdr.flags & !SECTION_TYPE & !S_ATTR_DEBUG;
+        chunk.hdr.flags |= ctx.isecs[i].hdr.flags & !SECTION_TYPE & attr_mask;
         let ChunkKind::Output { isecs, .. } = &mut chunk.kind else {
             unreachable!()
         };
