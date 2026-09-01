@@ -295,6 +295,121 @@ pub fn check_undefined_symbols<E: Arch>(ctx: &Context<E>) {
     }
 }
 
+/// Removes subsections that are not reachable from the roots: the entry
+/// point, exported symbols (for a dylib), and everything the format
+/// requires to stay (initializers, no-dead-strip sections and symbols).
+/// Reachability follows relocations and unwind-info edges.
+pub fn dead_strip<E: Arch>(ctx: &mut Context<E>) {
+    let mut live = vec![false; ctx.isecs.len()];
+    let mut stack: Vec<usize> = Vec::new();
+    let mark = |live: &mut Vec<bool>, stack: &mut Vec<usize>, id: usize| {
+        if !live[id] {
+            live[id] = true;
+            stack.push(id);
+        }
+    };
+
+    // Section-level roots
+    for (id, isec) in ctx.isecs.iter().enumerate() {
+        let keep_type = matches!(
+            isec.hdr.section_type(),
+            S_MOD_INIT_FUNC_POINTERS | S_INIT_FUNC_OFFSETS | S_THREAD_LOCAL_VARIABLES
+        );
+        let keep_attr =
+            isec.hdr.flags & (S_ATTR_NO_DEAD_STRIP | S_ATTR_LIVE_SUPPORT) != 0;
+        if keep_type || keep_attr || isec.hdr.sectname() == "__objc_imageinfo" {
+            mark(&mut live, &mut stack, id);
+        }
+    }
+
+    // Symbol-level roots
+    for sym in &ctx.symtab.syms {
+        let is_root = sym.no_dead_strip
+            || (ctx.args.output_type != MH_EXECUTE && sym.is_extern && sym.is_defined());
+        if is_root {
+            if let Some(isec) = sym.isec {
+                mark(&mut live, &mut stack, isec);
+            }
+        }
+    }
+    if ctx.args.output_type == MH_EXECUTE {
+        if let Some(id) = ctx.symtab.get(&ctx.args.entry) {
+            if let Some(isec) = ctx.symtab[id].isec {
+                mark(&mut live, &mut stack, isec);
+            }
+        }
+    }
+
+    // Unwind records for a live function keep its LSDA and personality
+    // alive; index them by function subsection.
+    let mut unwind_by_isec: std::collections::HashMap<usize, Vec<usize>> =
+        std::collections::HashMap::new();
+    for (i, rec) in ctx.unwind_records.iter().enumerate() {
+        unwind_by_isec.entry(rec.isec).or_default().push(i);
+    }
+
+    while let Some(id) = stack.pop() {
+        for rel in &ctx.isecs[id].relocs {
+            match rel.target {
+                RelocTarget::Sym(idx) => {
+                    let sym = &ctx.symtab[ctx.objs[ctx.isecs[id].obj].syms[idx]];
+                    if let Some(isec) = sym.isec {
+                        mark(&mut live, &mut stack, isec);
+                    }
+                }
+                RelocTarget::Section(isec) => mark(&mut live, &mut stack, isec),
+            }
+        }
+
+        for &rec_idx in unwind_by_isec.get(&id).map(Vec::as_slice).unwrap_or(&[]) {
+            let rec = &ctx.unwind_records[rec_idx];
+            if let Some((lsda, _)) = rec.lsda {
+                mark(&mut live, &mut stack, lsda);
+            }
+            let mut personality = rec.personality;
+            if let Some(fde) = rec.fde {
+                if let Some((lsda, _)) = ctx.fdes[fde].lsda {
+                    mark(&mut live, &mut stack, lsda);
+                }
+                personality = personality.or(ctx.cies[ctx.fdes[fde].cie].personality);
+            }
+            if let Some(p) = personality {
+                if let Some(isec) = ctx.symtab[p].isec {
+                    mark(&mut live, &mut stack, isec);
+                }
+            }
+        }
+    }
+
+    for (id, isec) in ctx.isecs.iter_mut().enumerate() {
+        isec.is_alive = live[id];
+    }
+
+    // Drop unwind records and FDEs of dead functions, remapping the
+    // record-to-FDE links.
+    let mut fde_map = vec![usize::MAX; ctx.fdes.len()];
+    let mut kept_fdes = Vec::new();
+    let fdes = std::mem::take(&mut ctx.fdes);
+    for (i, fde) in fdes.into_iter().enumerate() {
+        if live[fde.isec] {
+            fde_map[i] = kept_fdes.len();
+            kept_fdes.push(fde);
+        }
+    }
+    ctx.fdes = kept_fdes;
+    let isecs = &ctx.isecs;
+    let map = &fde_map;
+    ctx.unwind_records.retain_mut(|rec| {
+        if !isecs[rec.isec].is_alive {
+            return false;
+        }
+        if let Some(fde) = &mut rec.fde {
+            *fde = map[*fde];
+        }
+        true
+    });
+}
+
 /// Decides which symbols need a stub or a GOT slot, from how relocations
 /// refer to them.
 pub fn scan_relocs<E: Arch>(ctx: &mut Context<E>) {

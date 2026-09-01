@@ -340,6 +340,8 @@ fn parse_symbol<E: Arch>(
                     sym.is_weak_def = is_weak;
                     sym.is_imported = false;
                     sym.is_common = false;
+                    sym.no_dead_strip =
+                        nlist.n_desc & (N_NO_DEAD_STRIP | REFERENCED_DYNAMICALLY) != 0;
                 }
             }
         }

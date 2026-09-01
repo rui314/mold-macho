@@ -36,6 +36,7 @@ pub struct Args {
     pub framework_paths: Vec<String>,
     pub inputs: Vec<InputArg>,
     pub adhoc_codesign: bool,
+    pub dead_strip: bool,
     pub dynamic: bool,
     pub headerpad: u64,
     pub pagezero_size: u64,
@@ -57,6 +58,7 @@ impl Default for Args {
             framework_paths: Vec::new(),
             inputs: Vec::new(),
             adhoc_codesign: cfg!(target_arch = "aarch64"),
+            dead_strip: false,
             dynamic: true,
             headerpad: 0x100,
             pagezero_size: 0x1_0000_0000,
@@ -132,10 +134,10 @@ pub fn parse_args(diag: &Diagnostics, cmdline: &[String]) -> Args {
                 }
             }
 
-            // Ignored options. -dead_strip is accepted but not yet
-            // implemented; keeping unreferenced code is correct, just
-            // larger.
-            "-demangle" | "-no_deduplicate" | "-no_uuid" | "-dead_strip" => {}
+            "-dead_strip" => args.dead_strip = true,
+
+            // Ignored options
+            "-demangle" | "-no_deduplicate" | "-no_uuid" => {}
 
             // Ignored options with an argument
             "-lto_library" | "-mllvm" | "-dependency_info" | "-object_path_lto" => {
