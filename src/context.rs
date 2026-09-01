@@ -53,6 +53,9 @@ pub struct Context<E: Arch> {
     pub objc_stubs: Vec<(SymbolId, String)>,
     /// The _objc_msgSend symbol, once objc stubs exist.
     pub objc_msgsend_sym: Option<SymbolId>,
+    /// section$start/end and segment$start/end symbols to resolve
+    /// after layout: (symbol, is_start, segment, section).
+    pub boundary_syms: Vec<(SymbolId, bool, String, Option<String>)>,
     /// Contents of the synthesized __objc_methname section, and each
     /// selector's offset in it.
     pub objc_methname_data: Vec<u8>,
@@ -124,6 +127,7 @@ impl<E: Arch> Context<E> {
             thread_ptr_syms: Vec::new(),
             objc_stubs: Vec::new(),
             objc_msgsend_sym: None,
+            boundary_syms: Vec::new(),
             objc_methname_data: Vec::new(),
             objc_methname_offs: Vec::new(),
             rebase_data: Vec::new(),

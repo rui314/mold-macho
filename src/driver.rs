@@ -132,6 +132,7 @@ pub fn link<E: Arch>(cmdline: &[String], diag: &Diagnostics) -> Result<i32, Stri
     passes::create_output_chunks(&mut ctx);
     passes::compute_symtab(&mut ctx);
     passes::assign_offsets(&mut ctx);
+    passes::resolve_boundary_symbols(&mut ctx);
     passes::resolve_entry(&mut ctx);
     ctx.diag.checkpoint();
     crate::mapfile::print_map(&ctx);

@@ -1346,6 +1346,73 @@ pub fn create_synthetic_symbols<E: Arch>(ctx: &mut Context<E>) {
         sym.value = ctx.args.pagezero_size;
         sym.is_extern = false;
     }
+
+    // ld64's layout-boundary symbols: an undefined reference to
+    // section$start$__SEG$__sect (or $end$, or segment$start$__SEG /
+    // segment$end$__SEG) resolves to the boundary's final address, and
+    // wills the named section into existence if nothing else creates
+    // it. Their values can only be known after layout, so they are
+    // claimed here and patched in resolve_boundary_symbols.
+    for id in 0..ctx.symtab.syms.len() {
+        let sym = &ctx.symtab[id];
+        if !sym.is_used || sym.is_defined() {
+            continue;
+        }
+        let parsed = if let Some(rest) = sym.name.strip_prefix("section$") {
+            rest.split_once('$').and_then(|(which, rest)| {
+                rest.split_once('$').map(|(seg, sect)| {
+                    (which == "start", seg.to_string(), Some(sect.to_string()))
+                })
+            })
+        } else if let Some(rest) = sym.name.strip_prefix("segment$") {
+            rest.split_once('$')
+                .map(|(which, seg)| (which == "start", seg.to_string(), None))
+        } else {
+            None
+        };
+        let Some((is_start, seg, sect)) = parsed else {
+            continue;
+        };
+        let sym = &mut ctx.symtab[id];
+        sym.origin = Origin::Synthetic;
+        sym.is_extern = false;
+        ctx.boundary_syms.push((id, is_start, seg, sect));
+    }
+}
+
+/// Fills in the boundary symbols' addresses once every chunk and
+/// segment has one.
+pub fn resolve_boundary_symbols<E: Arch>(ctx: &mut Context<E>) {
+    for i in 0..ctx.boundary_syms.len() {
+        let (id, is_start, seg, sect) = ctx.boundary_syms[i].clone();
+        let value = match &sect {
+            Some(sect) => {
+                let Some(chunk) = ctx
+                    .chunks
+                    .iter()
+                    .find(|c| c.hdr.is_sect && c.hdr.segname == seg && c.hdr.sectname == *sect)
+                else {
+                    fatal!(ctx, "no section for boundary symbol: {}", ctx.symtab[id].name);
+                };
+                if is_start {
+                    chunk.hdr.addr
+                } else {
+                    chunk.hdr.addr + chunk.hdr.size
+                }
+            }
+            None => {
+                let Some(segment) = ctx.segments.iter().find(|s| s.name == seg) else {
+                    fatal!(ctx, "no segment for boundary symbol: {}", ctx.symtab[id].name);
+                };
+                if is_start {
+                    segment.cmd.vmaddr
+                } else {
+                    segment.cmd.vmaddr + segment.cmd.vmsize
+                }
+            }
+        };
+        ctx.symtab[id].value = value;
+    }
 }
 
 /// Lays out the subsections of one big executable output section with
@@ -1694,6 +1761,22 @@ pub fn create_output_chunks<E: Arch>(ctx: &mut Context<E>) {
         ctx.chunks.push(chunk);
     }
     ctx.args.add_empty_section = empties;
+
+    // Sections that exist only because a boundary symbol names them.
+    for i in 0..ctx.boundary_syms.len() {
+        let (_, _, seg, Some(sect)) = &ctx.boundary_syms[i] else {
+            continue;
+        };
+        if !ctx
+            .chunks
+            .iter()
+            .any(|c| c.hdr.is_sect && c.hdr.segname == *seg && c.hdr.sectname == *sect)
+        {
+            let segname: &'static str = String::leak(seg.clone());
+            let chunk = Chunk::new(segname, sect, ChunkKind::SectCreate { data: &[] });
+            ctx.chunks.push(chunk);
+        }
+    }
 
     // Merge the objects' __objc_imageinfo records: the Swift version
     // must agree, the Swift language version is the newest, and the
