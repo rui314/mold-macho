@@ -19,4 +19,5 @@ pub mod passes;
 pub mod relocatable;
 pub mod symbol;
 pub mod tapi;
+pub mod thunks;
 pub mod util;
