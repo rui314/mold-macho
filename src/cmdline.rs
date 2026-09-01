@@ -142,6 +142,9 @@ pub struct Args {
     /// removable when a client binds nothing from it.
     pub mark_dead_strippable_dylib: bool,
     pub pagezero_size: u64,
+    /// True when -pagezero_size was given explicitly (it is an error
+    /// anywhere but a main executable).
+    pub explicit_pagezero: bool,
 }
 
 impl Default for Args {
@@ -200,6 +203,7 @@ impl Default for Args {
             oso_prefix: None,
             mark_dead_strippable_dylib: false,
             pagezero_size: 0x1_0000_0000,
+            explicit_pagezero: false,
         }
     }
 }
@@ -363,7 +367,8 @@ pub fn parse_args(diag: &Diagnostics, cmdline: &[String]) -> Args {
             "-dynamic" => args.dynamic = true,
             "-headerpad" => args.headerpad = parse_hex(diag, opt, next_arg(&mut i)),
             "-pagezero_size" => {
-                args.pagezero_size = parse_hex(diag, opt, next_arg(&mut i))
+                args.pagezero_size = parse_hex(diag, opt, next_arg(&mut i));
+                args.explicit_pagezero = true;
             }
             "-stack_size" => args.stack_size = parse_hex(diag, opt, next_arg(&mut i)),
             "-sectcreate" => {
@@ -529,6 +534,12 @@ pub fn parse_args(diag: &Diagnostics, cmdline: &[String]) -> Args {
     // A dylib is loaded at an arbitrary address; only a main executable
     // reserves the low 4 GiB against NULL dereferences.
     if args.output_type != MH_EXECUTE {
+        if args.explicit_pagezero {
+            fatal!(
+                diag,
+                "-pagezero_size option can only be used when linking a main executable"
+            );
+        }
         args.pagezero_size = 0;
     }
 
