@@ -84,20 +84,46 @@ fn is_discarded_section(hdr: &MachSection) -> bool {
     hdr.flags & S_ATTR_DEBUG != 0 || hdr.segname() == "__DWARF" || hdr.segname() == "__LD"
 }
 
-pub fn parse_object<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile, alive: bool) -> usize {
+/// An object file parsed in isolation: all cross-references are local
+/// indices, so staging runs in parallel across files with no shared
+/// state; `integrate_object` rebases them into the global arenas.
+pub struct StagedObject {
+    pub mf: &'static MappedFile,
+    pub alive: bool,
+    pub priority: u32,
+    pub sect_hdrs: Vec<MachSection>,
+    pub linker_options: Vec<Vec<String>>,
+    pub isecs: Vec<InputSection>,
+    pub subsecs: Vec<usize>,
+    pub nlists: Vec<NList>,
+    pub sym_names: Vec<&'static str>,
+    pub unwind: Vec<UnwindRecord>,
+    pub cies: Vec<Cie>,
+    pub fdes: Vec<Fde>,
+    pub objc_image_info: Option<u32>,
+    pub has_debug_info: bool,
+}
+
+/// Parses one object file without touching any linker state.
+pub fn stage_object<E: Arch>(
+    diag: &crate::error::Diagnostics,
+    mf: &'static MappedFile,
+    alive: bool,
+    priority: u32,
+) -> StagedObject {
     let data = mf.data;
     let hdr = MachHeader::read_from(data);
 
     if hdr.cputype != E::CPUTYPE {
         fatal!(
-            ctx,
+            diag,
             "{}: incompatible CPU type: expected {}",
             mf.name,
             E::NAME
         );
     }
 
-    let obj_idx = ctx.objs.len();
+    let mut isecs: Vec<InputSection> = Vec::new();
     let mut sect_hdrs = Vec::new();
     let mut symtab_cmd = None;
     let mut linker_options = Vec::new();
@@ -205,7 +231,7 @@ pub fn parse_object<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile, aliv
                         points.push(sect.addr + start as u64);
                         let Some(len) = contents[start..].iter().position(|&b| b == 0)
                         else {
-                            fatal!(ctx, "{}: malformed __cstring section", mf.name);
+                            fatal!(diag, "{}: malformed __cstring section", mf.name);
                         };
                         start += len + 1;
                     }
@@ -233,8 +259,8 @@ pub fn parse_object<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile, aliv
                 let lo = sect.offset as u64 + (start - sect.addr);
                 &data[lo as usize..(lo + (end - start)) as usize]
             };
-            ctx.isecs.push(InputSection {
-                obj: obj_idx,
+            isecs.push(InputSection {
+                obj: usize::MAX,
                 hdr: *sect,
                 input_addr: start,
                 size: end - start,
@@ -245,12 +271,12 @@ pub fn parse_object<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile, aliv
                 is_alive: true,
                 replacement: None,
             });
-            by_ordinal[i].push(ctx.isecs.len() - 1);
-            subsecs.push(ctx.isecs.len() - 1);
+            by_ordinal[i].push(isecs.len() - 1);
+            subsecs.push(isecs.len() - 1);
         }
     }
 
-    subsecs.sort_by_key(|&id| ctx.isecs[id].input_addr);
+    subsecs.sort_by_key(|&id| isecs[id].input_addr);
 
     // Read each section's relocations and distribute them to its
     // subsections, rebasing location offsets and section-relative
@@ -260,56 +286,51 @@ pub fn parse_object<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile, aliv
             continue;
         }
         let raw: Vec<MachRel> = read_array(data, sect.reloff as usize, sect.nreloc as usize);
-        let rels = E::read_relocs(&ctx.diag, &mf.name, &sect_hdrs, sect, data, &raw);
+        let rels = E::read_relocs(diag, &mf.name, &sect_hdrs, sect, data, &raw);
 
         for mut rel in rels {
             let loc_addr = sect.addr + rel.offset as u64;
-            let Some((sub, sub_off)) = find_subsec(&ctx.isecs, &by_ordinal[i], loc_addr)
+            let Some((sub, sub_off)) = find_subsec(&isecs, &by_ordinal[i], loc_addr)
             else {
-                fatal!(ctx, "{}: relocation outside its section", mf.name);
+                fatal!(diag, "{}: relocation outside its section", mf.name);
             };
             rel.offset = sub_off as u32;
 
             if let crate::input_sections::RelocTarget::Section(sect_pos) = rel.target {
                 let taddr = (sect_hdrs[sect_pos].addr as i64 + rel.addend) as u64;
-                let Some((tsub, toff)) = find_subsec(&ctx.isecs, &subsecs, taddr) else {
-                    fatal!(ctx, "{}: relocation against a discarded section", mf.name);
+                let Some((tsub, toff)) = find_subsec(&isecs, &subsecs, taddr) else {
+                    fatal!(diag, "{}: relocation against a discarded section", mf.name);
                 };
                 rel.target = crate::input_sections::RelocTarget::Section(tsub);
                 rel.addend = toff as i64;
             }
-            ctx.isecs[sub].relocs.push(rel);
+            isecs[sub].relocs.push(rel);
         }
     }
 
-    // Parse symbols
-    let mut syms = Vec::with_capacity(nlists.len());
-    for nlist in &nlists {
-        syms.push(parse_symbol(ctx, strtab, nlist));
-    }
+    // Record symbol names; interning happens at integration.
+    let sym_names: Vec<&'static str> = nlists
+        .iter()
+        .map(|nlist| symbol_name(strtab, nlist))
+        .collect();
 
-    let unwind_start = ctx.unwind_records.len();
+    let mut unwind = Vec::new();
+    let mut cies = Vec::new();
+    let mut fdes = Vec::new();
     if let Some(hdr) = sect_hdrs
         .iter()
         .find(|s| s.segname() == "__LD" && s.sectname() == "__compact_unwind")
     {
-        parse_compact_unwind(ctx, hdr, &subsecs, &syms, &nlists, data, &mf.name);
+        parse_compact_unwind::<E>(diag, hdr, &isecs, &subsecs, &nlists, data, &mf.name, &mut unwind);
     }
 
     if let Some(hdr) = sect_hdrs
         .iter()
         .find(|s| s.segname() == "__TEXT" && s.sectname() == "__eh_frame")
     {
-        parse_eh_frame(
-            ctx,
-            obj_idx,
-            hdr,
-            &subsecs,
-            &syms,
-            &nlists,
-            data,
-            unwind_start,
-            &mf.name,
+        parse_eh_frame::<E>(
+            diag, hdr, &isecs, &subsecs, &nlists, data, &mf.name, &mut unwind, &mut cies,
+            &mut fdes,
         );
     }
 
@@ -324,21 +345,105 @@ pub fn parse_object<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile, aliv
         .iter()
         .any(|s| s.segname() == "__DWARF" && s.sectname() == "__debug_info");
 
-    let priority = ctx.next_priority();
-    ctx.objs.push(ObjectFile {
+    StagedObject {
         mf,
-        is_alive: alive,
+        alive,
         priority,
-        linker_options,
         sect_hdrs,
+        linker_options,
+        isecs,
         subsecs,
+        nlists,
+        sym_names,
+        unwind,
+        cies,
+        fdes,
         objc_image_info,
         has_debug_info,
-        nlists,
+    }
+}
+
+/// Appends a staged object to the global arenas, rebasing its local
+/// indices and interning its symbol names.
+pub fn integrate_object<E: Arch>(ctx: &mut Context<E>, staged: StagedObject) -> usize {
+    let obj_idx = ctx.objs.len();
+    let isec_base = ctx.isecs.len();
+    let fde_base = ctx.fdes.len();
+    let cie_base = ctx.cies.len();
+
+    for mut isec in staged.isecs {
+        isec.obj = obj_idx;
+        for rel in &mut isec.relocs {
+            if let crate::input_sections::RelocTarget::Section(local) = rel.target {
+                rel.target = crate::input_sections::RelocTarget::Section(isec_base + local);
+            }
+        }
+        ctx.isecs.push(isec);
+    }
+
+    let mut syms = Vec::with_capacity(staged.nlists.len());
+    for (nlist, name) in staged.nlists.iter().zip(&staged.sym_names) {
+        let id = if nlist.is_stab() || !nlist.is_extern() {
+            ctx.symtab.add_local(name)
+        } else {
+            ctx.symtab.intern(name)
+        };
+        syms.push(id);
+    }
+
+    for mut rec in staged.unwind {
+        rec.isec += isec_base;
+        if let Some((lsda, _)) = &mut rec.lsda {
+            *lsda += isec_base;
+        }
+        if let Some(fde) = &mut rec.fde {
+            *fde += fde_base;
+        }
+        // The personality was recorded as a local symbol index.
+        if let Some(p) = &mut rec.personality {
+            *p = syms[*p];
+        }
+        ctx.unwind_records.push(rec);
+    }
+    for mut cie in staged.cies {
+        cie.obj = obj_idx;
+        if let Some(p) = &mut cie.personality {
+            *p = syms[*p];
+        }
+        ctx.cies.push(cie);
+    }
+    for mut fde in staged.fdes {
+        fde.obj = obj_idx;
+        fde.isec += isec_base;
+        fde.cie += cie_base;
+        if let Some((lsda, _)) = &mut fde.lsda {
+            *lsda += isec_base;
+        }
+        ctx.fdes.push(fde);
+    }
+
+    ctx.objs.push(ObjectFile {
+        mf: staged.mf,
+        is_alive: staged.alive,
+        priority: staged.priority,
+        linker_options: staged.linker_options,
+        sect_hdrs: staged.sect_hdrs,
+        subsecs: staged.subsecs.into_iter().map(|i| i + isec_base).collect(),
+        objc_image_info: staged.objc_image_info,
+        has_debug_info: staged.has_debug_info,
+        nlists: staged.nlists,
         syms,
         lto_module: None,
     });
     obj_idx
+}
+
+/// Parses one object and adds it to the link immediately.
+pub fn parse_object<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile, alive: bool) -> usize {
+    let priority = ctx.next_priority();
+    let diag = ctx.diag.clone();
+    let staged = stage_object::<E>(&diag, mf, alive, priority);
+    integrate_object(ctx, staged)
 }
 
 /// Loads the LTO plugin on first use.
@@ -409,22 +514,6 @@ fn symbol_name(strtab: &'static [u8], nlist: &NList) -> &'static str {
     std::str::from_utf8(&rest[..len]).unwrap_or("")
 }
 
-fn parse_symbol<E: Arch>(
-    ctx: &mut Context<E>,
-    strtab: &'static [u8],
-    nlist: &NList,
-) -> SymbolId {
-    let name = symbol_name(strtab, nlist);
-
-    if nlist.is_stab() {
-        return ctx.symtab.add_local(name);
-    }
-    if nlist.is_extern() {
-        ctx.symtab.intern(name)
-    } else {
-        ctx.symtab.add_local(name)
-    }
-}
 
 /// A record from a __compact_unwind section, describing how to unwind
 /// the stack through one function.
@@ -448,20 +537,20 @@ pub struct UnwindRecord {
 /// Parses a __LD,__compact_unwind section into unwind records. The
 /// section is an array of 32-byte entries whose pointer fields are set by
 /// relocations.
+#[allow(clippy::too_many_arguments)]
 fn parse_compact_unwind<E: Arch>(
-    ctx: &mut Context<E>,
+    diag: &crate::error::Diagnostics,
     hdr: &MachSection,
+    isecs: &[InputSection],
     subsecs: &[usize],
-    syms: &[SymbolId],
     nlists: &[NList],
     data: &'static [u8],
     file_name: &str,
+    out: &mut Vec<UnwindRecord>,
 ) {
-    // A snapshot of the object's subsection geometry, so lookups don't
-    // borrow the context.
     let geo: Vec<(u64, u64, usize)> = subsecs
         .iter()
-        .map(|&id| (ctx.isecs[id].input_addr, ctx.isecs[id].size, id))
+        .map(|&id| (isecs[id].input_addr, isecs[id].size, id))
         .collect();
     let find_subsec = |addr: u64| -> Option<(usize, u32)> {
         let i = geo.partition_point(|&(start, _, _)| start <= addr);
@@ -477,7 +566,7 @@ fn parse_compact_unwind<E: Arch>(
     };
     const ENTRY_SIZE: usize = 32;
     if hdr.size % ENTRY_SIZE as u64 != 0 {
-        fatal!(ctx, "{file_name}: invalid __compact_unwind section size");
+        fatal!(diag, "{file_name}: invalid __compact_unwind section size");
     }
 
     let read_u64 = |off: u64| {
@@ -508,7 +597,7 @@ fn parse_compact_unwind<E: Arch>(
     let rels: Vec<MachRel> = read_array(data, hdr.reloff as usize, hdr.nreloc as usize);
     for r in &rels {
         if r.r_address as u64 >= hdr.size || r.r_length() != 3 {
-            fatal!(ctx, "{file_name}: __compact_unwind: unsupported relocation");
+            fatal!(diag, "{file_name}: __compact_unwind: unsupported relocation");
         }
         let idx = r.r_address as usize / ENTRY_SIZE;
         let value = read_u64(r.r_address as u64);
@@ -524,25 +613,25 @@ fn parse_compact_unwind<E: Arch>(
                     value
                 };
                 let Some((isec, off)) = find_subsec(addr) else {
-                    fatal!(ctx, "{file_name}: __compact_unwind: bad function reference");
+                    fatal!(diag, "{file_name}: __compact_unwind: bad function reference");
                 };
                 records[idx].isec = isec;
                 records[idx].input_offset = off;
             }
-            // The personality function
+            // The personality function, recorded as a local symbol
+            // index and mapped to a symbol at integration.
             16 => {
                 let sym = if r.is_extern() {
-                    Some(syms[r.r_symbolnum() as usize])
+                    Some(r.r_symbolnum() as usize)
                 } else {
                     // Resolve a section-relative reference back to the
                     // symbol at that address.
                     nlists
                         .iter()
                         .position(|n| n.is_extern() && n.n_value == value)
-                        .map(|i| syms[i])
                 };
                 let Some(sym) = sym else {
-                    fatal!(ctx, "{file_name}: __compact_unwind: unsupported personality");
+                    fatal!(diag, "{file_name}: __compact_unwind: unsupported personality");
                 };
                 records[idx].personality = Some(sym);
             }
@@ -554,11 +643,11 @@ fn parse_compact_unwind<E: Arch>(
                     value
                 };
                 let Some(lsda) = find_subsec(addr) else {
-                    fatal!(ctx, "{file_name}: __compact_unwind: bad LSDA reference");
+                    fatal!(diag, "{file_name}: __compact_unwind: bad LSDA reference");
                 };
                 records[idx].lsda = Some(lsda);
             }
-            _ => fatal!(ctx, "{file_name}: __compact_unwind: unsupported relocation"),
+            _ => fatal!(diag, "{file_name}: __compact_unwind: unsupported relocation"),
         }
     }
 
@@ -568,7 +657,7 @@ fn parse_compact_unwind<E: Arch>(
     records.retain(|rec| {
         rec.isec != usize::MAX && (rec.encoding & UNWIND_MODE_MASK) != E::UNWIND_MODE_DWARF
     });
-    ctx.unwind_records.extend(records);
+    out.extend(records);
 }
 
 /// A DWARF Common Information Entry from an object's __eh_frame.
@@ -624,21 +713,22 @@ fn read_uleb_at(data: &[u8], pos: &mut usize) -> u64 {
 /// personality cell to be GOT-relative, and dropping the rest.
 #[allow(clippy::too_many_arguments)]
 fn parse_eh_frame<E: Arch>(
-    ctx: &mut Context<E>,
-    obj_idx: usize,
+    diag: &crate::error::Diagnostics,
     hdr: &MachSection,
+    isecs: &[InputSection],
     subsecs: &[usize],
-    syms: &[SymbolId],
     nlists: &[NList],
     data: &'static [u8],
-    new_unwind_start: usize,
     file_name: &str,
+    unwind: &mut Vec<UnwindRecord>,
+    out_cies: &mut Vec<Cie>,
+    out_fdes: &mut Vec<Fde>,
 ) {
     let geo: Vec<(u64, u64, usize)> = subsecs
         .iter()
-        .map(|&id| (ctx.isecs[id].input_addr, ctx.isecs[id].size, id))
+        .map(|&id| (isecs[id].input_addr, isecs[id].size, id))
         .collect();
-    let find_subsec = |addr: u64| -> Option<(usize, u32)> {
+    let find_local = |addr: u64| -> Option<(usize, u32)> {
         let i = geo.partition_point(|&(start, _, _)| start <= addr);
         if i == 0 {
             return None;
@@ -664,7 +754,7 @@ fn parse_eh_frame<E: Arch>(
             let r2 = rels[i + 1];
             i += 2;
             if r2.r_type() != E::RELOC_UNSIGNED || !r1.is_extern() || !r2.is_extern() {
-                fatal!(ctx, "{file_name}: __eh_frame: unsupported relocation pair");
+                fatal!(diag, "{file_name}: __eh_frame: unsupported relocation pair");
             }
             let target1 = nlists[r1.r_symbolnum() as usize].n_value;
             let target2 = nlists[r2.r_symbolnum() as usize].n_value;
@@ -680,31 +770,30 @@ fn parse_eh_frame<E: Arch>(
                     let add = delta as u32 as i32 as i64 as u64;
                     loc[..8].copy_from_slice(&val.wrapping_add(add).to_le_bytes());
                 }
-                _ => fatal!(ctx, "{file_name}: __eh_frame: invalid relocation size"),
+                _ => fatal!(diag, "{file_name}: __eh_frame: invalid relocation size"),
             }
         } else if r1.r_type() == E::RELOC_GOTPC {
             i += 1;
         } else {
-            fatal!(ctx, "{file_name}: __eh_frame: unknown relocation type");
+            fatal!(diag, "{file_name}: __eh_frame: unknown relocation type");
         }
     }
 
     // Split the section into records: a zero ID marks a CIE, anything
     // else is an FDE pointing back at its CIE.
-    let first_cie = ctx.cies.len();
     let mut fdes: Vec<(u32, Vec<u8>)> = Vec::new();
     let mut pos = 0;
     while pos < contents.len() {
         let len = u32::from_le_bytes(contents[pos..pos + 4].try_into().unwrap()) as usize;
         if len == 0xffff_ffff {
-            fatal!(ctx, "{file_name}: __eh_frame: extended length is not supported");
+            fatal!(diag, "{file_name}: __eh_frame: extended length is not supported");
         }
         let rec = contents[pos..pos + 4 + len].to_vec();
         let id = u32::from_le_bytes(rec[4..8].try_into().unwrap());
         let input_addr = hdr.addr as u32 + pos as u32;
         if id == 0 {
-            ctx.cies.push(Cie {
-                obj: obj_idx,
+            out_cies.push(Cie {
+                obj: usize::MAX,
                 input_addr,
                 data: rec,
                 personality: None,
@@ -720,8 +809,7 @@ fn parse_eh_frame<E: Arch>(
     }
 
     // Validate CIE augmentations and record LSDA encodings.
-    let diag = ctx.diag.clone();
-    for cie in &mut ctx.cies[first_cie..] {
+    for cie in out_cies.iter_mut() {
         let data = &cie.data;
         if data.get(9).copied() != Some(b'z') {
             continue;
@@ -771,7 +859,7 @@ fn parse_eh_frame<E: Arch>(
             continue;
         }
         let addr = hdr.addr as u32 + r.r_address;
-        let Some(cie) = ctx.cies[first_cie..].iter_mut().find(|c| {
+        let Some(cie) = out_cies.iter_mut().find(|c| {
             c.input_addr <= addr && addr < c.input_addr + c.data.len() as u32
         }) else {
             fatal!(diag, "{file_name}: __eh_frame: stray personality relocation");
@@ -779,14 +867,14 @@ fn parse_eh_frame<E: Arch>(
         if !r.is_extern() {
             fatal!(diag, "{file_name}: __eh_frame: unsupported personality reference");
         }
-        cie.personality = Some(syms[r.r_symbolnum() as usize]);
+        // A local symbol index, mapped to a symbol at integration.
+        cie.personality = Some(r.r_symbolnum() as usize);
         cie.personality_offset = addr - cie.input_addr;
     }
 
     // Functions that already have a compact unwind record don't need
     // their FDE; the compact record wins.
-    let covered: std::collections::HashSet<(usize, u32)> = ctx.unwind_records
-        [new_unwind_start..]
+    let covered: std::collections::HashSet<(usize, u32)> = unwind
         .iter()
         .map(|rec| (rec.isec, rec.input_offset))
         .collect();
@@ -794,13 +882,9 @@ fn parse_eh_frame<E: Arch>(
     for (input_addr, rec) in fdes {
         let cie_off = u32::from_le_bytes(rec[4..8].try_into().unwrap());
         let cie_addr = input_addr + 4 - cie_off;
-        let Some(cie) = ctx.cies[first_cie..]
-            .iter()
-            .position(|c| c.input_addr == cie_addr)
-        else {
-            fatal!(ctx, "{file_name}: __eh_frame: FDE with an invalid CIE pointer");
+        let Some(cie) = out_cies.iter().position(|c| c.input_addr == cie_addr) else {
+            fatal!(diag, "{file_name}: __eh_frame: FDE with an invalid CIE pointer");
         };
-        let cie = first_cie + cie;
 
         // The function address: the pre-applied pc_begin field is
         // relative to itself.
@@ -808,8 +892,8 @@ fn parse_eh_frame<E: Arch>(
         let func_addr = (input_addr as u64 + 8).wrapping_add_signed(pc_begin);
         let code_len = u64::from_le_bytes(rec[16..24].try_into().unwrap()) as u32;
 
-        let Some((isec, func_offset)) = find_subsec(func_addr) else {
-            fatal!(ctx, "{file_name}: __eh_frame: FDE with an invalid function");
+        let Some((isec, func_offset)) = find_local(func_addr) else {
+            fatal!(diag, "{file_name}: __eh_frame: FDE with an invalid function");
         };
 
         if covered.contains(&(isec, func_offset)) {
@@ -819,20 +903,20 @@ fn parse_eh_frame<E: Arch>(
         // The LSDA pointer, if the CIE declares one: also pre-applied to
         // be self-relative.
         let mut lsda = None;
-        if ctx.cies[cie].lsda_size != 0 {
+        if out_cies[cie].lsda_size != 0 {
             let mut pos = 24;
             read_uleb_at(&rec, &mut pos);
             let cell = i32::from_le_bytes(rec[pos..pos + 4].try_into().unwrap());
             let lsda_addr = (input_addr as u64 + pos as u64).wrapping_add_signed(cell as i64);
-            let Some((lsda_isec, lsda_off)) = find_subsec(lsda_addr) else {
-                fatal!(ctx, "{file_name}: __eh_frame: FDE with an invalid LSDA");
+            let Some((lsda_isec, lsda_off)) = find_local(lsda_addr) else {
+                fatal!(diag, "{file_name}: __eh_frame: FDE with an invalid LSDA");
             };
             lsda = Some((lsda_isec, lsda_off));
         }
 
-        let fde_idx = ctx.fdes.len();
-        ctx.fdes.push(Fde {
-            obj: obj_idx,
+        let fde_idx = out_fdes.len();
+        out_fdes.push(Fde {
+            obj: usize::MAX,
             input_addr,
             data: rec,
             cie,
@@ -845,7 +929,7 @@ fn parse_eh_frame<E: Arch>(
 
         // Synthesize a compact unwind record pointing at the FDE so that
         // the unwinder can find it through __unwind_info.
-        ctx.unwind_records.push(UnwindRecord {
+        unwind.push(UnwindRecord {
             isec,
             input_offset: func_offset,
             code_len,

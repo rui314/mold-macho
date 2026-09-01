@@ -106,7 +106,25 @@ fn find_library<E: Arch>(ctx: &Context<E>, name: &str) -> Option<PathBuf> {
     None
 }
 
-fn read_file<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile, force_load: bool, weak: bool) {
+/// A parsed-input request: a file to stage as an object, with its
+/// liveness and input-order priority.
+struct PendingObject {
+    mf: &'static MappedFile,
+    alive: bool,
+    priority: u32,
+}
+
+/// Classifies one input file. Dylib stubs and binaries are registered
+/// immediately (they are cheap and order-sensitive); objects and
+/// archive members are queued for parallel staging; bitcode is
+/// registered immediately since libLTO calls are kept on one thread.
+fn collect_file<E: Arch>(
+    ctx: &mut Context<E>,
+    mf: &'static MappedFile,
+    force_load: bool,
+    weak: bool,
+    out: &mut Vec<PendingObject>,
+) {
     // A library may be named both on the command line and by auto-link
     // options; load each file once.
     if !ctx.visited_files.insert(mf.name.clone()) {
@@ -114,7 +132,12 @@ fn read_file<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile, force_load:
     }
     match get_file_type(mf) {
         FileType::Object => {
-            input_files::parse_object(ctx, mf, true);
+            let priority = ctx.next_priority();
+            out.push(PendingObject {
+                mf,
+                alive: true,
+                priority,
+            });
         }
         FileType::Tapi => {
             let idx = input_files::parse_dylib(ctx, mf);
@@ -145,14 +168,19 @@ fn read_file<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile, force_load:
                         input_files::parse_bitcode(ctx, member, alive);
                     }
                     _ => {
-                        input_files::parse_object(ctx, member, alive);
+                        let priority = ctx.next_priority();
+                        out.push(PendingObject {
+                            mf: member,
+                            alive,
+                            priority,
+                        });
                     }
                 }
             }
         }
         FileType::Fat => {
             let slice = input_files::get_fat_slice(ctx, mf);
-            read_file(ctx, slice, force_load, weak);
+            collect_file(ctx, slice, force_load, weak, out);
         }
         FileType::LlvmBitcode => {
             input_files::parse_bitcode(ctx, mf, true);
@@ -162,39 +190,55 @@ fn read_file<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile, force_load:
     }
 }
 
+/// Stages the queued object files in parallel and integrates them in
+/// input order - the parallel front end of the mold design.
+fn load_pending<E: Arch>(ctx: &mut Context<E>, pending: Vec<PendingObject>) {
+    use rayon::prelude::*;
+    let diag = ctx.diag.clone();
+    let staged: Vec<input_files::StagedObject> = pending
+        .par_iter()
+        .map(|p| input_files::stage_object::<E>(&diag, p.mf, p.alive, p.priority))
+        .collect();
+    for st in staged {
+        input_files::integrate_object(ctx, st);
+    }
+}
+
 pub fn read_input_files<E: Arch>(ctx: &mut Context<E>) {
     let inputs = std::mem::take(&mut ctx.args.inputs);
+    let mut queue: Vec<PendingObject> = Vec::new();
     for arg in &inputs {
         match arg {
             InputArg::File(path) => {
                 let mf = MappedFile::must_open(&ctx.diag, Path::new(path));
-                read_file(ctx, mf, false, false);
+                collect_file(ctx, mf, false, false, &mut queue);
             }
             InputArg::ForceLoad(path) => {
                 let mf = MappedFile::must_open(&ctx.diag, Path::new(path));
-                read_file(ctx, mf, true, false);
+                collect_file(ctx, mf, true, false, &mut queue);
             }
             InputArg::WeakFile(path) => {
                 let mf = MappedFile::must_open(&ctx.diag, Path::new(path));
-                read_file(ctx, mf, false, true);
+                collect_file(ctx, mf, false, true, &mut queue);
             }
             InputArg::Lib(name, weak) => match find_library(ctx, name) {
                 Some(path) => {
                     let mf = MappedFile::must_open(&ctx.diag, &path);
-                    read_file(ctx, mf, false, *weak);
+                    collect_file(ctx, mf, false, *weak, &mut queue);
                 }
                 None => error!(ctx, "library not found: -l{name}"),
             },
             InputArg::Framework(name, weak) => match find_framework(ctx, name) {
                 Some(path) => {
                     let mf = MappedFile::must_open(&ctx.diag, &path);
-                    read_file(ctx, mf, false, *weak);
+                    collect_file(ctx, mf, false, *weak, &mut queue);
                 }
                 None => error!(ctx, "framework not found: {name}"),
             },
         }
     }
     ctx.args.inputs = inputs;
+    load_pending(ctx, queue);
 }
 
 /// Acts on auto-link options (LC_LINKER_OPTION) of live objects: each
@@ -215,6 +259,7 @@ pub fn load_autolink_deps<E: Arch>(ctx: &mut Context<E>) -> bool {
     }
 
     let before = (ctx.objs.len(), ctx.dylibs.len());
+    let mut queue: Vec<PendingObject> = Vec::new();
     for opt in pending {
         ctx.processed_linker_options.insert(opt.clone());
         let strs: Vec<&str> = opt.iter().map(String::as_str).collect();
@@ -224,7 +269,7 @@ pub fn load_autolink_deps<E: Arch>(ctx: &mut Context<E>) -> bool {
                 match find_library(ctx, name) {
                     Some(path) => {
                         if let Some(mf) = MappedFile::open(&ctx.diag, &path) {
-                            read_file(ctx, mf, false, false);
+                            collect_file(ctx, mf, false, false, &mut queue);
                         }
                     }
                     None => crate::warn!(ctx, "auto-linked library not found: -l{name}"),
@@ -233,7 +278,7 @@ pub fn load_autolink_deps<E: Arch>(ctx: &mut Context<E>) -> bool {
             ["-framework", name] => match find_framework(ctx, name) {
                 Some(path) => {
                     if let Some(mf) = MappedFile::open(&ctx.diag, &path) {
-                        read_file(ctx, mf, false, false);
+                        collect_file(ctx, mf, false, false, &mut queue);
                     }
                 }
                 None => crate::warn!(ctx, "auto-linked framework not found: {name}"),
@@ -241,6 +286,7 @@ pub fn load_autolink_deps<E: Arch>(ctx: &mut Context<E>) -> bool {
             _ => crate::warn!(ctx, "unknown auto-link option: {:?}", opt),
         }
     }
+    load_pending(ctx, queue);
     (ctx.objs.len(), ctx.dylibs.len()) != before
 }
 
