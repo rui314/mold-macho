@@ -3073,6 +3073,7 @@ pub fn copy_chunks<E: Arch>(ctx: &Context<E>, buf: &mut [u8]) {
     if ctx.use_chained_fixups() {
         write_fixup_chains(ctx, buf);
     }
+    E::apply_optimization_hints(ctx, buf);
     output_chunks::copy_symtab(ctx, buf);
     output_chunks::copy_mach_header(ctx, buf);
 

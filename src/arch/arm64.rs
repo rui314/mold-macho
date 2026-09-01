@@ -89,6 +89,161 @@ impl Arch for Arm64 {
         true
     }
 
+    // LC_LINKER_OPTIMIZATION_HINT: compilers can't know how far a
+    // symbol will land, so they emit the conservative two-instruction
+    // materializations and leave hints naming the instructions, for
+    // the linker to shorten once addresses are final. Everything here
+    // is a peephole guarded by instruction-shape checks, so hints
+    // invalidated by other rewrites (or by unexpected code) are
+    // silently skipped - hints are advisory by design.
+    fn apply_optimization_hints(ctx: &Context<Self>, buf: &mut [u8]) {
+        if ctx.args.ignore_optimization_hints {
+            return;
+        }
+
+        const NOP: u32 = 0xd503_201f;
+        let is_adrp = |i: u32| i & 0x9f00_0000 == 0x9000_0000;
+        let is_add = |i: u32| i & 0xffc0_0000 == 0x9100_0000;
+        // LDR (immediate, unsigned offset), 32- or 64-bit integer.
+        let ldr_size = |i: u32| match i & 0xffc0_0000 {
+            0xb940_0000 => Some(4u64),
+            0xf940_0000 => Some(8u64),
+            _ => None,
+        };
+        let adrp_target = |i: u32, pc: u64| -> u64 {
+            let imm = ((i >> 29) & 3) as u64 | (((i >> 5) & 0x7_ffff) as u64) << 2;
+            let imm = (imm << 43) as i64 >> 31; // sign-extend 21 bits, <<12
+            (pc & !0xfff).wrapping_add_signed(imm)
+        };
+        let in_adr_range = |target: u64, pc: u64| -> bool {
+            (target.wrapping_sub(pc) as i64).unsigned_abs() < (1 << 20)
+        };
+        let make_adr = |target: u64, pc: u64, rd: u32| -> u32 {
+            let d = target.wrapping_sub(pc);
+            0x1000_0000 | ((d as u32 & 3) << 29) | (((d >> 2) as u32 & 0x7_ffff) << 5) | rd
+        };
+        let make_ldr_lit = |target: u64, pc: u64, rt: u32, size: u64| -> u32 {
+            let opc = if size == 8 { 0x5800_0000 } else { 0x1800_0000 };
+            opc | ((target.wrapping_sub(pc) as u32 >> 2) & 0x7_ffff) << 5 | rt
+        };
+
+        for obj in &ctx.objs {
+            if !obj.is_alive {
+                continue;
+            }
+            'hint: for (kind, addrs) in &obj.loh {
+                // Map input addresses to (file offset, address).
+                let mut locs: Vec<(usize, u64)> = Vec::with_capacity(addrs.len());
+                for &addr in addrs {
+                    let Some((isec, off)) =
+                        crate::input_files::find_subsec(&ctx.isecs, &obj.subsecs, addr)
+                    else {
+                        continue 'hint;
+                    };
+                    let isec = &ctx.isecs[ctx.resolve_isec(isec)];
+                    if !isec.is_alive || isec.output_offset == u64::MAX {
+                        continue 'hint;
+                    }
+                    let chunk = &ctx.chunks[isec.osec];
+                    locs.push((
+                        (chunk.hdr.fileoff + isec.output_offset + off) as usize,
+                        chunk.hdr.addr + isec.output_offset + off,
+                    ));
+                }
+                let insn =
+                    |buf: &[u8], i: usize| read32(&buf[locs[i].0..]);
+                let put = |buf: &mut [u8], i: usize, v: u32| {
+                    write32(&mut buf[locs[i].0..locs[i].0 + 4], v)
+                };
+
+                match (kind, locs.len()) {
+                    // Two adrp of the same page into the same register:
+                    // the second is redundant.
+                    (1, 2) => {
+                        let (a, b) = (insn(buf, 0), insn(buf, 1));
+                        if is_adrp(a)
+                            && is_adrp(b)
+                            && a & 0x1f == b & 0x1f
+                            && adrp_target(a, locs[0].1) == adrp_target(b, locs[1].1)
+                        {
+                            put(buf, 1, NOP);
+                        }
+                    }
+                    // adrp+ldr loading a nearby location: a single
+                    // pc-relative literal load. Kind 8 is the same
+                    // pair when the ldr reads a GOT slot; if the GOT
+                    // relaxation already turned that ldr into an add,
+                    // fall through to the adr rewrite below.
+                    (2 | 8, 2) => {
+                        let (a, l) = (insn(buf, 0), insn(buf, 1));
+                        if is_adrp(a) && (l >> 5) & 0x1f == a & 0x1f {
+                            if let Some(size) = ldr_size(l) {
+                                let target = adrp_target(a, locs[0].1)
+                                    + (((l >> 10) & 0xfff) as u64) * size;
+                                if size == 8
+                                    && target % 4 == 0
+                                    && in_adr_range(target, locs[1].1)
+                                {
+                                    put(buf, 0, NOP);
+                                    put(buf, 1, make_ldr_lit(target, locs[1].1, l & 0x1f, size));
+                                }
+                            } else if *kind == 8 && is_add(l) {
+                                let target =
+                                    adrp_target(a, locs[0].1) + ((l >> 10) & 0xfff) as u64;
+                                if in_adr_range(target, locs[1].1) {
+                                    put(buf, 0, NOP);
+                                    put(buf, 1, make_adr(target, locs[1].1, l & 0x1f));
+                                }
+                            }
+                        }
+                    }
+                    // adrp+add materializing a nearby address: one adr.
+                    (7, 2) => {
+                        let (a, d) = (insn(buf, 0), insn(buf, 1));
+                        if is_adrp(a) && is_add(d) && (d >> 5) & 0x1f == a & 0x1f {
+                            let target = adrp_target(a, locs[0].1) + ((d >> 10) & 0xfff) as u64;
+                            if in_adr_range(target, locs[1].1) {
+                                put(buf, 0, NOP);
+                                put(buf, 1, make_adr(target, locs[1].1, d & 0x1f));
+                            }
+                        }
+                    }
+                    // adrp+add+ldr: load through a computed address.
+                    // Nearby: fold everything into one literal load;
+                    // else shorten the address computation to adr.
+                    (3, 3) => {
+                        let (a, d, l) = (insn(buf, 0), insn(buf, 1), insn(buf, 2));
+                        if !is_adrp(a) || !is_add(d) || (d >> 5) & 0x1f != a & 0x1f {
+                            continue;
+                        }
+                        let base = adrp_target(a, locs[0].1) + ((d >> 10) & 0xfff) as u64;
+                        if let Some(size) = ldr_size(l) {
+                            if (l >> 5) & 0x1f == d & 0x1f {
+                                let target = base + (((l >> 10) & 0xfff) as u64) * size;
+                                if size == 8
+                                    && target % 4 == 0
+                                    && in_adr_range(target, locs[2].1)
+                                {
+                                    put(buf, 0, NOP);
+                                    put(buf, 1, NOP);
+                                    put(buf, 2, make_ldr_lit(target, locs[2].1, l & 0x1f, size));
+                                    continue;
+                                }
+                            }
+                        }
+                        if in_adr_range(base, locs[1].1) {
+                            put(buf, 0, NOP);
+                            put(buf, 1, make_adr(base, locs[1].1, d & 0x1f));
+                        }
+                    }
+                    // Other kinds (GOT-load triples, stores) are left
+                    // as compiled; hints are advisory.
+                    _ => {}
+                }
+            }
+        }
+    }
+
     fn classify_reloc(r_type: u8) -> crate::arch::RelocClass {
         use crate::arch::RelocClass;
         match r_type {

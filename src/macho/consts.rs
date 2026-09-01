@@ -54,6 +54,7 @@ pub const LC_VERSION_MIN_MACOSX: u32 = 0x24;
 pub const LC_FUNCTION_STARTS: u32 = 0x26;
 pub const LC_MAIN: u32 = 0x28 | LC_REQ_DYLD;
 pub const LC_DATA_IN_CODE: u32 = 0x29;
+pub const LC_LINKER_OPTIMIZATION_HINT: u32 = 0x2e;
 pub const LC_SOURCE_VERSION: u32 = 0x2a;
 pub const LC_LINKER_OPTION: u32 = 0x2d;
 pub const LC_BUILD_VERSION: u32 = 0x32;

@@ -95,6 +95,10 @@ pub trait Arch: Copy + Default + Send + Sync + 'static {
     /// in the output. `isec` is the subsection's arena index and `base`
     /// its output address.
     fn apply_relocs(ctx: &Context<Self>, rels: &[Reloc], isec: usize, base: u64, buf: &mut [u8]);
+
+    /// Applies LC_LINKER_OPTIMIZATION_HINT rewrites after relocation.
+    /// Only arm64 defines hints; the default does nothing.
+    fn apply_optimization_hints(_ctx: &Context<Self>, _buf: &mut [u8]) {}
 }
 
 /// Returns the target name for a Mach-O CPU type, if we know it.

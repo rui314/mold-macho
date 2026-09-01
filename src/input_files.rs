@@ -44,6 +44,9 @@ pub struct ObjectFile {
     /// LC_DATA_IN_CODE entries: (file offset in the object, length,
     /// kind).
     pub dice: Vec<(u32, u16, u16)>,
+    /// LC_LINKER_OPTIMIZATION_HINT entries: (kind, instruction
+    /// addresses in the object's address space).
+    pub loh: Vec<(u8, Vec<u64>)>,
 }
 
 /// Finds the subsection containing `addr` among `subsecs` (sorted by
@@ -138,6 +141,9 @@ pub struct StagedObject {
     /// LC_DATA_IN_CODE entries: (file offset in the object, length,
     /// kind).
     pub dice: Vec<(u32, u16, u16)>,
+    /// LC_LINKER_OPTIMIZATION_HINT entries: (kind, instruction
+    /// addresses in the object's address space).
+    pub loh: Vec<(u8, Vec<u64>)>,
 }
 
 /// Parses one object file without touching any linker state.
@@ -166,6 +172,7 @@ pub fn stage_object<E: Arch>(
     let mut symtab_cmd = None;
     let mut linker_options = Vec::new();
     let mut dice = Vec::new();
+    let mut loh = Vec::new();
 
     // Read load commands
     let mut off = size_of::<MachHeader>();
@@ -204,6 +211,25 @@ pub fn stage_object<E: Arch>(
                         u16::from_le_bytes(data[p + 4..p + 6].try_into().unwrap()),
                         u16::from_le_bytes(data[p + 6..p + 8].try_into().unwrap()),
                     ));
+                }
+            }
+            LC_LINKER_OPTIMIZATION_HINT => {
+                // A stream of ULEB128 triples-and-more: kind, argument
+                // count, then that many instruction addresses.
+                let cmd = LinkEditDataCommand::read_from(&data[off..]);
+                let payload =
+                    &data[cmd.dataoff as usize..(cmd.dataoff + cmd.datasize) as usize];
+                let mut pos = 0;
+                while pos < payload.len() {
+                    let kind = read_uleb_at(payload, &mut pos);
+                    if kind == 0 {
+                        break;
+                    }
+                    let count = read_uleb_at(payload, &mut pos);
+                    let addrs = (0..count)
+                        .map(|_| read_uleb_at(payload, &mut pos))
+                        .collect();
+                    loh.push((kind as u8, addrs));
                 }
             }
             _ => {}
@@ -409,6 +435,7 @@ pub fn stage_object<E: Arch>(
         unwind,
         cies,
         dice,
+        loh,
         fdes,
         objc_image_info,
         has_debug_info,
@@ -488,6 +515,7 @@ pub fn integrate_object<E: Arch>(ctx: &mut Context<E>, staged: StagedObject) -> 
         syms,
         lto_module: None,
         dice: staged.dice,
+        loh: staged.loh,
     });
     obj_idx
 }
@@ -558,6 +586,7 @@ pub fn parse_bitcode<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile, ali
         syms,
         lto_module: Some(module),
         dice: Vec::new(),
+        loh: Vec::new(),
     });
     ctx.lto_modules.push((obj_idx, module));
     obj_idx
@@ -749,7 +778,7 @@ pub struct Fde {
     pub output_offset: u32,
 }
 
-fn read_uleb_at(data: &[u8], pos: &mut usize) -> u64 {
+pub fn read_uleb_at(data: &[u8], pos: &mut usize) -> u64 {
     let mut val = 0;
     let mut shift = 0;
     loop {
