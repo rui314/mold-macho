@@ -234,6 +234,7 @@ pub fn convert_common_symbols<E: Arch>(ctx: &mut Context<E>) {
             osec: usize::MAX,
             output_offset: 0,
             is_alive: true,
+            replacement: None,
         });
 
         let sym = &mut ctx.symtab[i];
@@ -317,7 +318,9 @@ pub fn check_undefined_symbols<E: Arch>(ctx: &Context<E>) {
 pub fn dead_strip<E: Arch>(ctx: &mut Context<E>) {
     let mut live = vec![false; ctx.isecs.len()];
     let mut stack: Vec<usize> = Vec::new();
-    let mark = |live: &mut Vec<bool>, stack: &mut Vec<usize>, id: usize| {
+    let redirects: Vec<usize> = (0..ctx.isecs.len()).map(|i| ctx.resolve_isec(i)).collect();
+    let mark = move |live: &mut Vec<bool>, stack: &mut Vec<usize>, id: usize| {
+        let id = redirects[id];
         if !live[id] {
             live[id] = true;
             stack.push(id);
@@ -553,7 +556,7 @@ pub fn create_output_chunks<E: Arch>(ctx: &mut Context<E>) {
     // Assign each input section to an output section, creating output
     // sections as needed.
     for i in 0..ctx.isecs.len() {
-        if !ctx.isecs[i].is_alive {
+        if !ctx.isecs[i].is_alive || ctx.isecs[i].replacement.is_some() {
             continue;
         }
         let segname = ctx.isecs[i].hdr.segname().to_string();
@@ -772,6 +775,7 @@ pub fn compute_symtab<E: Arch>(ctx: &mut Context<E>) {
                 continue;
             }
             let Some(isec) = sym.isec else { continue };
+            let isec = ctx.resolve_isec(isec);
             if !matches!(sym.origin, Origin::Obj(_)) || !ctx.isecs[isec].is_alive {
                 continue;
             }
@@ -794,7 +798,9 @@ pub fn compute_symtab<E: Arch>(ctx: &mut Context<E>) {
             let sym = &ctx.symtab[i];
             sym.is_extern
                 && matches!(sym.origin, Origin::Obj(_) | Origin::Synthetic)
-                && sym.isec.is_none_or(|isec| ctx.isecs[isec].is_alive)
+                && sym
+                    .isec
+                    .is_none_or(|isec| ctx.isecs[ctx.resolve_isec(isec)].is_alive)
         })
         .collect();
     globals.sort_by_key(|&i| ctx.symtab[i].name);
@@ -803,7 +809,11 @@ pub fn compute_symtab<E: Arch>(ctx: &mut Context<E>) {
         let sym = &ctx.symtab[i];
         let n_strx = add_string(&mut data.strtab, sym.name);
         let (n_type, n_sect, mut n_desc) = match (sym.origin, sym.isec) {
-            (_, Some(isec)) => (N_SECT | N_EXT, ordinals[ctx.isecs[isec].osec], 0),
+            (_, Some(isec)) => (
+                N_SECT | N_EXT,
+                ordinals[ctx.isecs[ctx.resolve_isec(isec)].osec],
+                0,
+            ),
             (Origin::Synthetic, None) => (N_SECT | N_EXT, 1, REFERENCED_DYNAMICALLY),
             (_, None) => (N_ABS | N_EXT, 0, 0),
         };
@@ -1012,7 +1022,7 @@ fn build_rebase_info<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
 
     // Pointers written for UNSIGNED relocations to local targets.
     for isec in &ctx.isecs {
-        if !isec.is_alive {
+        if !isec.is_alive || isec.replacement.is_some() {
             continue;
         }
         let base = ctx.chunks[isec.osec].hdr.addr + isec.output_offset;
@@ -1103,7 +1113,7 @@ fn build_bind_info<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
     // Pointers in data sections initialized with an imported symbol's
     // address.
     for isec in &ctx.isecs {
-        if !isec.is_alive {
+        if !isec.is_alive || isec.replacement.is_some() {
             continue;
         }
         let base = ctx.chunks[isec.osec].hdr.addr + isec.output_offset;
@@ -1182,7 +1192,7 @@ fn build_function_starts<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
             continue;
         }
         let Some(isec) = sym.isec else { continue };
-        let isec = &ctx.isecs[isec];
+        let isec = &ctx.isecs[ctx.resolve_isec(isec)];
         if isec.is_alive && isec.hdr.segname() == "__TEXT" && isec.hdr.sectname() == "__text" {
             addrs.push(ctx.chunks[isec.osec].hdr.addr + isec.output_offset + sym.value);
         }

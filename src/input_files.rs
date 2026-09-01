@@ -150,9 +150,33 @@ pub fn parse_object<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile) -> u
             continue;
         }
 
+        // Literal sections are element-oriented: split them per element
+        // (per string, or per fixed-size literal) so identical elements
+        // can be merged across objects.
         let mut points = std::mem::take(&mut split_points[i]);
         if is_literal(sect) {
             points.clear();
+            let contents =
+                &data[sect.offset as usize..(sect.offset as u64 + sect.size) as usize];
+            match sect.section_type() {
+                S_CSTRING_LITERALS => {
+                    let mut start = 0;
+                    while start < contents.len() {
+                        points.push(sect.addr + start as u64);
+                        let Some(len) = contents[start..].iter().position(|&b| b == 0)
+                        else {
+                            fatal!(ctx, "{}: malformed __cstring section", mf.name);
+                        };
+                        start += len + 1;
+                    }
+                }
+                S_4BYTE_LITERALS => points.extend((0..sect.size).step_by(4).map(|o| sect.addr + o)),
+                S_8BYTE_LITERALS => points.extend((0..sect.size).step_by(8).map(|o| sect.addr + o)),
+                S_16BYTE_LITERALS => {
+                    points.extend((0..sect.size).step_by(16).map(|o| sect.addr + o))
+                }
+                _ => {}
+            }
         }
         points.push(sect.addr);
         points.retain(|&a| sect.addr <= a && a <= sect.addr + sect.size);
@@ -169,6 +193,18 @@ pub fn parse_object<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile) -> u
                 let lo = sect.offset as u64 + (start - sect.addr);
                 &data[lo as usize..(lo + (end - start)) as usize]
             };
+            // Merge a literal element with an identical existing one.
+            let mut replacement = None;
+            if is_literal(sect) && sect.section_type() != S_LITERAL_POINTERS {
+                let key = (sect.section_type(), contents);
+                match ctx.literals.get(&key) {
+                    Some(&winner) => replacement = Some(winner),
+                    None => {
+                        ctx.literals.insert(key, ctx.isecs.len());
+                    }
+                }
+            }
+
             ctx.isecs.push(InputSection {
                 obj: obj_idx,
                 hdr: *sect,
@@ -179,7 +215,13 @@ pub fn parse_object<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile) -> u
                 osec: usize::MAX,
                 output_offset: 0,
                 is_alive: true,
+                replacement,
             });
+            if let Some(winner) = replacement {
+                let p2align = sect.p2align;
+                let winner = &mut ctx.isecs[winner];
+                winner.hdr.p2align = winner.hdr.p2align.max(p2align);
+            }
             by_ordinal[i].push(ctx.isecs.len() - 1);
             subsecs.push(ctx.isecs.len() - 1);
         }

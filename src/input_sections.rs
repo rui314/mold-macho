@@ -56,4 +56,6 @@ pub struct InputSection {
     /// Offset from the start of the output section.
     pub output_offset: u64,
     pub is_alive: bool,
+    /// For a literal merged with an identical one, the surviving copy.
+    pub replacement: Option<usize>,
 }

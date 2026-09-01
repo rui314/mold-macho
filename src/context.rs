@@ -57,6 +57,9 @@ pub struct Context<E: Arch> {
     /// The address of the first thread-local data section. Thread
     /// pointers are encoded relative to it.
     pub tls_begin: u64,
+    /// Deduplication map for literal elements: (section type, contents)
+    /// to the surviving subsection.
+    pub literals: std::collections::HashMap<(u32, &'static [u8]), usize>,
     /// The resolved address of the entry point symbol.
     pub entry_addr: u64,
     /// Total size of the output file.
@@ -97,15 +100,24 @@ impl<E: Arch> Context<E> {
             bind_data: Vec::new(),
             function_starts_data: Vec::new(),
             tls_begin: 0,
+            literals: std::collections::HashMap::new(),
             entry_addr: 0,
             output_size: 0,
             _marker: PhantomData,
         }
     }
 
+    /// Follows literal-merge redirects to the surviving subsection.
+    pub fn resolve_isec(&self, mut id: InputSectionId) -> InputSectionId {
+        while let Some(rep) = self.isecs[id].replacement {
+            id = rep;
+        }
+        id
+    }
+
     /// Returns the output address of an input section.
     pub fn isec_addr(&self, id: InputSectionId) -> u64 {
-        let isec = &self.isecs[id];
+        let isec = &self.isecs[self.resolve_isec(id)];
         self.chunks[isec.osec].hdr.addr + isec.output_offset
     }
 
