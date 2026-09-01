@@ -92,16 +92,42 @@ impl Symbol {
 /// All symbols in this link. Global symbols are interned by name so that
 /// all references to one name share a slot; local symbols get anonymous
 /// slots of their own.
-#[derive(Default, Debug)]
+///
+/// The name map is sharded by a hash of the name, following mold's
+/// symbol table: one-off lookups route to a single shard, and
+/// intern_batch resolves a whole link's worth of names with the
+/// shards processed in parallel.
+#[derive(Debug)]
 pub struct SymbolTable {
-    map: HashMap<&'static str, SymbolId>,
+    shards: Vec<HashMap<&'static str, SymbolId>>,
     pub syms: Vec<Symbol>,
+}
+
+const NUM_SHARDS: usize = 64;
+
+/// The sharding hash: FNV-1a, cheap and stable. Each shard's HashMap
+/// hashes again internally; this only has to spread names evenly.
+fn shard_of(name: &str) -> usize {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for &b in name.as_bytes() {
+        h = (h ^ b as u64).wrapping_mul(0x100_0000_01b3);
+    }
+    (h % NUM_SHARDS as u64) as usize
+}
+
+impl Default for SymbolTable {
+    fn default() -> SymbolTable {
+        SymbolTable {
+            shards: (0..NUM_SHARDS).map(|_| HashMap::new()).collect(),
+            syms: Vec::new(),
+        }
+    }
 }
 
 impl SymbolTable {
     /// Returns the symbol for a global name, creating it if needed.
     pub fn intern(&mut self, name: &'static str) -> SymbolId {
-        *self.map.entry(name).or_insert_with(|| {
+        *self.shards[shard_of(name)].entry(name).or_insert_with(|| {
             self.syms.push(Symbol::new(name));
             self.syms.len() - 1
         })
@@ -109,13 +135,91 @@ impl SymbolTable {
 
     /// Returns the symbol for a global name if it exists.
     pub fn get(&self, name: &str) -> Option<SymbolId> {
-        self.map.get(name).copied()
+        self.shards[shard_of(name)].get(name).copied()
     }
 
     /// Creates an anonymous slot for a file-local symbol.
     pub fn add_local(&mut self, name: &'static str) -> SymbolId {
         self.syms.push(Symbol::new(name));
         self.syms.len() - 1
+    }
+
+    /// Interns every name in `batch` at once, returning ids aligned
+    /// with it. Names are binned by shard, the shards resolve their
+    /// bins in parallel (an existing id, or a shard-local new index),
+    /// new symbols take contiguous id ranges per shard - a prefix sum
+    /// over the shards' new counts - and one serial scatter writes the
+    /// results. Ids depend only on input order and the sharding hash,
+    /// so output remains deterministic.
+    pub fn intern_batch(&mut self, batch: &[&'static str]) -> Vec<SymbolId> {
+        use rayon::prelude::*;
+
+        let mut bins: Vec<Vec<u32>> = vec![Vec::new(); NUM_SHARDS];
+        for (i, name) in batch.iter().enumerate() {
+            bins[shard_of(name)].push(i as u32);
+        }
+
+        enum Resolved {
+            Old(SymbolId),
+            New(u32),
+        }
+        let results: Vec<(Vec<(u32, Resolved)>, Vec<&'static str>)> = self
+            .shards
+            .par_iter_mut()
+            .zip(bins)
+            .map(|(shard, bin)| {
+                let mut news: Vec<&'static str> = Vec::new();
+                let mut newmap: HashMap<&'static str, u32> = HashMap::new();
+                let mut out = Vec::with_capacity(bin.len());
+                for i in bin {
+                    let name = batch[i as usize];
+                    match shard.get(name) {
+                        Some(&id) => out.push((i, Resolved::Old(id))),
+                        None => {
+                            let idx = *newmap.entry(name).or_insert_with(|| {
+                                news.push(name);
+                                news.len() as u32 - 1
+                            });
+                            out.push((i, Resolved::New(idx)));
+                        }
+                    }
+                }
+                (out, news)
+            })
+            .collect();
+
+        let mut bases = Vec::with_capacity(NUM_SHARDS);
+        let mut base = self.syms.len();
+        for (_, news) in &results {
+            bases.push(base);
+            base += news.len();
+        }
+        self.syms.reserve(base - self.syms.len());
+        for (_, news) in &results {
+            for name in news {
+                self.syms.push(Symbol::new(name));
+            }
+        }
+        self.shards
+            .par_iter_mut()
+            .zip(&results)
+            .zip(&bases)
+            .for_each(|((shard, (_, news)), &b)| {
+                for (k, name) in news.iter().enumerate() {
+                    shard.insert(name, b + k);
+                }
+            });
+
+        let mut ids = vec![0; batch.len()];
+        for ((out, _), &b) in results.iter().zip(&bases) {
+            for &(i, ref r) in out {
+                ids[i as usize] = match r {
+                    Resolved::Old(id) => *id,
+                    Resolved::New(k) => b + *k as usize,
+                };
+            }
+        }
+        ids
     }
 }
 

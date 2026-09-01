@@ -445,6 +445,16 @@ pub fn stage_object<E: Arch>(
 /// Appends a staged object to the global arenas, rebasing its local
 /// indices and interning its symbol names.
 pub fn integrate_object<E: Arch>(ctx: &mut Context<E>, staged: StagedObject) -> usize {
+    integrate_object_with(ctx, staged, None)
+}
+
+/// Like integrate_object, with the global symbols' ids already interned
+/// by a bulk pass (in nlist order, one entry per extern non-stab nlist).
+pub fn integrate_object_with<E: Arch>(
+    ctx: &mut Context<E>,
+    staged: StagedObject,
+    pre_interned: Option<Vec<crate::symbol::SymbolId>>,
+) -> usize {
     let obj_idx = ctx.objs.len();
     let isec_base = ctx.isecs.len();
     let fde_base = ctx.fdes.len();
@@ -461,11 +471,15 @@ pub fn integrate_object<E: Arch>(ctx: &mut Context<E>, staged: StagedObject) -> 
     }
 
     let mut syms = Vec::with_capacity(staged.nlists.len());
+    let mut pre = pre_interned.map(Vec::into_iter);
     for (nlist, name) in staged.nlists.iter().zip(&staged.sym_names) {
         let id = if nlist.is_stab() || !nlist.is_extern() {
             ctx.symtab.add_local(name)
         } else {
-            ctx.symtab.intern(name)
+            match &mut pre {
+                Some(iter) => iter.next().unwrap(),
+                None => ctx.symtab.intern(name),
+            }
         };
         syms.push(id);
     }
