@@ -30,6 +30,10 @@ pub enum InputArg {
     /// `-hidden-lfoo`: an archive whose external symbols are demoted
     /// to private externals.
     HiddenLib(String),
+    /// `-needed-lfoo` / `-needed_framework Foo`: always keep the
+    /// dylib's load command.
+    NeededLib(String),
+    NeededFramework(String),
 }
 
 /// Parsed command line arguments.
@@ -282,6 +286,9 @@ pub fn parse_args(diag: &Diagnostics, cmdline: &[String]) -> Args {
             "-weak_framework" => args
                 .inputs
                 .push(InputArg::Framework(next_arg(&mut i).to_string(), true)),
+            "-needed_framework" => args
+                .inputs
+                .push(InputArg::NeededFramework(next_arg(&mut i).to_string())),
             "-weak_library" => args
                 .inputs
                 .push(InputArg::WeakFile(next_arg(&mut i).to_string())),
@@ -444,6 +451,8 @@ pub fn parse_args(diag: &Diagnostics, cmdline: &[String]) -> Args {
                     args.inputs.push(InputArg::ReexportLib(name.to_string()));
                 } else if let Some(name) = opt.strip_prefix("-hidden-l") {
                     args.inputs.push(InputArg::HiddenLib(name.to_string()));
+                } else if let Some(name) = opt.strip_prefix("-needed-l") {
+                    args.inputs.push(InputArg::NeededLib(name.to_string()));
                 } else if let Some(name) = opt.strip_prefix("-weak-l") {
                     args.inputs.push(InputArg::Lib(name.to_string(), true));
                 } else if let Some(name) = opt.strip_prefix("-l") {

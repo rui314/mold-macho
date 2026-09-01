@@ -243,6 +243,28 @@ pub fn read_input_files<E: Arch>(ctx: &mut Context<E>) {
                 }
                 None => error!(ctx, "library not found: -hidden-l{name}"),
             },
+            InputArg::NeededLib(name) => match find_library(ctx, name) {
+                Some(path) => {
+                    let mf = MappedFile::must_open(&ctx.diag, &path);
+                    let before = ctx.dylibs.len();
+                    collect_file(ctx, mf, false, false, false, false, &mut queue);
+                    for dylib in &mut ctx.dylibs[before..] {
+                        dylib.is_needed = true;
+                    }
+                }
+                None => error!(ctx, "library not found: -needed-l{name}"),
+            },
+            InputArg::NeededFramework(name) => match find_framework(ctx, name) {
+                Some(path) => {
+                    let mf = MappedFile::must_open(&ctx.diag, &path);
+                    let before = ctx.dylibs.len();
+                    collect_file(ctx, mf, false, false, false, false, &mut queue);
+                    for dylib in &mut ctx.dylibs[before..] {
+                        dylib.is_needed = true;
+                    }
+                }
+                None => error!(ctx, "framework not found: {name}"),
+            },
             InputArg::Lib(name, weak) => match find_library(ctx, name) {
                 Some(path) => {
                     let mf = MappedFile::must_open(&ctx.diag, &path);
@@ -1021,6 +1043,9 @@ pub fn dead_strip_dylibs<E: Arch>(ctx: &mut Context<E>) {
     }
 
     let mut used = vec![false; ctx.dylibs.len()];
+    for (i, dylib) in ctx.dylibs.iter().enumerate() {
+        used[i] = dylib.is_needed;
+    }
     for sym in &ctx.symtab.syms {
         if let Origin::Dylib(idx) = sym.origin {
             if idx != usize::MAX {

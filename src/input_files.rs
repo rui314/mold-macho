@@ -79,6 +79,8 @@ pub struct DylibFile {
     /// True if re-exported (LC_REEXPORT_DYLIB): this image's clients
     /// resolve the library's exports through this image.
     pub is_reexported: bool,
+    /// -needed-l: keep the load command even under -dead_strip_dylibs.
+    pub is_needed: bool,
     pub exports: std::collections::HashSet<String>,
 }
 
@@ -1187,6 +1189,7 @@ pub fn parse_dylib_binary<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile
             priority,
             is_weak: false,
             is_reexported: false,
+            is_needed: false,
             exports,
         },
     )
@@ -1303,6 +1306,7 @@ pub fn parse_dylib<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile) -> us
             priority,
             is_weak: false,
             is_reexported: false,
+            is_needed: false,
             exports,
         },
     )
