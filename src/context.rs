@@ -163,7 +163,7 @@ impl<E: Arch> Context<E> {
     pub fn reloc_target_isec(&self, obj: usize, rel: &Reloc) -> Option<InputSectionId> {
         match rel.target {
             RelocTarget::Sym(idx) => self.symtab[self.objs[obj].syms[idx]].isec,
-            RelocTarget::Section(idx) => self.objs[obj].sections[idx],
+            RelocTarget::Section(idx) => Some(idx),
         }
     }
 
@@ -181,13 +181,7 @@ impl<E: Arch> Context<E> {
     pub fn reloc_target_addr(&self, obj: usize, rel: &Reloc) -> u64 {
         match rel.target {
             RelocTarget::Sym(idx) => self.sym_addr(self.objs[obj].syms[idx]),
-            RelocTarget::Section(idx) => match self.objs[obj].sections[idx] {
-                Some(isec) => self.isec_addr(isec),
-                None => {
-                    error!(self, "relocation against a discarded section");
-                    0
-                }
-            },
+            RelocTarget::Section(idx) => self.isec_addr(idx),
         }
     }
 }

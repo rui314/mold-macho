@@ -9,7 +9,7 @@ use crate::error;
 use crate::fatal;
 use crate::filetype::{get_file_type, FileType};
 use crate::input_files;
-use crate::input_sections::InputSection;
+use crate::input_sections::{InputSection, RelocTarget};
 use crate::macho::*;
 use crate::mapped_file::MappedFile;
 use crate::output_chunks::{
@@ -212,10 +212,13 @@ pub fn convert_common_symbols<E: Arch>(ctx: &mut Context<E>) {
         ctx.isecs.push(InputSection {
             obj: usize::MAX,
             hdr,
+            input_addr: 0,
+            size,
             data: &[],
             relocs: Vec::new(),
             osec: usize::MAX,
             output_offset: 0,
+            is_alive: true,
         });
 
         let sym = &mut ctx.symtab[i];
@@ -297,6 +300,9 @@ pub fn check_undefined_symbols<E: Arch>(ctx: &Context<E>) {
 pub fn scan_relocs<E: Arch>(ctx: &mut Context<E>) {
     let mut classes = Vec::new();
     for isec in &ctx.isecs {
+        if !isec.is_alive {
+            continue;
+        }
         for rel in &isec.relocs {
             if let Some(id) = ctx.reloc_target_sym(isec.obj, rel) {
                 classes.push((id, E::classify_reloc(rel.r_type)));
@@ -417,6 +423,9 @@ pub fn create_output_chunks<E: Arch>(ctx: &mut Context<E>) {
     // Assign each input section to an output section, creating output
     // sections as needed.
     for i in 0..ctx.isecs.len() {
+        if !ctx.isecs[i].is_alive {
+            continue;
+        }
         let segname = ctx.isecs[i].hdr.segname().to_string();
         let sectname = ctx.isecs[i].hdr.sectname().to_string();
 
@@ -465,7 +474,7 @@ pub fn create_output_chunks<E: Arch>(ctx: &mut Context<E>) {
             let isec = &mut ctx.isecs[id];
             off = align_to(off, 1 << isec.hdr.p2align);
             isec.output_offset = off;
-            off += isec.hdr.size;
+            off += isec.size;
         }
         chunk.hdr.size = off;
     }
@@ -632,7 +641,7 @@ pub fn compute_symtab<E: Arch>(ctx: &mut Context<E>) {
                 continue;
             }
             let Some(isec) = sym.isec else { continue };
-            if !matches!(sym.origin, Origin::Obj(_)) {
+            if !matches!(sym.origin, Origin::Obj(_)) || !ctx.isecs[isec].is_alive {
                 continue;
             }
             let n_strx = add_string(&mut data.strtab, sym.name);
@@ -652,7 +661,9 @@ pub fn compute_symtab<E: Arch>(ctx: &mut Context<E>) {
     let mut globals: Vec<usize> = (0..ctx.symtab.syms.len())
         .filter(|&i| {
             let sym = &ctx.symtab[i];
-            sym.is_extern && matches!(sym.origin, Origin::Obj(_) | Origin::Synthetic)
+            sym.is_extern
+                && matches!(sym.origin, Origin::Obj(_) | Origin::Synthetic)
+                && sym.isec.is_none_or(|isec| ctx.isecs[isec].is_alive)
         })
         .collect();
     globals.sort_by_key(|&i| ctx.symtab[i].name);
@@ -860,6 +871,9 @@ fn build_rebase_info<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
 
     // Pointers written for UNSIGNED relocations to local targets.
     for isec in &ctx.isecs {
+        if !isec.is_alive {
+            continue;
+        }
         let base = ctx.chunks[isec.osec].hdr.addr + isec.output_offset;
         for rel in &isec.relocs {
             if E::classify_reloc(rel.r_type) != RelocClass::Plain
@@ -948,6 +962,9 @@ fn build_bind_info<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
     // Pointers in data sections initialized with an imported symbol's
     // address.
     for isec in &ctx.isecs {
+        if !isec.is_alive {
+            continue;
+        }
         let base = ctx.chunks[isec.osec].hdr.addr + isec.output_offset;
         for rel in &isec.relocs {
             if E::classify_reloc(rel.r_type) != RelocClass::Plain

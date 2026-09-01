@@ -17,12 +17,31 @@ pub struct ObjectFile {
     /// Section headers in ordinal order (all segments' sections
     /// concatenated in load command order).
     pub sect_hdrs: Vec<MachSection>,
-    /// The input section for each header; None for discarded sections
-    /// such as debug info.
-    pub sections: Vec<Option<usize>>,
+    /// All of this object's subsections, sorted by input address.
+    pub subsecs: Vec<usize>,
     pub nlists: Vec<NList>,
     /// The symbol slot for each nlist entry.
     pub syms: Vec<SymbolId>,
+}
+
+/// Finds the subsection containing `addr` among `subsecs` (sorted by
+/// input address), returning it with the offset within it.
+pub fn find_subsec(
+    isecs: &[InputSection],
+    subsecs: &[usize],
+    addr: u64,
+) -> Option<(usize, u64)> {
+    let i = subsecs.partition_point(|&id| isecs[id].input_addr <= addr);
+    if i == 0 {
+        return None;
+    }
+    let id = subsecs[i - 1];
+    let isec = &isecs[id];
+    if addr < isec.input_addr + isec.size || (isec.size == 0 && addr == isec.input_addr) {
+        Some((id, addr - isec.input_addr))
+    } else {
+        None
+    }
 }
 
 /// A dynamic library, from a .tbd stub or a dylib binary.
@@ -80,43 +99,7 @@ pub fn parse_object<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile) -> u
         off += lc.cmdsize as usize;
     }
 
-    // Create input sections
-    let mut sections = Vec::with_capacity(sect_hdrs.len());
-    for sect in &sect_hdrs {
-        if is_discarded_section(sect) {
-            sections.push(None);
-            continue;
-        }
-
-        // __eh_frame is not copied through; it is re-synthesized from
-        // parsed CIE/FDE records.
-        if sect.segname() == "__TEXT" && sect.sectname() == "__eh_frame" {
-            sections.push(None);
-            continue;
-        }
-
-        let contents = if sect.section_type() == S_ZEROFILL {
-            &[]
-        } else {
-            &data[sect.offset as usize..(sect.offset as u64 + sect.size) as usize]
-        };
-
-        let rels: Vec<MachRel> =
-            read_array(data, sect.reloff as usize, sect.nreloc as usize);
-        let relocs = E::read_relocs(&ctx.diag, &mf.name, &sect_hdrs, sect, data, &rels);
-
-        ctx.isecs.push(InputSection {
-            obj: obj_idx,
-            hdr: *sect,
-            data: contents,
-            relocs,
-            osec: usize::MAX,
-            output_offset: 0,
-        });
-        sections.push(Some(ctx.isecs.len() - 1));
-    }
-
-    // Read symbols
+    // Read the symbol table
     let mut nlists: Vec<NList> = Vec::new();
     let mut strtab: &'static [u8] = &[];
     if let Some(cmd) = symtab_cmd {
@@ -124,9 +107,122 @@ pub fn parse_object<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile) -> u
         strtab = &data[cmd.stroff as usize..(cmd.stroff + cmd.strsize) as usize];
     }
 
+    // Split each section into subsections at its symbols, the Mach-O
+    // linking granularity, so that unreferenced pieces can later be
+    // dead-stripped. Alternate entry points (N_ALT_ENTRY) don't start a
+    // new subsection, and literal sections are element-oriented rather
+    // than symbol-oriented, so they stay whole.
+    let split_ok = hdr.flags & MH_SUBSECTIONS_VIA_SYMBOLS != 0;
+    let mut split_points: Vec<Vec<u64>> = vec![Vec::new(); sect_hdrs.len()];
+    if split_ok {
+        for nlist in &nlists {
+            if !nlist.is_stab()
+                && nlist.n_type() == N_SECT
+                && nlist.n_desc & N_ALT_ENTRY == 0
+                && nlist.n_sect >= 1
+            {
+                if let Some(points) = split_points.get_mut(nlist.n_sect as usize - 1) {
+                    points.push(nlist.n_value);
+                }
+            }
+        }
+    }
+
+    let is_literal = |sect: &MachSection| {
+        matches!(
+            sect.section_type(),
+            S_CSTRING_LITERALS
+                | S_4BYTE_LITERALS
+                | S_8BYTE_LITERALS
+                | S_16BYTE_LITERALS
+                | S_LITERAL_POINTERS
+        )
+    };
+
+    // Subsections of each section, by section ordinal.
+    let mut by_ordinal: Vec<Vec<usize>> = vec![Vec::new(); sect_hdrs.len()];
+    let mut subsecs: Vec<usize> = Vec::new();
+
+    for (i, sect) in sect_hdrs.iter().enumerate() {
+        if is_discarded_section(sect)
+            || (sect.segname() == "__TEXT" && sect.sectname() == "__eh_frame")
+        {
+            continue;
+        }
+
+        let mut points = std::mem::take(&mut split_points[i]);
+        if is_literal(sect) {
+            points.clear();
+        }
+        points.push(sect.addr);
+        points.retain(|&a| sect.addr <= a && a <= sect.addr + sect.size);
+        points.sort_unstable();
+        points.dedup();
+
+        for (j, &start) in points.iter().enumerate() {
+            let end = points.get(j + 1).copied().unwrap_or(sect.addr + sect.size);
+            let contents = if sect.section_type() == S_ZEROFILL
+                || sect.section_type() == S_THREAD_LOCAL_ZEROFILL
+            {
+                &[]
+            } else {
+                let lo = sect.offset as u64 + (start - sect.addr);
+                &data[lo as usize..(lo + (end - start)) as usize]
+            };
+            ctx.isecs.push(InputSection {
+                obj: obj_idx,
+                hdr: *sect,
+                input_addr: start,
+                size: end - start,
+                data: contents,
+                relocs: Vec::new(),
+                osec: usize::MAX,
+                output_offset: 0,
+                is_alive: true,
+            });
+            by_ordinal[i].push(ctx.isecs.len() - 1);
+            subsecs.push(ctx.isecs.len() - 1);
+        }
+    }
+
+    subsecs.sort_by_key(|&id| ctx.isecs[id].input_addr);
+
+    // Read each section's relocations and distribute them to its
+    // subsections, rebasing location offsets and section-relative
+    // targets to subsections.
+    for (i, sect) in sect_hdrs.iter().enumerate() {
+        if by_ordinal[i].is_empty() || sect.nreloc == 0 {
+            continue;
+        }
+        let raw: Vec<MachRel> = read_array(data, sect.reloff as usize, sect.nreloc as usize);
+        let rels = E::read_relocs(&ctx.diag, &mf.name, &sect_hdrs, sect, data, &raw);
+
+        for mut rel in rels {
+            let loc_addr = sect.addr + rel.offset as u64;
+            let Some((sub, sub_off)) = find_subsec(&ctx.isecs, &by_ordinal[i], loc_addr)
+            else {
+                fatal!(ctx, "{}: relocation outside its section", mf.name);
+            };
+            rel.offset = sub_off as u32;
+
+            if let crate::input_sections::RelocTarget::Section(sect_pos) = rel.target {
+                let taddr = (sect_hdrs[sect_pos].addr as i64 + rel.addend) as u64;
+                let Some((tsub, toff)) = find_subsec(&ctx.isecs, &subsecs, taddr) else {
+                    fatal!(ctx, "{}: relocation against a discarded section", mf.name);
+                };
+                rel.target = crate::input_sections::RelocTarget::Section(tsub);
+                rel.addend = toff as i64;
+            }
+            ctx.isecs[sub].relocs.push(rel);
+        }
+    }
+
+    // Parse symbols
     let mut syms = Vec::with_capacity(nlists.len());
     for nlist in &nlists {
-        syms.push(parse_symbol(ctx, obj_idx, &sect_hdrs, &sections, strtab, nlist, &mf.name));
+        syms.push(parse_symbol(
+            ctx, obj_idx, &by_ordinal, strtab, nlist, &mf.name,
+        ));
     }
 
     let unwind_start = ctx.unwind_records.len();
@@ -134,7 +230,7 @@ pub fn parse_object<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile) -> u
         .iter()
         .find(|s| s.segname() == "__LD" && s.sectname() == "__compact_unwind")
     {
-        parse_compact_unwind(ctx, hdr, &sect_hdrs, &sections, &syms, &nlists, data, &mf.name);
+        parse_compact_unwind(ctx, hdr, &subsecs, &syms, &nlists, data, &mf.name);
     }
 
     if let Some(hdr) = sect_hdrs
@@ -145,8 +241,7 @@ pub fn parse_object<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile) -> u
             ctx,
             obj_idx,
             hdr,
-            &sect_hdrs,
-            &sections,
+            &subsecs,
             &syms,
             &nlists,
             data,
@@ -158,7 +253,7 @@ pub fn parse_object<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile) -> u
     ctx.objs.push(ObjectFile {
         mf,
         sect_hdrs,
-        sections,
+        subsecs,
         nlists,
         syms,
     });
@@ -175,8 +270,7 @@ fn symbol_name(strtab: &'static [u8], nlist: &NList) -> &'static str {
 fn parse_symbol<E: Arch>(
     ctx: &mut Context<E>,
     obj_idx: usize,
-    sect_hdrs: &[MachSection],
-    sections: &[Option<usize>],
+    by_ordinal: &[Vec<usize>],
     strtab: &'static [u8],
     nlist: &NList,
     file_name: &str,
@@ -218,13 +312,13 @@ fn parse_symbol<E: Arch>(
             }
         }
         N_SECT => {
-            let sect_idx = nlist.n_sect as usize - 1;
-            let Some(&isec) = sections.get(sect_idx) else {
+            let Some(subsecs) = by_ordinal.get(nlist.n_sect as usize - 1) else {
                 fatal!(ctx, "{file_name}: invalid section index for {name}");
             };
             // A symbol in a discarded section (e.g. a debug section
             // label) is not defined.
-            let Some(isec) = isec else {
+            let Some((isec, value)) = find_subsec(&ctx.isecs, subsecs, nlist.n_value)
+            else {
                 return id;
             };
 
@@ -238,7 +332,6 @@ fn parse_symbol<E: Arch>(
                     // Keep the existing definition.
                 }
                 _ => {
-                    let value = nlist.n_value - sect_hdrs[sect_idx].addr;
                     let sym = &mut ctx.symtab[id];
                     sym.origin = Origin::Obj(obj_idx);
                     sym.isec = Some(isec);
@@ -280,13 +373,30 @@ pub struct UnwindRecord {
 fn parse_compact_unwind<E: Arch>(
     ctx: &mut Context<E>,
     hdr: &MachSection,
-    sect_hdrs: &[MachSection],
-    sections: &[Option<usize>],
+    subsecs: &[usize],
     syms: &[SymbolId],
     nlists: &[NList],
     data: &'static [u8],
     file_name: &str,
 ) {
+    // A snapshot of the object's subsection geometry, so lookups don't
+    // borrow the context.
+    let geo: Vec<(u64, u64, usize)> = subsecs
+        .iter()
+        .map(|&id| (ctx.isecs[id].input_addr, ctx.isecs[id].size, id))
+        .collect();
+    let find_subsec = |addr: u64| -> Option<(usize, u32)> {
+        let i = geo.partition_point(|&(start, _, _)| start <= addr);
+        if i == 0 {
+            return None;
+        }
+        let (start, size, id) = geo[i - 1];
+        if addr < start + size || (size == 0 && addr == start) {
+            Some((id, (addr - start) as u32))
+        } else {
+            None
+        }
+    };
     const ENTRY_SIZE: usize = 32;
     if hdr.size % ENTRY_SIZE as u64 != 0 {
         fatal!(ctx, "{file_name}: invalid __compact_unwind section size");
@@ -317,14 +427,6 @@ fn parse_compact_unwind<E: Arch>(
         });
     }
 
-    // A section and the offset within it, for an address in the object.
-    let find_section = |addr: u64| -> Option<(usize, u32)> {
-        let idx = sect_hdrs
-            .iter()
-            .position(|sec| sec.addr <= addr && addr < sec.addr + sec.size)?;
-        Some((sections[idx]?, (addr - sect_hdrs[idx].addr) as u32))
-    };
-
     let rels: Vec<MachRel> = read_array(data, hdr.reloff as usize, hdr.nreloc as usize);
     for r in &rels {
         if r.r_address as u64 >= hdr.size || r.r_length() != 3 {
@@ -344,7 +446,7 @@ fn parse_compact_unwind<E: Arch>(
                     records[idx].isec = isec;
                     records[idx].input_offset = (sym.value + value) as u32;
                 } else {
-                    let Some((isec, off)) = find_section(value) else {
+                    let Some((isec, off)) = find_subsec(value) else {
                         fatal!(ctx, "{file_name}: __compact_unwind: bad function reference");
                     };
                     records[idx].isec = isec;
@@ -377,7 +479,7 @@ fn parse_compact_unwind<E: Arch>(
                     };
                     records[idx].lsda = Some((isec, (sym.value + value) as u32));
                 } else {
-                    let Some(lsda) = find_section(value) else {
+                    let Some(lsda) = find_subsec(value) else {
                         fatal!(ctx, "{file_name}: __compact_unwind: bad LSDA reference");
                     };
                     records[idx].lsda = Some(lsda);
@@ -452,14 +554,29 @@ fn parse_eh_frame<E: Arch>(
     ctx: &mut Context<E>,
     obj_idx: usize,
     hdr: &MachSection,
-    sect_hdrs: &[MachSection],
-    sections: &[Option<usize>],
+    subsecs: &[usize],
     syms: &[SymbolId],
     nlists: &[NList],
     data: &'static [u8],
     new_unwind_start: usize,
     file_name: &str,
 ) {
+    let geo: Vec<(u64, u64, usize)> = subsecs
+        .iter()
+        .map(|&id| (ctx.isecs[id].input_addr, ctx.isecs[id].size, id))
+        .collect();
+    let find_subsec = |addr: u64| -> Option<(usize, u32)> {
+        let i = geo.partition_point(|&(start, _, _)| start <= addr);
+        if i == 0 {
+            return None;
+        }
+        let (start, size, id) = geo[i - 1];
+        if addr < start + size || (size == 0 && addr == start) {
+            Some((id, (addr - start) as u32))
+        } else {
+            None
+        }
+    };
     let mut contents =
         data[hdr.offset as usize..(hdr.offset as u64 + hdr.size) as usize].to_vec();
     let rels: Vec<MachRel> = read_array(data, hdr.reloff as usize, hdr.nreloc as usize);
@@ -618,16 +735,9 @@ fn parse_eh_frame<E: Arch>(
         let func_addr = (input_addr as u64 + 8).wrapping_add_signed(pc_begin);
         let code_len = u64::from_le_bytes(rec[16..24].try_into().unwrap()) as u32;
 
-        let Some(sect_idx) = sect_hdrs
-            .iter()
-            .position(|sec| sec.addr <= func_addr && func_addr < sec.addr + sec.size)
-        else {
+        let Some((isec, func_offset)) = find_subsec(func_addr) else {
             fatal!(ctx, "{file_name}: __eh_frame: FDE with an invalid function");
         };
-        let Some(isec) = sections[sect_idx] else {
-            continue;
-        };
-        let func_offset = (func_addr - sect_hdrs[sect_idx].addr) as u32;
 
         if covered.contains(&(isec, func_offset)) {
             continue;
@@ -641,16 +751,10 @@ fn parse_eh_frame<E: Arch>(
             read_uleb_at(&rec, &mut pos);
             let cell = i32::from_le_bytes(rec[pos..pos + 4].try_into().unwrap());
             let lsda_addr = (input_addr as u64 + pos as u64).wrapping_add_signed(cell as i64);
-            let Some(idx) = sect_hdrs
-                .iter()
-                .position(|sec| sec.addr <= lsda_addr && lsda_addr < sec.addr + sec.size)
-            else {
+            let Some((lsda_isec, lsda_off)) = find_subsec(lsda_addr) else {
                 fatal!(ctx, "{file_name}: __eh_frame: FDE with an invalid LSDA");
             };
-            let Some(lsda_isec) = sections[idx] else {
-                fatal!(ctx, "{file_name}: __eh_frame: LSDA in a discarded section");
-            };
-            lsda = Some((lsda_isec, (lsda_addr - sect_hdrs[idx].addr) as u32));
+            lsda = Some((lsda_isec, lsda_off));
         }
 
         let fde_idx = ctx.fdes.len();

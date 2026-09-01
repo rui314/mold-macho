@@ -559,6 +559,7 @@ pub fn encode_export_trie<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
                 sym.origin,
                 crate::symbol::Origin::Obj(_) | crate::symbol::Origin::Synthetic
             )
+            || sym.isec.is_some_and(|isec| !ctx.isecs[isec].is_alive)
         {
             continue;
         }
