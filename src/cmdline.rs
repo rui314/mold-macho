@@ -35,6 +35,7 @@ pub struct Args {
     pub library_paths: Vec<String>,
     pub framework_paths: Vec<String>,
     pub inputs: Vec<InputArg>,
+    pub rpaths: Vec<String>,
     pub adhoc_codesign: bool,
     pub dead_strip: bool,
     pub dynamic: bool,
@@ -57,6 +58,7 @@ impl Default for Args {
             library_paths: Vec::new(),
             framework_paths: Vec::new(),
             inputs: Vec::new(),
+            rpaths: Vec::new(),
             adhoc_codesign: cfg!(target_arch = "aarch64"),
             dead_strip: false,
             dynamic: true,
@@ -120,6 +122,7 @@ pub fn parse_args(diag: &Diagnostics, cmdline: &[String]) -> Args {
                 .push(InputArg::Framework(next_arg(&mut i).to_string())),
             "-F" => args.framework_paths.push(next_arg(&mut i).to_string()),
             "-dylib" => args.output_type = MH_DYLIB,
+            "-rpath" => args.rpaths.push(next_arg(&mut i).to_string()),
             "-install_name" | "-dylib_install_name" => {
                 args.install_name = Some(next_arg(&mut i).to_string())
             }

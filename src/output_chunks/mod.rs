@@ -374,6 +374,19 @@ fn create_id_dylib_cmd<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
     buf
 }
 
+fn create_rpath_cmd(path: &str) -> Vec<u8> {
+    let cmd = DylinkerCommand {
+        cmd: LC_RPATH,
+        cmdsize: 0,
+        nameoff: size_of::<DylinkerCommand>() as u32,
+    };
+    let mut buf = to_vec(&cmd);
+    append_string(&mut buf, path);
+    let size = buf.len() as u32;
+    buf[4..8].copy_from_slice(&size.to_le_bytes());
+    buf
+}
+
 fn create_main_cmd<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
     // The entry point is a file offset into __TEXT, whose file offset
     // is zero.
@@ -414,6 +427,10 @@ pub fn create_load_commands<E: Arch>(ctx: &Context<E>) -> Vec<Vec<u8>> {
 
     for dylib in &ctx.dylibs {
         vec.push(create_load_dylib_cmd(dylib));
+    }
+
+    for rpath in &ctx.args.rpaths {
+        vec.push(create_rpath_cmd(rpath));
     }
 
     match ctx.args.output_type {
