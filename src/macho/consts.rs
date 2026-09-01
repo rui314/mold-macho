@@ -100,6 +100,13 @@ pub const N_ABS: u8 = 0x2;
 pub const N_SECT: u8 = 0xe;
 pub const N_INDR: u8 = 0xa;
 
+// Stab symbol types, for debug entries in the symbol table
+pub const N_GSYM: u8 = 0x20;
+pub const N_FUN: u8 = 0x24;
+pub const N_STSYM: u8 = 0x26;
+pub const N_SO: u8 = 0x64;
+pub const N_OSO: u8 = 0x66;
+
 // Symbol descriptions (n_desc field of nlist)
 pub const N_WEAK_REF: u16 = 0x0040;
 pub const N_WEAK_DEF: u16 = 0x0080;

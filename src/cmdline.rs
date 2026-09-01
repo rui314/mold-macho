@@ -44,6 +44,8 @@ pub struct Args {
     pub rpaths: Vec<String>,
     pub adhoc_codesign: bool,
     pub dead_strip: bool,
+    /// -S: do not emit debug stab symbols.
+    pub strip_debug: bool,
     pub all_load: bool,
     pub load_objc: bool,
     /// Symbols to treat as undefined from the start (-u), forcing
@@ -79,6 +81,7 @@ impl Default for Args {
             rpaths: Vec::new(),
             adhoc_codesign: true,
             dead_strip: false,
+            strip_debug: false,
             all_load: false,
             load_objc: false,
             forced_undefined: Vec::new(),
@@ -201,6 +204,7 @@ pub fn parse_args(diag: &Diagnostics, cmdline: &[String]) -> Args {
             }
 
             "-dead_strip" => args.dead_strip = true,
+            "-S" => args.strip_debug = true,
             "-all_load" => args.all_load = true,
             "-u" => args
                 .forced_undefined

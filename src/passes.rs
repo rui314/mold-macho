@@ -806,7 +806,9 @@ fn keep_local_symbol(name: &str) -> bool {
 pub fn compute_symtab<E: Arch>(ctx: &mut Context<E>) {
     let ordinals = section_ordinals(ctx);
     let mut data = std::mem::take(&mut ctx.symtab_data);
-    data.strtab = vec![b' ', 0];
+    // Offset 1 is the empty string, offset 2 the "-" placeholder used
+    // by stab source-file entries.
+    data.strtab = vec![b' ', 0, b'-', 0];
 
     let add_string = |strtab: &mut Vec<u8>, s: &str| -> u32 {
         let off = strtab.len() as u32;
@@ -814,6 +816,113 @@ pub fn compute_symtab<E: Arch>(ctx: &mut Context<E>) {
         strtab.push(0);
         off
     };
+
+    // Debug stabs. Mach-O binaries don't carry DWARF; instead, for each
+    // object with debug info the symbol table gets stab entries telling
+    // the debugger where the object file is (N_OSO) and where its
+    // functions and globals ended up, and the debugger reads the DWARF
+    // from the objects.
+    if !ctx.args.strip_debug {
+        let cwd = std::env::current_dir()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default();
+
+        for (obj_idx, obj) in ctx.objs.iter().enumerate() {
+            if !obj.has_debug_info {
+                continue;
+            }
+
+            // The source-file N_SO's name is unused by debuggers; "-"
+            // stands in. N_OSO points at the object (or "archive(member)"),
+            // as an absolute path.
+            data.entries.push((
+                NList {
+                    n_strx: 2,
+                    n_type: N_SO,
+                    ..Default::default()
+                },
+                None,
+            ));
+            let oso_name = match obj.mf.parent {
+                Some(parent) if parent.name.starts_with('/') => obj.mf.name.clone(),
+                Some(_) | None if obj.mf.name.starts_with('/') => obj.mf.name.clone(),
+                _ => format!("{cwd}/{}", obj.mf.name),
+            };
+            data.entries.push((
+                NList {
+                    n_strx: add_string(&mut data.strtab, &oso_name),
+                    n_type: N_OSO,
+                    n_sect: E::CPUSUBTYPE as u8,
+                    n_desc: 1,
+                    n_value: 0,
+                },
+                None,
+            ));
+
+            for (nlist, &sym_id) in obj.nlists.iter().zip(&obj.syms) {
+                let sym = &ctx.symtab[sym_id];
+                if nlist.is_stab()
+                    || !matches!(sym.origin, Origin::Obj(o) if o == obj_idx)
+                    || (!nlist.is_extern() && !keep_local_symbol(sym.name))
+                {
+                    continue;
+                }
+                let Some(isec) = sym.isec else { continue };
+                let isec_id = ctx.resolve_isec(isec);
+                let isec = &ctx.isecs[isec_id];
+                if !isec.is_alive {
+                    continue;
+                }
+
+                let n_strx = add_string(&mut data.strtab, sym.name);
+                let is_text = isec.hdr.segname() == "__TEXT"
+                    && isec.hdr.flags & (S_ATTR_PURE_INSTRUCTIONS | S_ATTR_SOME_INSTRUCTIONS)
+                        != 0;
+                if is_text {
+                    // A pair: the function's address, then its size.
+                    data.entries.push((
+                        NList {
+                            n_strx,
+                            n_type: N_FUN,
+                            n_sect: ordinals[isec.osec],
+                            ..Default::default()
+                        },
+                        Some(sym_id),
+                    ));
+                    data.entries.push((
+                        NList {
+                            n_strx: 1,
+                            n_type: N_FUN,
+                            n_value: isec.size,
+                            ..Default::default()
+                        },
+                        None,
+                    ));
+                } else {
+                    data.entries.push((
+                        NList {
+                            n_strx,
+                            n_type: if nlist.is_extern() { N_GSYM } else { N_STSYM },
+                            n_sect: ordinals[isec.osec],
+                            ..Default::default()
+                        },
+                        Some(sym_id),
+                    ));
+                }
+            }
+
+            // An N_SO with an empty name closes the object's stabs.
+            data.entries.push((
+                NList {
+                    n_strx: 1,
+                    n_type: N_SO,
+                    n_sect: 1,
+                    ..Default::default()
+                },
+                None,
+            ));
+        }
+    }
 
     // Local symbols
     for obj in &ctx.objs {

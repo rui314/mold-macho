@@ -21,6 +21,9 @@ pub struct ObjectFile {
     pub subsecs: Vec<usize>,
     /// The flags word of the object's __objc_imageinfo, if it has one.
     pub objc_image_info: Option<u32>,
+    /// True if the object carries DWARF debug info, so the output gets
+    /// debug stabs pointing back at it.
+    pub has_debug_info: bool,
     pub nlists: Vec<NList>,
     /// The symbol slot for each nlist entry.
     pub syms: Vec<SymbolId>,
@@ -308,12 +311,16 @@ pub fn parse_object<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile) -> u
             let off = s.offset as usize + 4;
             u32::from_le_bytes(data[off..off + 4].try_into().unwrap())
         });
+    let has_debug_info = sect_hdrs
+        .iter()
+        .any(|s| s.segname() == "__DWARF" && s.sectname() == "__debug_info");
 
     ctx.objs.push(ObjectFile {
         mf,
         sect_hdrs,
         subsecs,
         objc_image_info,
+        has_debug_info,
         nlists,
         syms,
     });
