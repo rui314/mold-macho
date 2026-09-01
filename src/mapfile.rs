@@ -53,10 +53,19 @@ pub fn print_map<E: Arch>(ctx: &Context<E>) {
 
     let _ = writeln!(out, "# Path: {}", ctx.args.output);
     let _ = writeln!(out, "# Arch: {}", E::NAME);
+
+    // ld64 reserves file number 0 for atoms the linker itself creates
+    // (the Mach-O header symbol, unwind info, stubs); real objects are
+    // numbered from 1 in link order.
     let _ = writeln!(out, "# Object files:");
+    let _ = writeln!(out, "[  0] linker synthesized");
+    let mut file_no = vec![0usize; ctx.objs.len()];
+    let mut next = 1usize;
     for (i, obj) in ctx.objs.iter().enumerate() {
         if obj.is_alive {
-            let _ = writeln!(out, "[{i:3}] {}", obj.mf.name);
+            file_no[i] = next;
+            let _ = writeln!(out, "[{next:3}] {}", obj.mf.name);
+            next += 1;
         }
     }
 
@@ -75,25 +84,50 @@ pub fn print_map<E: Arch>(ctx: &Context<E>) {
         }
     }
 
-    // Defined symbols with their addresses and owning objects, sorted by
-    // address.
-    let mut syms: Vec<(u64, usize, &str)> = Vec::new();
+    // Defined symbols with their addresses, sizes and owning objects,
+    // sorted by address. A symbol's size is the span to the next
+    // symbol in its subsection (or the subsection's end) - the same
+    // atom size ld64 reports. Compiler temp labels (l/L prefixes)
+    // are not atoms and are skipped.
+    let mut syms: Vec<(u64, usize, &str, usize, u64)> = Vec::new();
     for i in 0..ctx.symtab.syms.len() {
         let sym = &ctx.symtab[i];
         let Origin::Obj(obj) = sym.origin else {
             continue;
         };
         let Some(isec) = sym.isec else { continue };
-        if !ctx.isecs[ctx.resolve_isec(isec)].is_alive || sym.name.is_empty() {
+        let isec = ctx.resolve_isec(isec);
+        if !ctx.isecs[isec].is_alive || sym.name.is_empty() {
             continue;
         }
-        syms.push((ctx.sym_addr(i), obj, sym.name));
+        if !sym.is_extern && (sym.name.starts_with('l') || sym.name.starts_with('L')) {
+            continue;
+        }
+        syms.push((ctx.sym_addr(i), file_no[obj], sym.name, isec, sym.value));
     }
-    syms.sort();
+
+    let mut sizes = vec![0u64; syms.len()];
+    let mut order: Vec<usize> = (0..syms.len()).collect();
+    order.sort_by_key(|&i| (syms[i].3, syms[i].4));
+    for (i, &idx) in order.iter().enumerate() {
+        let (_, _, _, isec, value) = syms[idx];
+        let end = match order.get(i + 1) {
+            Some(&next) if syms[next].3 == isec => syms[next].4,
+            _ => ctx.isecs[isec].size,
+        };
+        sizes[idx] = end.saturating_sub(value);
+    }
+
+    let mut order: Vec<usize> = (0..syms.len()).collect();
+    order.sort_by_key(|&i| (syms[i].0, syms[i].1));
 
     let _ = writeln!(out, "# Symbols:");
-    let _ = writeln!(out, "# Address\tFile  Name");
-    for (addr, obj, name) in syms {
-        let _ = writeln!(out, "0x{addr:08X}\t[{obj:3}] {name}");
+    let _ = writeln!(out, "# Address\tSize    \tFile  Name");
+    if ctx.args.output_type == crate::macho::MH_EXECUTE {
+        let _ = writeln!(out, "0x{:08X}\t0x00000000\t[  0] __mh_execute_header", ctx.args.pagezero_size);
+    }
+    for idx in order {
+        let (addr, file, name, _, _) = syms[idx];
+        let _ = writeln!(out, "0x{addr:08X}\t0x{:08X}\t[{file:3}] {name}", sizes[idx]);
     }
 }
