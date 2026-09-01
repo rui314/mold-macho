@@ -13,11 +13,34 @@ use crate::error::Diagnostics;
 use crate::input_sections::Reloc;
 use crate::macho::{MachRel, MachSection};
 
+/// How a relocation type uses its target symbol.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RelocClass {
+    /// A branch, which needs a stub if the target is imported.
+    Branch,
+    /// A reference through the GOT.
+    Got,
+    /// A reference to a thread-local variable pointer.
+    Tlv,
+    /// A direct reference.
+    Plain,
+}
+
 pub trait Arch: Copy + Default + Send + Sync + 'static {
     const NAME: &'static str;
     const CPUTYPE: u32;
     const CPUSUBTYPE: u32;
     const PAGE_SIZE: u64;
+    /// The size of one __stubs entry.
+    const STUB_SIZE: u64;
+
+    /// Classifies a relocation type by how it uses its target.
+    fn classify_reloc(r_type: u8) -> RelocClass;
+
+    /// Writes the __stubs section: for each symbol in `ctx.stub_syms`, a
+    /// jump through the symbol's __got slot. `addr` is the section's
+    /// address and `buf` its bytes in the output.
+    fn write_stubs(ctx: &Context<Self>, addr: u64, buf: &mut [u8]);
 
     /// Converts raw relocation records of one input section into
     /// [`Reloc`]s. Mach-O encodes addends target-dependently: some are

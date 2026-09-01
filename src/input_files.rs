@@ -33,6 +33,7 @@ pub struct DylibFile {
     pub compatibility_version: u32,
     /// The 1-based ordinal used to refer to this dylib in bind records.
     pub dylib_idx: i32,
+    pub exports: std::collections::HashSet<String>,
 }
 
 /// Returns true for sections that don't become part of the output image.
@@ -162,7 +163,8 @@ fn parse_symbol<E: Arch>(
     match nlist.n_type() {
         N_UNDF => {
             // The definition may come from another file; leave the slot
-            // as it is.
+            // as it is, but remember that it is referenced.
+            ctx.symtab[id].is_used = true;
         }
         N_ABS => {
             let sym = &mut ctx.symtab[id];
@@ -239,11 +241,15 @@ pub fn get_fat_slice<E: Arch>(
 pub fn parse_dylib<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile) -> usize {
     let tbd = tapi::parse(&ctx.diag, mf);
     let idx = ctx.dylibs.len();
+    let mut exports: std::collections::HashSet<String> =
+        tbd.exports.into_iter().collect();
+    exports.extend(tbd.weak_exports);
     ctx.dylibs.push(DylibFile {
         install_name: tbd.install_name,
         current_version: tbd.current_version,
         compatibility_version: encode_version(1, 0, 0),
         dylib_idx: idx as i32 + 1,
+        exports,
     });
     idx
 }

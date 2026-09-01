@@ -4,6 +4,11 @@
 //! giving its install name, exported symbols and reexports. We don't need
 //! a general YAML parser: TAPI files are machine-generated and regular, so
 //! a line-oriented scan is enough.
+//!
+//! A .tbd file may contain multiple YAML documents: the first one is the
+//! library itself, and the rest are the libraries it reexports, inlined.
+//! Since reexported symbols resolve through the top-level library, all
+//! documents' exports are merged.
 
 use crate::error::Diagnostics;
 use crate::fatal;
@@ -13,6 +18,8 @@ use crate::mapped_file::MappedFile;
 pub struct TbdFile {
     pub install_name: String,
     pub current_version: u32,
+    pub exports: Vec<String>,
+    pub weak_exports: Vec<String>,
 }
 
 /// Strips a YAML scalar's surrounding quotes, if any.
@@ -24,35 +31,83 @@ fn unquote(s: &str) -> &str {
         .unwrap_or(s)
 }
 
-/// Parses the main document of a .tbd file. A file may contain more
-/// documents after the first one, describing reexported libraries; they
-/// are not handled yet.
+/// Reads the flow list (`[ a, b, ... ]`, possibly spanning lines)
+/// following position `pos`, appending its elements to `out`.
+fn read_list(text: &str, pos: usize, out: &mut Vec<String>, prefix: &str) {
+    let Some(start) = text[pos..].find('[') else {
+        return;
+    };
+    let start = pos + start + 1;
+    let Some(end) = text[start..].find(']') else {
+        return;
+    };
+    for item in text[start..start + end].split(',') {
+        let item = unquote(item.trim());
+        if !item.is_empty() {
+            out.push(format!("{prefix}{item}"));
+        }
+    }
+}
+
+/// Reads all `<key>: [ ... ]` lists in a document.
+fn read_lists(doc: &str, key: &str, out: &mut Vec<String>, prefix: &str) {
+    let pat = format!("{key}:");
+    let mut pos = 0;
+    while let Some(found) = doc[pos..].find(&pat) {
+        let at = pos + found;
+        // The key must be a whole word: "symbols" must not match
+        // "weak-symbols".
+        let line_ok = doc[..at]
+            .chars()
+            .next_back()
+            .map_or(true, |c| c == '\n' || c == ' ');
+        pos = at + pat.len();
+        if line_ok {
+            read_list(doc, pos, out, prefix);
+        }
+    }
+}
+
+fn parse_version(val: &str) -> u32 {
+    let mut nums = val.split('.').map(|s| s.parse().unwrap_or(0));
+    let major = nums.next().unwrap_or(1);
+    let minor = nums.next().unwrap_or(0);
+    let patch = nums.next().unwrap_or(0);
+    crate::macho::encode_version(major, minor, patch)
+}
+
+/// Parses a .tbd file, merging exports of all its documents.
 pub fn parse(diag: &Diagnostics, mf: &MappedFile) -> TbdFile {
     let Ok(text) = std::str::from_utf8(mf.data) else {
         fatal!(diag, "{}: invalid UTF-8 in .tbd file", mf.name);
     };
 
-    // Documents after the first describe reexported libraries.
-    let doc = match text[3..].find("\n---") {
-        Some(pos) => &text[..pos + 3],
-        None => text,
-    };
-
     let mut tbd = TbdFile {
         install_name: String::new(),
         current_version: crate::macho::encode_version(1, 0, 0),
+        exports: Vec::new(),
+        weak_exports: Vec::new(),
     };
 
-    for line in doc.lines() {
-        if let Some(val) = line.strip_prefix("install-name:") {
-            tbd.install_name = unquote(val).to_string();
-        } else if let Some(val) = line.strip_prefix("current-version:") {
-            let mut nums = unquote(val).split('.').map(|s| s.parse().unwrap_or(0));
-            let major = nums.next().unwrap_or(1);
-            let minor = nums.next().unwrap_or(0);
-            let patch = nums.next().unwrap_or(0);
-            tbd.current_version = crate::macho::encode_version(major, minor, patch);
+    for (i, doc) in text.split("\n---").enumerate() {
+        if i == 0 {
+            for line in doc.lines() {
+                if let Some(val) = line.strip_prefix("install-name:") {
+                    tbd.install_name = unquote(val).to_string();
+                } else if let Some(val) = line.strip_prefix("current-version:") {
+                    tbd.current_version = parse_version(unquote(val));
+                }
+            }
         }
+
+        // Merge the exported symbols of every document. Objective-C
+        // entities are exported under mangled symbol names.
+        read_lists(doc, "symbols", &mut tbd.exports, "");
+        read_lists(doc, "objc-classes", &mut tbd.exports, "_OBJC_CLASS_$_");
+        read_lists(doc, "objc-classes", &mut tbd.exports, "_OBJC_METACLASS_$_");
+        read_lists(doc, "objc-eh-types", &mut tbd.exports, "_OBJC_EHTYPE_$_");
+        read_lists(doc, "objc-ivars", &mut tbd.exports, "_OBJC_IVAR_$_");
+        read_lists(doc, "weak-symbols", &mut tbd.weak_exports, "");
     }
 
     if tbd.install_name.is_empty() {

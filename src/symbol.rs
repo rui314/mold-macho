@@ -36,6 +36,11 @@ pub struct Symbol {
     /// True if some relocation refers to this symbol, which makes an
     /// unresolved symbol an error.
     pub is_used: bool,
+    /// The symbol's entry in __stubs, if branches to it need one.
+    pub stub_idx: Option<u32>,
+    /// The symbol's entry in __got, if it is address-taken through the
+    /// GOT.
+    pub got_idx: Option<u32>,
 }
 
 impl Symbol {
@@ -49,6 +54,8 @@ impl Symbol {
             is_weak_def: false,
             is_imported: false,
             is_used: false,
+            stub_idx: None,
+            got_idx: None,
         }
     }
 

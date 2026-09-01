@@ -137,3 +137,29 @@ pub const CS_PAGE_SIZE: u64 = 4096;
 // Special dylib ordinals for two-level namespace binds
 pub const BIND_SPECIAL_DYLIB_MAIN_EXECUTABLE: i32 = 0;
 pub const BIND_SPECIAL_DYLIB_SELF: i32 = -1;
+
+// Segment flags
+pub const SG_READ_ONLY: u32 = 0x10;
+
+// Bind opcodes, for the LC_DYLD_INFO bind stream. Each opcode byte holds
+// the opcode in the high nibble and an immediate in the low nibble.
+pub const BIND_TYPE_POINTER: u8 = 1;
+pub const BIND_OPCODE_DONE: u8 = 0x00;
+pub const BIND_OPCODE_SET_DYLIB_ORDINAL_IMM: u8 = 0x10;
+pub const BIND_OPCODE_SET_DYLIB_ORDINAL_ULEB: u8 = 0x20;
+pub const BIND_OPCODE_SET_SYMBOL_TRAILING_FLAGS_IMM: u8 = 0x40;
+pub const BIND_OPCODE_SET_TYPE_IMM: u8 = 0x50;
+pub const BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB: u8 = 0x70;
+pub const BIND_OPCODE_DO_BIND: u8 = 0x90;
+
+// Rebase opcodes, for the LC_DYLD_INFO rebase stream
+pub const REBASE_TYPE_POINTER: u8 = 1;
+pub const REBASE_OPCODE_DONE: u8 = 0x00;
+pub const REBASE_OPCODE_SET_TYPE_IMM: u8 = 0x10;
+pub const REBASE_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB: u8 = 0x20;
+pub const REBASE_OPCODE_DO_REBASE_IMM_TIMES: u8 = 0x50;
+pub const REBASE_OPCODE_DO_REBASE_ULEB_TIMES: u8 = 0x60;
+
+// Magic values in the indirect symbol table
+pub const INDIRECT_SYMBOL_LOCAL: u32 = 0x8000_0000;
+pub const INDIRECT_SYMBOL_ABS: u32 = 0x4000_0000;

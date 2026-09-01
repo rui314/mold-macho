@@ -59,6 +59,10 @@ pub fn link<E: Arch>(cmdline: &[String], diag: &Diagnostics) -> Result<i32, Stri
     passes::read_input_files(&mut ctx);
     ctx.diag.checkpoint();
     passes::create_synthetic_symbols(&mut ctx);
+    passes::resolve_dylib_symbols(&mut ctx);
+    passes::check_undefined_symbols(&ctx);
+    ctx.diag.checkpoint();
+    passes::scan_relocs(&mut ctx);
 
     // Decide the output layout
     passes::create_output_chunks(&mut ctx);

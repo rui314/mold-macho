@@ -18,6 +18,19 @@ pub fn sign_extend(val: u64, n: u32) -> i64 {
     ((val << (63 - n)) as i64) >> (63 - n)
 }
 
+/// Appends a ULEB128-encoded value.
+pub fn write_uleb(buf: &mut Vec<u8>, mut val: u64) {
+    loop {
+        let byte = (val & 0x7f) as u8;
+        val >>= 7;
+        if val == 0 {
+            buf.push(byte);
+            return;
+        }
+        buf.push(byte | 0x80);
+    }
+}
+
 /// Computes the SHA-256 hash of `data` into `out`.
 ///
 /// libSystem, which every macOS process links against, exports the

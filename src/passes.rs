@@ -15,8 +15,9 @@ use crate::output_chunks::{
     self, Chunk, ChunkKind, OutputSegment, code_signature_size, mach_header_size,
     section_ordinals,
 };
+use crate::arch::RelocClass;
 use crate::symbol::Origin;
-use crate::util::align_to;
+use crate::util::{align_to, write_uleb};
 
 /// Returns the directories to search for `-l` libraries, in order. A
 /// library path that exists under a syslibroot is looked up there; the
@@ -102,6 +103,82 @@ pub fn read_input_files<E: Arch>(ctx: &mut Context<E>) {
     ctx.args.inputs = inputs;
 }
 
+/// Resolves symbols that no object file defines against the dylibs, in
+/// command line order.
+pub fn resolve_dylib_symbols<E: Arch>(ctx: &mut Context<E>) {
+    for i in 0..ctx.symtab.syms.len() {
+        let sym = &ctx.symtab[i];
+        if sym.is_defined() || !sym.is_used {
+            continue;
+        }
+        let name = sym.name;
+        if let Some(dylib) = ctx.dylibs.iter().position(|d| d.exports.contains(name)) {
+            let sym = &mut ctx.symtab[i];
+            sym.origin = Origin::Dylib(dylib);
+            sym.is_imported = true;
+            sym.is_extern = true;
+        }
+    }
+}
+
+/// Reports references to symbols that are still unresolved.
+pub fn check_undefined_symbols<E: Arch>(ctx: &Context<E>) {
+    for sym in &ctx.symtab.syms {
+        if sym.is_used && !sym.is_defined() {
+            error!(ctx, "undefined symbol: {}", sym.name);
+        }
+    }
+}
+
+/// Decides which symbols need a stub or a GOT slot, from how relocations
+/// refer to them.
+pub fn scan_relocs<E: Arch>(ctx: &mut Context<E>) {
+    let mut classes = Vec::new();
+    for isec in &ctx.isecs {
+        for rel in &isec.relocs {
+            if let Some(id) = ctx.reloc_target_sym(isec.obj, rel) {
+                classes.push((id, E::classify_reloc(rel.r_type)));
+            }
+        }
+    }
+
+    for (id, class) in classes {
+        let sym = &ctx.symtab[id];
+        match class {
+            RelocClass::Branch if sym.is_imported => {
+                // A stub jumps through the symbol's GOT slot.
+                add_stub(ctx, id);
+                add_got(ctx, id);
+            }
+            RelocClass::Got => {
+                if !ctx.symtab[id].is_imported {
+                    fatal!(ctx, "not implemented: GOT entry for local symbol {}",
+                           ctx.symtab[id].name);
+                }
+                add_got(ctx, id);
+            }
+            RelocClass::Tlv => {
+                fatal!(ctx, "not implemented: thread-local variables");
+            }
+            _ => {}
+        }
+    }
+}
+
+fn add_stub<E: Arch>(ctx: &mut Context<E>, id: crate::symbol::SymbolId) {
+    if ctx.symtab[id].stub_idx.is_none() {
+        ctx.symtab[id].stub_idx = Some(ctx.stub_syms.len() as u32);
+        ctx.stub_syms.push(id);
+    }
+}
+
+fn add_got<E: Arch>(ctx: &mut Context<E>, id: crate::symbol::SymbolId) {
+    if ctx.symtab[id].got_idx.is_none() {
+        ctx.symtab[id].got_idx = Some(ctx.got_syms.len() as u32);
+        ctx.got_syms.push(id);
+    }
+}
+
 /// Defines the symbols the linker itself provides.
 pub fn create_synthetic_symbols<E: Arch>(ctx: &mut Context<E>) {
     let id = ctx.symtab.intern("__mh_execute_header");
@@ -179,7 +256,33 @@ pub fn create_output_chunks<E: Arch>(ctx: &mut Context<E>) {
         chunk.hdr.size = off;
     }
 
+    if !ctx.stub_syms.is_empty() {
+        let mut chunk = Chunk::new("__TEXT", "__stubs", ChunkKind::Stubs);
+        chunk.hdr.flags = S_SYMBOL_STUBS | S_ATTR_PURE_INSTRUCTIONS | S_ATTR_SOME_INSTRUCTIONS;
+        chunk.hdr.p2align = 2;
+        chunk.hdr.reserved2 = E::STUB_SIZE as u32;
+        chunk.hdr.size = ctx.stub_syms.len() as u64 * E::STUB_SIZE;
+        ctx.chunks.push(chunk);
+    }
+
+    if !ctx.got_syms.is_empty() {
+        let mut chunk = Chunk::new("__DATA_CONST", "__got", ChunkKind::Got);
+        chunk.hdr.flags = S_NON_LAZY_SYMBOL_POINTERS;
+        chunk.hdr.p2align = 3;
+        // Indirect symbol table entries for stubs come first, then the
+        // GOT's.
+        chunk.hdr.reserved1 = ctx.stub_syms.len() as u32;
+        chunk.hdr.size = ctx.got_syms.len() as u64 * 8;
+        ctx.chunks.push(chunk);
+    }
+
+    ctx.chunks.push(Chunk::new("__LINKEDIT", "", ChunkKind::BindInfo));
     ctx.chunks.push(Chunk::new("__LINKEDIT", "", ChunkKind::Symtab));
+    if !ctx.stub_syms.is_empty() || !ctx.got_syms.is_empty() {
+        let mut chunk = Chunk::new("__LINKEDIT", "", ChunkKind::IndirectSymtab);
+        chunk.hdr.size = (ctx.stub_syms.len() + ctx.got_syms.len()) as u64 * 4;
+        ctx.chunks.push(chunk);
+    }
     ctx.chunks.push(Chunk::new("__LINKEDIT", "", ChunkKind::Strtab));
     if ctx.args.adhoc_codesign {
         ctx.chunks
@@ -273,7 +376,7 @@ pub fn compute_symtab<E: Arch>(ctx: &mut Context<E>) {
     let mut globals: Vec<usize> = (0..ctx.symtab.syms.len())
         .filter(|&i| {
             let sym = &ctx.symtab[i];
-            sym.is_extern && sym.is_defined()
+            sym.is_extern && matches!(sym.origin, Origin::Obj(_) | Origin::Synthetic)
         })
         .collect();
     globals.sort_by_key(|&i| ctx.symtab[i].name);
@@ -296,7 +399,43 @@ pub fn compute_symtab<E: Arch>(ctx: &mut Context<E>) {
         data.entries.push((ent, Some(i)));
     }
     data.nextdef = data.entries.len() as u32 - data.nlocal;
-    data.nundef = 0;
+
+    // Undefined (imported) symbols, sorted by name. The library ordinal
+    // lives in the high byte of n_desc.
+    let mut undefs: Vec<usize> = (0..ctx.symtab.syms.len())
+        .filter(|&i| matches!(ctx.symtab[i].origin, Origin::Dylib(_)))
+        .collect();
+    undefs.sort_by_key(|&i| ctx.symtab[i].name);
+
+    for &i in &undefs {
+        let sym = &ctx.symtab[i];
+        let Origin::Dylib(dylib) = sym.origin else {
+            unreachable!()
+        };
+        let n_strx = add_string(&mut data.strtab, sym.name);
+        let ent = NList {
+            n_strx,
+            n_type: N_UNDF | N_EXT,
+            n_sect: 0,
+            n_desc: (ctx.dylibs[dylib].dylib_idx as u16) << 8,
+            n_value: 0,
+        };
+        data.entries.push((ent, None));
+    }
+    data.nundef = undefs.len() as u32;
+
+    // Record each global symbol's index for the indirect symbol table.
+    for (i, (_, sym)) in data.entries.iter().enumerate() {
+        if let Some(id) = sym {
+            if ctx.symtab[*id].is_extern {
+                data.global_index.insert(*id, i as u32);
+            }
+        }
+    }
+    for (i, &id) in undefs.iter().enumerate() {
+        data.global_index
+            .insert(id, data.nlocal + data.nextdef + i as u32);
+    }
 
     // Pad the string table to 8 bytes.
     while data.strtab.len() % 8 != 0 {
@@ -318,6 +457,12 @@ pub fn assign_offsets<E: Arch>(ctx: &mut Context<E>) {
     let strtab_size = ctx.symtab_data.strtab.len() as u64;
 
     for seg_idx in 0..ctx.segments.len() {
+        // Everything the bind stream describes (the GOT, data sections)
+        // is laid out by the time we reach __LINKEDIT.
+        if ctx.segments[seg_idx].name == "__LINKEDIT" {
+            ctx.bind_data = build_bind_info(ctx);
+        }
+
         if ctx.segments[seg_idx].name == "__PAGEZERO" {
             let seg = &mut ctx.segments[seg_idx];
             seg.cmd.vmaddr = 0;
@@ -339,17 +484,19 @@ pub fn assign_offsets<E: Arch>(ctx: &mut Context<E>) {
             }
             let size = match &ctx.chunks[idx].kind {
                 ChunkKind::MachHeader => header_size,
-                ChunkKind::Output { .. } => ctx.chunks[idx].hdr.size,
                 ChunkKind::Symtab => symtab_size,
                 ChunkKind::Strtab => strtab_size,
+                ChunkKind::BindInfo => ctx.bind_data.len() as u64,
                 ChunkKind::CodeSignature => {
                     cursor = align_to(cursor, 16);
                     code_signature_size(&ctx.args.output, cursor)
                 }
+                _ => ctx.chunks[idx].hdr.size,
             };
             let chunk = &mut ctx.chunks[idx];
             let p2align = match chunk.kind {
-                ChunkKind::Symtab | ChunkKind::Strtab => 3,
+                ChunkKind::Symtab | ChunkKind::Strtab | ChunkKind::BindInfo => 3,
+                ChunkKind::IndirectSymtab => 2,
                 ChunkKind::CodeSignature => 4,
                 _ => chunk.hdr.p2align,
             };
@@ -395,6 +542,52 @@ pub fn assign_offsets<E: Arch>(ctx: &mut Context<E>) {
     ctx.output_size = fileoff;
 }
 
+/// Builds the bind opcode stream: it tells dyld which imported symbol to
+/// write into each GOT slot. Runs during layout, once every segment
+/// before __LINKEDIT has an address.
+fn build_bind_info<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let Some(got_idx) = output_chunks::find_chunk(ctx, |k| matches!(k, ChunkKind::Got)) else {
+        return buf;
+    };
+    let got_addr = ctx.chunks[got_idx].hdr.addr;
+    let seg_idx = ctx
+        .segments
+        .iter()
+        .position(|s| s.name == "__DATA_CONST")
+        .unwrap();
+    let seg_vmaddr = ctx.segments[seg_idx].cmd.vmaddr;
+
+    for (i, &id) in ctx.got_syms.iter().enumerate() {
+        let sym = &ctx.symtab[id];
+        let Origin::Dylib(dylib) = sym.origin else {
+            continue;
+        };
+        let ordinal = ctx.dylibs[dylib].dylib_idx;
+        if ordinal < 16 {
+            buf.push(BIND_OPCODE_SET_DYLIB_ORDINAL_IMM | ordinal as u8);
+        } else {
+            buf.push(BIND_OPCODE_SET_DYLIB_ORDINAL_ULEB);
+            write_uleb(&mut buf, ordinal as u64);
+        }
+        buf.push(BIND_OPCODE_SET_SYMBOL_TRAILING_FLAGS_IMM);
+        buf.extend_from_slice(sym.name.as_bytes());
+        buf.push(0);
+        buf.push(BIND_OPCODE_SET_TYPE_IMM | BIND_TYPE_POINTER);
+        buf.push(BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB | seg_idx as u8);
+        write_uleb(&mut buf, got_addr + i as u64 * 8 - seg_vmaddr);
+        buf.push(BIND_OPCODE_DO_BIND);
+    }
+
+    if !buf.is_empty() {
+        buf.push(BIND_OPCODE_DONE);
+        while buf.len() % 8 != 0 {
+            buf.push(0);
+        }
+    }
+    buf
+}
+
 /// Resolves the entry point symbol.
 pub fn resolve_entry<E: Arch>(ctx: &mut Context<E>) {
     match ctx.symtab.get(&ctx.args.entry) {
@@ -419,6 +612,36 @@ pub fn copy_chunks<E: Arch>(ctx: &Context<E>, buf: &mut [u8]) {
                     buf[off..end].copy_from_slice(isec.data);
                     let base = chunk.hdr.addr + isec.output_offset;
                     E::apply_relocs(ctx, &isec.relocs, isec.obj, base, &mut buf[off..end]);
+                }
+            }
+            ChunkKind::Stubs => {
+                let off = chunk.hdr.fileoff as usize;
+                let end = off + chunk.hdr.size as usize;
+                E::write_stubs(ctx, chunk.hdr.addr, &mut buf[off..end]);
+            }
+            ChunkKind::Got => {
+                // Slots for imported symbols stay zero; dyld fills them
+                // via the bind stream.
+                for (i, &id) in ctx.got_syms.iter().enumerate() {
+                    if !ctx.symtab[id].is_imported {
+                        let off = chunk.hdr.fileoff as usize + i * 8;
+                        buf[off..off + 8].copy_from_slice(&ctx.sym_addr(id).to_le_bytes());
+                    }
+                }
+            }
+            ChunkKind::BindInfo => {
+                let off = chunk.hdr.fileoff as usize;
+                buf[off..off + ctx.bind_data.len()].copy_from_slice(&ctx.bind_data);
+            }
+            ChunkKind::IndirectSymtab => {
+                let mut off = chunk.hdr.fileoff as usize;
+                for &id in ctx.stub_syms.iter().chain(&ctx.got_syms) {
+                    let val = match ctx.symtab_data.global_index.get(&id) {
+                        Some(&idx) => idx,
+                        None => INDIRECT_SYMBOL_LOCAL,
+                    };
+                    buf[off..off + 4].copy_from_slice(&val.to_le_bytes());
+                    off += 4;
                 }
             }
             ChunkKind::Symtab => output_chunks::copy_symtab(ctx, buf),

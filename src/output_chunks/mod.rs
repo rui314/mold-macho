@@ -21,6 +21,8 @@ pub struct ChunkHeader {
     pub size: u64,
     pub p2align: u32,
     pub flags: u32,
+    pub reserved1: u32,
+    pub reserved2: u32,
     /// Whether the chunk is described by a section header in its
     /// segment's load command. Linkedit tables and the mach header are
     /// not.
@@ -33,6 +35,15 @@ pub enum ChunkKind {
     MachHeader,
     /// A section of the output image, concatenating input sections.
     Output { isecs: Vec<InputSectionId> },
+    /// Jump stubs for calls to imported functions.
+    Stubs,
+    /// The global offset table: pointers to symbols, bound by dyld for
+    /// imported ones.
+    Got,
+    /// The bind opcode stream for LC_DYLD_INFO, in __LINKEDIT.
+    BindInfo,
+    /// The indirect symbol table in __LINKEDIT.
+    IndirectSymtab,
     /// The symbol table in __LINKEDIT.
     Symtab,
     /// The string table in __LINKEDIT.
@@ -58,7 +69,12 @@ impl Chunk {
                 size: 0,
                 p2align: 0,
                 flags: 0,
-                is_sect: matches!(kind, ChunkKind::Output { .. }),
+                reserved1: 0,
+                reserved2: 0,
+                is_sect: matches!(
+                    kind,
+                    ChunkKind::Output { .. } | ChunkKind::Stubs | ChunkKind::Got
+                ),
             },
             kind,
         }
@@ -108,6 +124,9 @@ pub struct SymtabData {
     pub nlocal: u32,
     pub nextdef: u32,
     pub nundef: u32,
+    /// The output symbol table index of each global symbol, for the
+    /// indirect symbol table.
+    pub global_index: std::collections::HashMap<SymbolId, u32>,
 }
 
 pub fn find_chunk<E: Arch>(ctx: &Context<E>, f: impl Fn(&ChunkKind) -> bool) -> Option<usize> {
@@ -159,6 +178,10 @@ fn create_segment_cmd<E: Arch>(ctx: &Context<E>, seg: &OutputSegment) -> Vec<u8>
     cmd.cmdsize = (size_of::<SegmentCommand>() + sects.len() * size_of::<MachSection>()) as u32;
     cmd.maxprot = segment_prot(seg.name);
     cmd.initprot = segment_prot(seg.name);
+    // dyld makes __DATA_CONST read-only once binds are applied.
+    if seg.name == "__DATA_CONST" {
+        cmd.flags = SG_READ_ONLY;
+    }
 
     let mut buf = to_vec(&cmd);
     for chunk in sects {
@@ -170,6 +193,8 @@ fn create_segment_cmd<E: Arch>(ctx: &Context<E>, seg: &OutputSegment) -> Vec<u8>
             offset: chunk.hdr.fileoff as u32,
             p2align: chunk.hdr.p2align,
             flags: chunk.hdr.flags,
+            reserved1: chunk.hdr.reserved1,
+            reserved2: chunk.hdr.reserved2,
             ..Default::default()
         };
         if chunk.is_zerofill() {
@@ -180,14 +205,18 @@ fn create_segment_cmd<E: Arch>(ctx: &Context<E>, seg: &OutputSegment) -> Vec<u8>
     buf
 }
 
-fn create_dyld_info_cmd<E: Arch>(_ctx: &Context<E>) -> Vec<u8> {
-    // No rebase, bind or export info yet: the command is present with
-    // empty tables, which dyld accepts.
-    let cmd = DyldInfoCommand {
+fn create_dyld_info_cmd<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
+    let mut cmd = DyldInfoCommand {
         cmd: LC_DYLD_INFO_ONLY,
         cmdsize: size_of::<DyldInfoCommand>() as u32,
         ..Default::default()
     };
+    if let Some(idx) = find_chunk(ctx, |k| matches!(k, ChunkKind::BindInfo)) {
+        if ctx.chunks[idx].hdr.size > 0 {
+            cmd.bind_off = ctx.chunks[idx].hdr.fileoff as u32;
+            cmd.bind_size = ctx.chunks[idx].hdr.size as u32;
+        }
+    }
     to_vec(&cmd)
 }
 
@@ -208,7 +237,7 @@ fn create_symtab_cmd<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
 
 fn create_dysymtab_cmd<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
     let data = &ctx.symtab_data;
-    let cmd = DysymtabCommand {
+    let mut cmd = DysymtabCommand {
         cmd: LC_DYSYMTAB,
         cmdsize: size_of::<DysymtabCommand>() as u32,
         ilocalsym: 0,
@@ -219,6 +248,10 @@ fn create_dysymtab_cmd<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
         nundefsym: data.nundef,
         ..Default::default()
     };
+    if let Some(idx) = find_chunk(ctx, |k| matches!(k, ChunkKind::IndirectSymtab)) {
+        cmd.indirectsymoff = ctx.chunks[idx].hdr.fileoff as u32;
+        cmd.nindirectsyms = (ctx.chunks[idx].hdr.size / 4) as u32;
+    }
     to_vec(&cmd)
 }
 

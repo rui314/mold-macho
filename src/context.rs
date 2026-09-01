@@ -10,7 +10,7 @@ use crate::error;
 use crate::error::{Diagnostics, HasDiagnostics};
 use crate::input_files::{DylibFile, ObjectFile};
 use crate::input_sections::{InputSection, InputSectionId, Reloc, RelocTarget};
-use crate::output_chunks::{Chunk, OutputSegment, SymtabData};
+use crate::output_chunks::{find_chunk, Chunk, ChunkKind, OutputSegment, SymtabData};
 use crate::symbol::{Origin, SymbolId, SymbolTable};
 
 pub struct Context<E: Arch> {
@@ -24,6 +24,12 @@ pub struct Context<E: Arch> {
     pub chunks: Vec<Chunk>,
     pub segments: Vec<OutputSegment>,
     pub symtab_data: SymtabData,
+    /// Symbols with a __stubs entry, in stub order.
+    pub stub_syms: Vec<SymbolId>,
+    /// Symbols with a __got slot, in slot order.
+    pub got_syms: Vec<SymbolId>,
+    /// The bind opcode stream for LC_DYLD_INFO, built during layout.
+    pub bind_data: Vec<u8>,
     /// The resolved address of the entry point symbol.
     pub entry_addr: u64,
     /// Total size of the output file.
@@ -49,6 +55,9 @@ impl<E: Arch> Context<E> {
             chunks: Vec::new(),
             segments: Vec::new(),
             symtab_data: SymtabData::default(),
+            stub_syms: Vec::new(),
+            got_syms: Vec::new(),
+            bind_data: Vec::new(),
             entry_addr: 0,
             output_size: 0,
             _marker: PhantomData,
@@ -73,10 +82,33 @@ impl<E: Arch> Context<E> {
                 Some(isec) => self.isec_addr(isec) + sym.value,
                 None => sym.value,
             },
-            Origin::Dylib(_) => {
-                error!(self, "cannot reference dylib symbol yet: {}", sym.name);
-                0
-            }
+            // A branch to a dylib symbol goes through its stub. Other
+            // references to dylib symbols are filled in by dyld; the
+            // relocation scan has already validated them.
+            Origin::Dylib(_) => match sym.stub_idx {
+                Some(_) => self.sym_stub_addr(id),
+                None => 0,
+            },
+        }
+    }
+
+    /// Returns the address of a symbol's __stubs entry.
+    pub fn sym_stub_addr(&self, id: SymbolId) -> u64 {
+        let idx = find_chunk(self, |k| matches!(k, ChunkKind::Stubs)).unwrap();
+        self.chunks[idx].hdr.addr + self.symtab[id].stub_idx.unwrap() as u64 * E::STUB_SIZE
+    }
+
+    /// Returns the address of a symbol's __got slot.
+    pub fn sym_got_addr(&self, id: SymbolId) -> u64 {
+        let idx = find_chunk(self, |k| matches!(k, ChunkKind::Got)).unwrap();
+        self.chunks[idx].hdr.addr + self.symtab[id].got_idx.unwrap() as u64 * 8
+    }
+
+    /// Returns the symbol a relocation refers to, if it refers to one.
+    pub fn reloc_target_sym(&self, obj: usize, rel: &Reloc) -> Option<SymbolId> {
+        match rel.target {
+            RelocTarget::Sym(idx) => Some(self.objs[obj].syms[idx]),
+            RelocTarget::Section(_) => None,
         }
     }
 

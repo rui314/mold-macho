@@ -63,6 +63,32 @@ impl Arch for Arm64 {
     const CPUTYPE: u32 = CPU_TYPE_ARM64;
     const CPUSUBTYPE: u32 = CPU_SUBTYPE_ARM64_ALL;
     const PAGE_SIZE: u64 = 16384;
+    const STUB_SIZE: u64 = 12;
+
+    fn classify_reloc(r_type: u8) -> crate::arch::RelocClass {
+        use crate::arch::RelocClass;
+        match r_type {
+            ARM64_RELOC_BRANCH26 => RelocClass::Branch,
+            ARM64_RELOC_GOT_LOAD_PAGE21
+            | ARM64_RELOC_GOT_LOAD_PAGEOFF12
+            | ARM64_RELOC_POINTER_TO_GOT => RelocClass::Got,
+            ARM64_RELOC_TLVP_LOAD_PAGE21 | ARM64_RELOC_TLVP_LOAD_PAGEOFF12 => RelocClass::Tlv,
+            _ => RelocClass::Plain,
+        }
+    }
+
+    fn write_stubs(ctx: &Context<Self>, addr: u64, buf: &mut [u8]) {
+        for (i, &sym) in ctx.stub_syms.iter().enumerate() {
+            let ent = &mut buf[i * 12..];
+            let ent_addr = addr + i as u64 * 12;
+            let ptr_addr = ctx.sym_got_addr(sym);
+
+            // adrp x16, $ptr@PAGE; ldr x16, [x16, $ptr@PAGEOFF]; br x16
+            write32(&mut ent[0..], 0x9000_0010 | page_offset(ptr_addr, ent_addr));
+            write32(&mut ent[4..], 0xf940_0210 | (bits(ptr_addr, 11, 3) as u32) << 10);
+            write32(&mut ent[8..], 0xd61f_0200);
+        }
+    }
 
     fn read_relocs(
         diag: &Diagnostics,
@@ -153,7 +179,14 @@ impl Arch for Arm64 {
             match r.r_type {
                 ARM64_RELOC_UNSIGNED => {
                     debug_assert!(r.size == 8);
-                    write64(loc, s.wrapping_add_signed(a));
+                    // An imported symbol's address is written by dyld,
+                    // via a bind record.
+                    let imported = ctx
+                        .reloc_target_sym(obj, r)
+                        .is_some_and(|id| ctx.symtab[id].is_imported);
+                    if !imported {
+                        write64(loc, s.wrapping_add_signed(a));
+                    }
                 }
                 ARM64_RELOC_SUBTRACTOR => {
                     // A SUBTRACTOR relocation is always followed by an
@@ -184,6 +217,20 @@ impl Arch for Arm64 {
                 }
                 ARM64_RELOC_PAGEOFF12 => {
                     write_add_ldst(loc, s.wrapping_add_signed(a));
+                }
+                ARM64_RELOC_GOT_LOAD_PAGE21 => {
+                    let g = ctx.sym_got_addr(ctx.reloc_target_sym(obj, r).unwrap());
+                    let val = read32(loc) | page_offset(g.wrapping_add_signed(a), p);
+                    write32(loc, val);
+                }
+                ARM64_RELOC_GOT_LOAD_PAGEOFF12 => {
+                    let g = ctx.sym_got_addr(ctx.reloc_target_sym(obj, r).unwrap());
+                    write_add_ldst(loc, g.wrapping_add_signed(a));
+                }
+                ARM64_RELOC_POINTER_TO_GOT => {
+                    let g = ctx.sym_got_addr(ctx.reloc_target_sym(obj, r).unwrap());
+                    debug_assert!(r.size == 4);
+                    write32(loc, g.wrapping_add_signed(a).wrapping_sub(p) as u32);
                 }
                 _ => fatal!(ctx, "unsupported relocation type: {}", r.r_type),
             }
