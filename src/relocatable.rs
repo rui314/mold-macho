@@ -1,0 +1,421 @@
+//! -r: relocatable output.
+//!
+//! `ld -r` combines object files into one bigger object file instead
+//! of a final image: sections are merged and laid out from address 0
+//! in a single nameless segment, symbols keep their definitions and
+//! undefined references, and - the essential part - relocations are
+//! *regenerated* against the merged section and symbol tables rather
+//! than applied. No dyld structures, no code signature.
+//!
+//! Section contents are copied raw (relocations stay unapplied), so
+//! fields that embed addends keep them; only non-external relocations
+//! need their embedded target addresses rewritten into the merged
+//! address space. Debug info is not carried over yet.
+
+use std::collections::HashMap;
+
+use crate::arch::Arch;
+use crate::context::Context;
+use crate::error;
+use crate::fatal;
+use crate::input_sections::RelocTarget;
+use crate::macho::*;
+use crate::output_chunks::ChunkKind;
+use crate::output_file;
+use crate::symbol::Origin;
+use crate::util::align_to;
+
+pub fn link<E: Arch>(ctx: &mut Context<E>) {
+    // Lay out the merged sections from address zero.
+    let mut addr: u64 = 0;
+    let mut section_chunks: Vec<usize> = Vec::new();
+    for idx in 0..ctx.chunks.len() {
+        if !matches!(ctx.chunks[idx].kind, ChunkKind::Output { .. }) {
+            continue;
+        }
+        let chunk = &mut ctx.chunks[idx];
+        addr = align_to(addr, 1 << chunk.hdr.p2align);
+        chunk.hdr.addr = addr;
+        addr += chunk.hdr.size;
+        section_chunks.push(idx);
+    }
+    let vmsize = addr;
+
+    // The output symbol table: locals per object, then defined
+    // externals, then undefineds, with an index map for relocations.
+    let mut strtab: Vec<u8> = vec![b' ', 0];
+    let add_string = |strtab: &mut Vec<u8>, s: &str| -> u32 {
+        let off = strtab.len() as u32;
+        strtab.extend_from_slice(s.as_bytes());
+        strtab.push(0);
+        off
+    };
+
+    // Section ordinals are 1-based positions among the emitted
+    // sections only.
+    let mut ordinals = vec![0u8; ctx.chunks.len()];
+    for (i, &idx) in section_chunks.iter().enumerate() {
+        ordinals[idx] = i as u8 + 1;
+    }
+    let mut nlists_out: Vec<NList> = Vec::new();
+    let mut index_of_sym: HashMap<usize, u32> = HashMap::new();
+
+    let sym_addr = |ctx: &Context<E>, id: usize| -> u64 {
+        let sym = &ctx.symtab[id];
+        match sym.isec {
+            Some(isec) => {
+                let isec = &ctx.isecs[ctx.resolve_isec(isec)];
+                ctx.chunks[isec.osec].hdr.addr + isec.output_offset + sym.value
+            }
+            None => sym.value,
+        }
+    };
+
+    // Local symbols.
+    for obj in &ctx.objs {
+        if !obj.is_alive {
+            continue;
+        }
+        for (nlist, &sym_id) in obj.nlists.iter().zip(&obj.syms) {
+            if nlist.is_stab() || nlist.is_extern() {
+                continue;
+            }
+            let sym = &ctx.symtab[sym_id];
+            let Some(isec) = sym.isec else { continue };
+            let isec = ctx.resolve_isec(isec);
+            if !ctx.isecs[isec].is_alive || sym.name.is_empty() {
+                continue;
+            }
+            index_of_sym.insert(sym_id, nlists_out.len() as u32);
+            nlists_out.push(NList {
+                n_strx: add_string(&mut strtab, sym.name),
+                n_type: nlist.n_type,
+                n_sect: ordinals[ctx.isecs[isec].osec],
+                n_desc: nlist.n_desc,
+                n_value: sym_addr(ctx, sym_id),
+            });
+        }
+    }
+    let nlocal = nlists_out.len() as u32;
+
+    // Defined externals, sorted by name.
+    let mut globals: Vec<usize> = (0..ctx.symtab.syms.len())
+        .filter(|&i| {
+            let sym = &ctx.symtab[i];
+            sym.is_extern
+                && matches!(sym.origin, Origin::Obj(_))
+                && sym
+                    .isec
+                    .is_none_or(|isec| ctx.isecs[ctx.resolve_isec(isec)].is_alive)
+        })
+        .collect();
+    globals.sort_by_key(|&i| ctx.symtab[i].name);
+    for &i in &globals {
+        let sym = &ctx.symtab[i];
+        let (n_type, n_sect) = match sym.isec {
+            Some(isec) => (
+                N_SECT | N_EXT | if sym.is_private_extern { N_PEXT } else { 0 },
+                ordinals[ctx.isecs[ctx.resolve_isec(isec)].osec],
+            ),
+            None => (N_ABS | N_EXT, 0),
+        };
+        let mut n_desc = 0;
+        if sym.is_weak_def {
+            n_desc |= N_WEAK_DEF;
+        }
+        index_of_sym.insert(i, nlists_out.len() as u32);
+        nlists_out.push(NList {
+            n_strx: add_string(&mut strtab, sym.name),
+            n_type,
+            n_sect,
+            n_desc,
+            n_value: sym_addr(ctx, i),
+        });
+    }
+    let nextdef = nlists_out.len() as u32 - nlocal;
+
+    // Undefined and tentative symbols, sorted by name.
+    let mut undefs: Vec<usize> = (0..ctx.symtab.syms.len())
+        .filter(|&i| {
+            let sym = &ctx.symtab[i];
+            sym.is_used && (!sym.is_defined() || sym.is_common)
+        })
+        .collect();
+    undefs.sort_by_key(|&i| ctx.symtab[i].name);
+    for &i in &undefs {
+        let sym = &ctx.symtab[i];
+        let mut n_desc = 0;
+        let mut n_value = 0;
+        if sym.is_common {
+            n_value = sym.value;
+            n_desc |= (sym.common_p2align as u16) << 8;
+        }
+        index_of_sym.insert(i, nlists_out.len() as u32);
+        nlists_out.push(NList {
+            n_strx: add_string(&mut strtab, sym.name),
+            n_type: N_UNDF | N_EXT,
+            n_sect: 0,
+            n_desc,
+            n_value,
+        });
+    }
+    let nundef = nlists_out.len() as u32 - nlocal - nextdef;
+    while strtab.len() % 8 != 0 {
+        strtab.push(0);
+    }
+
+    // Regenerate each section's relocations against the merged tables.
+    let mut sect_relocs: Vec<Vec<MachRel>> = Vec::new();
+    for &chunk_idx in &section_chunks {
+        let ChunkKind::Output { isecs, .. } = &ctx.chunks[chunk_idx].kind else {
+            unreachable!()
+        };
+        let mut rels: Vec<MachRel> = Vec::new();
+        for &id in isecs {
+            let isec = &ctx.isecs[id];
+            for rel in &isec.relocs {
+                let r_address = (isec.output_offset + rel.offset as u64) as u32;
+                let length = rel.size.trailing_zeros();
+
+                match rel.target {
+                    RelocTarget::Sym(idx) => {
+                        let sym_id = ctx.objs[isec.obj].syms[idx];
+                        let Some(&symnum) = index_of_sym.get(&sym_id) else {
+                            fatal!(
+                                ctx,
+                                "-r: cannot re-emit relocation against {}",
+                                ctx.symtab[sym_id].name
+                            );
+                        };
+                        // An explicit addend record precedes relocations
+                        // whose instruction can't hold one.
+                        if rel.addend != 0 && E::relocatable_needs_addend(rel.r_type) {
+                            rels.push(MachRel {
+                                r_address,
+                                bits: (rel.addend as u32 & 0xff_ffff)
+                                    | (2 << 25)
+                                    | ((E::RELOC_ADDEND as u32) << 28),
+                            });
+                        }
+                        rels.push(MachRel {
+                            r_address,
+                            bits: symnum
+                                | ((rel.is_pcrel as u32) << 24)
+                                | (length << 25)
+                                | (1 << 27)
+                                | ((rel.r_type as u32) << 28),
+                        });
+                    }
+                    RelocTarget::Section(target) => {
+                        let target = ctx.resolve_isec(target);
+                        let t = &ctx.isecs[target];
+                        let ord = ordinals[t.osec] as u32;
+                        rels.push(MachRel {
+                            r_address,
+                            bits: ord
+                                | ((rel.is_pcrel as u32) << 24)
+                                | (length << 25)
+                                | ((rel.r_type as u32) << 28),
+                        });
+                    }
+                }
+            }
+        }
+        sect_relocs.push(rels);
+    }
+
+    // File layout: header, one segment command with all sections,
+    // symtab commands; then section contents, relocations, symbols and
+    // strings.
+    let ncmds = 4;
+    let seg_cmd_size = size_of::<SegmentCommand>() + section_chunks.len() * size_of::<MachSection>();
+    let sizeofcmds = seg_cmd_size
+        + size_of::<BuildVersionCommand>()
+        + size_of::<SymtabCommand>()
+        + size_of::<DysymtabCommand>();
+    let mut off = (size_of::<MachHeader>() + sizeofcmds) as u64;
+
+    let seg_fileoff = off;
+    let mut sect_offsets = Vec::new();
+    for &chunk_idx in &section_chunks {
+        let chunk = &mut ctx.chunks[chunk_idx];
+        if chunk.is_zerofill() {
+            sect_offsets.push(0u64);
+            continue;
+        }
+        off = align_to(off, 1 << chunk.hdr.p2align);
+        chunk.hdr.fileoff = off;
+        sect_offsets.push(off);
+        off += chunk.hdr.size;
+    }
+    let content_end = off;
+    off = align_to(off, 8);
+    let mut reloff = Vec::new();
+    for rels in &sect_relocs {
+        reloff.push(off);
+        off += (rels.len() * size_of::<MachRel>()) as u64;
+    }
+    let symoff = off;
+    off += (nlists_out.len() * size_of::<NList>()) as u64;
+    let stroff = off;
+    off += strtab.len() as u64;
+
+    let mut buf = vec![0u8; off as usize];
+
+    // Mach header
+    let hdr = MachHeader {
+        magic: MH_MAGIC_64,
+        cputype: E::CPUTYPE,
+        cpusubtype: E::CPUSUBTYPE,
+        filetype: MH_OBJECT,
+        ncmds,
+        sizeofcmds: sizeofcmds as u32,
+        flags: MH_SUBSECTIONS_VIA_SYMBOLS,
+        reserved: 0,
+    };
+    hdr.write_to(&mut buf);
+    let mut p = size_of::<MachHeader>();
+
+    // The single nameless segment
+    let seg = SegmentCommand {
+        cmd: LC_SEGMENT_64,
+        cmdsize: seg_cmd_size as u32,
+        segname: [0; 16],
+        vmaddr: 0,
+        vmsize,
+        fileoff: seg_fileoff,
+        filesize: content_end - seg_fileoff,
+        maxprot: VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE,
+        initprot: VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE,
+        nsects: section_chunks.len() as u32,
+        flags: 0,
+    };
+    seg.write_to(&mut buf[p..]);
+    p += size_of::<SegmentCommand>();
+
+    for (i, &chunk_idx) in section_chunks.iter().enumerate() {
+        let chunk = &ctx.chunks[chunk_idx];
+        let sect = MachSection {
+            sectname: str_to_name(&chunk.hdr.sectname),
+            segname: str_to_name(chunk.hdr.segname),
+            addr: chunk.hdr.addr,
+            size: chunk.hdr.size,
+            offset: sect_offsets[i] as u32,
+            p2align: chunk.hdr.p2align,
+            reloff: if sect_relocs[i].is_empty() {
+                0
+            } else {
+                reloff[i] as u32
+            },
+            nreloc: sect_relocs[i].len() as u32,
+            flags: chunk.hdr.flags,
+            reserved1: 0,
+            reserved2: 0,
+            reserved3: 0,
+        };
+        sect.write_to(&mut buf[p..]);
+        p += size_of::<MachSection>();
+    }
+
+    let bv = BuildVersionCommand {
+        cmd: LC_BUILD_VERSION,
+        cmdsize: size_of::<BuildVersionCommand>() as u32,
+        platform: ctx.args.platform,
+        minos: ctx.args.platform_minos,
+        sdk: ctx.args.platform_sdk,
+        ntools: 0,
+    };
+    bv.write_to(&mut buf[p..]);
+    p += size_of::<BuildVersionCommand>();
+
+    let st = SymtabCommand {
+        cmd: LC_SYMTAB,
+        cmdsize: size_of::<SymtabCommand>() as u32,
+        symoff: symoff as u32,
+        nsyms: nlists_out.len() as u32,
+        stroff: stroff as u32,
+        strsize: strtab.len() as u32,
+    };
+    st.write_to(&mut buf[p..]);
+    p += size_of::<SymtabCommand>();
+
+    let dst_cmd = DysymtabCommand {
+        cmd: LC_DYSYMTAB,
+        cmdsize: size_of::<DysymtabCommand>() as u32,
+        ilocalsym: 0,
+        nlocalsym: nlocal,
+        iextdefsym: nlocal,
+        nextdefsym: nextdef,
+        iundefsym: nlocal + nextdef,
+        nundefsym: nundef,
+        ..Default::default()
+    };
+    dst_cmd.write_to(&mut buf[p..]);
+
+    // Section contents: raw copies, with non-external targets' embedded
+    // addresses rewritten into the merged address space.
+    for (i, &chunk_idx) in section_chunks.iter().enumerate() {
+        let ChunkKind::Output { isecs, .. } = &ctx.chunks[chunk_idx].kind else {
+            unreachable!()
+        };
+        if sect_offsets[i] == 0 {
+            continue;
+        }
+        let base = sect_offsets[i] as usize;
+        for &id in isecs {
+            let isec = &ctx.isecs[id];
+            if isec.data.is_empty() {
+                continue;
+            }
+            let dst = base + isec.output_offset as usize;
+            buf[dst..dst + isec.data.len()].copy_from_slice(isec.data);
+
+            for rel in &isec.relocs {
+                let RelocTarget::Section(target) = rel.target else {
+                    continue;
+                };
+                let target = ctx.resolve_isec(target);
+                let t = &ctx.isecs[target];
+                let target_addr =
+                    ctx.chunks[t.osec].hdr.addr + t.output_offset + rel.addend as u64;
+                let loc = dst + rel.offset as usize;
+                if rel.r_type == E::RELOC_UNSIGNED && !rel.is_pcrel {
+                    match rel.size {
+                        8 => buf[loc..loc + 8].copy_from_slice(&target_addr.to_le_bytes()),
+                        4 => buf[loc..loc + 4]
+                            .copy_from_slice(&(target_addr as u32).to_le_bytes()),
+                        _ => {}
+                    }
+                } else if rel.is_pcrel {
+                    // Pcrel non-external fields embed target - (P + 4).
+                    let here = ctx.chunks[chunk_idx].hdr.addr
+                        + isec.output_offset
+                        + rel.offset as u64;
+                    let val = target_addr.wrapping_sub(here + 4) as u32;
+                    if rel.size == 4 {
+                        buf[loc..loc + 4].copy_from_slice(&val.to_le_bytes());
+                    }
+                } else {
+                    error!(ctx, "-r: unsupported non-external relocation");
+                }
+            }
+        }
+    }
+
+    // Relocations, symbols, strings
+    for (i, rels) in sect_relocs.iter().enumerate() {
+        let mut p = reloff[i] as usize;
+        for rel in rels {
+            rel.write_to(&mut buf[p..]);
+            p += size_of::<MachRel>();
+        }
+    }
+    let mut p = symoff as usize;
+    for nlist in &nlists_out {
+        nlist.write_to(&mut buf[p..]);
+        p += size_of::<NList>();
+    }
+    buf[stroff as usize..stroff as usize + strtab.len()].copy_from_slice(&strtab);
+
+    output_file::write(&ctx.diag, &ctx.args.output, &buf);
+}

@@ -535,7 +535,14 @@ fn do_resolve<E: Arch>(ctx: &mut Context<E>, only_alive: bool) {
     }
 
     // Dylib exports claim unresolved (or lazily-claimed) symbols; an
-    // earlier dylib beats a later archive member and vice versa.
+    // earlier dylib beats a later archive member and vice versa. A
+    // relocatable link keeps every reference undefined instead.
+    if ctx.args.relocatable {
+        for (i, &u) in used.iter().enumerate() {
+            ctx.symtab.syms[i].is_used = u;
+        }
+        return;
+    }
     for i in 0..ctx.symtab.syms.len() {
         let sym = &ctx.symtab[i];
         if !used[i] || sym.is_common {

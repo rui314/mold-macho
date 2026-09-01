@@ -16,6 +16,7 @@ pub mod mapped_file;
 pub mod output_chunks;
 pub mod output_file;
 pub mod passes;
+pub mod relocatable;
 pub mod symbol;
 pub mod tapi;
 pub mod util;

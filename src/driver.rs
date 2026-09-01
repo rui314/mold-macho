@@ -102,6 +102,13 @@ pub fn link<E: Arch>(cmdline: &[String], diag: &Diagnostics) -> Result<i32, Stri
         }
     }
     passes::sweep_dead_files(&mut ctx);
+    if ctx.args.relocatable {
+        passes::merge_literals(&mut ctx);
+        passes::create_output_chunks(&mut ctx);
+        crate::relocatable::link(&mut ctx);
+        ctx.diag.checkpoint();
+        return Ok(0);
+    }
     passes::convert_init_offsets(&mut ctx);
     passes::merge_literals(&mut ctx);
     passes::create_synthetic_symbols(&mut ctx);

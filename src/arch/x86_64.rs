@@ -46,6 +46,12 @@ impl Arch for X86_64 {
     const RELOC_UNSIGNED: u8 = X86_64_RELOC_UNSIGNED;
     const RELOC_SUBTRACTOR: u8 = X86_64_RELOC_SUBTRACTOR;
     const RELOC_GOTPC: u8 = X86_64_RELOC_GOT;
+    // x86-64 embeds every addend in the relocated field.
+    const RELOC_ADDEND: u8 = 0xff;
+
+    fn relocatable_needs_addend(_r_type: u8) -> bool {
+        false
+    }
 
     fn classify_reloc(r_type: u8) -> crate::arch::RelocClass {
         use crate::arch::RelocClass;

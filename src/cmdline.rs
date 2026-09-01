@@ -83,6 +83,8 @@ pub struct Args {
     /// -sectcreate: sections to synthesize from files:
     /// (segment, section, path).
     pub sectcreate: Vec<(String, String, String)>,
+    /// -r: produce a relocatable object instead of a final image.
+    pub relocatable: bool,
     /// -flat_namespace: bind imports by name across all loaded images
     /// instead of to specific dylibs.
     pub flat_namespace: bool,
@@ -159,6 +161,7 @@ impl Default for Args {
             lto_library: None,
             stack_size: 0,
             sectcreate: Vec::new(),
+            relocatable: false,
             flat_namespace: false,
             no_standard_dirs: false,
             strip_locals: false,
@@ -351,6 +354,7 @@ pub fn parse_args(diag: &Diagnostics, cmdline: &[String]) -> Args {
             }
             "-x" => args.strip_locals = true,
             "-Z" => args.no_standard_dirs = true,
+            "-r" => args.relocatable = true,
             "-flat_namespace" => args.flat_namespace = true,
             "-twolevel_namespace" => args.flat_namespace = false,
             "-undefined" => match next_arg(&mut i) {

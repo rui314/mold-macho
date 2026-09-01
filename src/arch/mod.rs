@@ -48,6 +48,12 @@ pub trait Arch: Copy + Default + Send + Sync + 'static {
     const RELOC_UNSIGNED: u8;
     const RELOC_SUBTRACTOR: u8;
     const RELOC_GOTPC: u8;
+    /// The explicit-addend relocation type, for targets that have one.
+    const RELOC_ADDEND: u8;
+
+    /// Whether re-emitting this relocation type in a relocatable output
+    /// needs an explicit addend record when its addend is nonzero.
+    fn relocatable_needs_addend(r_type: u8) -> bool;
 
     /// Classifies a relocation type by how it uses its target.
     fn classify_reloc(r_type: u8) -> RelocClass;

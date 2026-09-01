@@ -72,6 +72,13 @@ impl Arch for Arm64 {
     const RELOC_UNSIGNED: u8 = ARM64_RELOC_UNSIGNED;
     const RELOC_SUBTRACTOR: u8 = ARM64_RELOC_SUBTRACTOR;
     const RELOC_GOTPC: u8 = ARM64_RELOC_POINTER_TO_GOT;
+    const RELOC_ADDEND: u8 = ARM64_RELOC_ADDEND;
+
+    fn relocatable_needs_addend(r_type: u8) -> bool {
+        // Instruction-patching relocations can't embed an addend; data
+        // relocations keep it in the relocated bytes.
+        !matches!(r_type, ARM64_RELOC_UNSIGNED | ARM64_RELOC_SUBTRACTOR)
+    }
 
     fn classify_reloc(r_type: u8) -> crate::arch::RelocClass {
         use crate::arch::RelocClass;
