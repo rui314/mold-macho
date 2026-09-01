@@ -9,6 +9,41 @@ use crate::error::errno_string;
 use crate::fatal;
 use crate::symbol::Origin;
 
+/// Writes the -dependency_info file: Xcode's incremental build system
+/// reads it to learn which files the link actually consumed. The
+/// format is binary: an opcode byte then a NUL-terminated string -
+/// 0x00 version, 0x10 input file, 0x11 file that was looked up but
+/// missing, 0x40 output file.
+pub fn write_dependency_info<E: Arch>(ctx: &Context<E>) {
+    let Some(path) = &ctx.args.dependency_info else {
+        return;
+    };
+    let Ok(file) = std::fs::File::create(path) else {
+        fatal!(ctx, "cannot open {path}: {}", errno_string());
+    };
+    let mut out = std::io::BufWriter::new(file);
+    let mut emit = |op: u8, s: &str| {
+        let _ = out.write_all(&[op]);
+        let _ = out.write_all(s.as_bytes());
+        let _ = out.write_all(&[0]);
+    };
+
+    emit(0x00, concat!("mold-macho ", env!("CARGO_PKG_VERSION")));
+    let mut inputs: Vec<&str> = ctx
+        .objs
+        .iter()
+        .filter(|o| o.is_alive)
+        .map(|o| o.mf.parent.map(|p| p.name.as_str()).unwrap_or(o.mf.name.as_str()))
+        .collect();
+    inputs.extend(ctx.visited_files.iter().map(String::as_str));
+    inputs.sort_unstable();
+    inputs.dedup();
+    for name in inputs {
+        emit(0x10, name);
+    }
+    emit(0x40, &ctx.args.output);
+}
+
 pub fn print_map<E: Arch>(ctx: &Context<E>) {
     let Some(path) = &ctx.args.map else { return };
     let Ok(file) = std::fs::File::create(path) else {

@@ -64,6 +64,8 @@ pub struct Args {
     pub compatibility_version: u32,
     /// -map: write a map file describing the output layout.
     pub map: Option<String>,
+    /// -dependency_info: write Xcode's binary dependency listing.
+    pub dependency_info: Option<String>,
     /// Emit chained fixups instead of classic dyld info. None means
     /// "decide from the deployment target".
     pub fixup_chains: Option<bool>,
@@ -134,6 +136,7 @@ impl Default for Args {
             current_version: encode_version(1, 0, 0),
             compatibility_version: encode_version(1, 0, 0),
             map: None,
+            dependency_info: None,
             fixup_chains: None,
             lto_library: None,
             stack_size: 0,
@@ -410,8 +413,12 @@ pub fn parse_args(diag: &Diagnostics, cmdline: &[String]) -> Args {
 
             "-lto_library" => args.lto_library = Some(next_arg(&mut i).to_string()),
 
+            "-dependency_info" => {
+                args.dependency_info = Some(next_arg(&mut i).to_string())
+            }
+
             // Ignored options with an argument
-            "-mllvm" | "-dependency_info" | "-object_path_lto" => {
+            "-mllvm" | "-object_path_lto" => {
                 next_arg(&mut i);
             }
 

@@ -127,6 +127,7 @@ pub fn link<E: Arch>(cmdline: &[String], diag: &Diagnostics) -> Result<i32, Stri
     passes::resolve_entry(&mut ctx);
     ctx.diag.checkpoint();
     crate::mapfile::print_map(&ctx);
+    crate::mapfile::write_dependency_info(&ctx);
 
     // Write the output
     let mut buf = vec![0; ctx.output_size as usize];
