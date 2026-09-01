@@ -14,6 +14,9 @@ pub enum InputArg {
     File(String),
     /// `-lfoo`: a library to search for in the library paths.
     Lib(String),
+    /// `-framework Foo`: a framework to search for in the framework
+    /// paths.
+    Framework(String),
 }
 
 /// Parsed command line arguments.
@@ -30,6 +33,7 @@ pub struct Args {
     pub platform_sdk: u32,
     pub syslibroot: Vec<String>,
     pub library_paths: Vec<String>,
+    pub framework_paths: Vec<String>,
     pub inputs: Vec<InputArg>,
     pub adhoc_codesign: bool,
     pub dynamic: bool,
@@ -50,6 +54,7 @@ impl Default for Args {
             platform_sdk: encode_version(0, 0, 0),
             syslibroot: Vec::new(),
             library_paths: Vec::new(),
+            framework_paths: Vec::new(),
             inputs: Vec::new(),
             adhoc_codesign: cfg!(target_arch = "aarch64"),
             dynamic: true,
@@ -108,6 +113,10 @@ pub fn parse_args(diag: &Diagnostics, cmdline: &[String]) -> Args {
             "-syslibroot" => args.syslibroot.push(next_arg(&mut i).to_string()),
             "-L" => args.library_paths.push(next_arg(&mut i).to_string()),
             "-l" => args.inputs.push(InputArg::Lib(next_arg(&mut i).to_string())),
+            "-framework" => args
+                .inputs
+                .push(InputArg::Framework(next_arg(&mut i).to_string())),
+            "-F" => args.framework_paths.push(next_arg(&mut i).to_string()),
             "-dylib" => args.output_type = MH_DYLIB,
             "-install_name" | "-dylib_install_name" => {
                 args.install_name = Some(next_arg(&mut i).to_string())
@@ -136,6 +145,8 @@ pub fn parse_args(diag: &Diagnostics, cmdline: &[String]) -> Args {
                     args.inputs.push(InputArg::Lib(name.to_string()));
                 } else if let Some(path) = opt.strip_prefix("-L") {
                     args.library_paths.push(path.to_string());
+                } else if let Some(path) = opt.strip_prefix("-F") {
+                    args.framework_paths.push(path.to_string());
                 } else if opt.starts_with('-') {
                     fatal!(diag, "unknown command line option: {opt}");
                 } else {

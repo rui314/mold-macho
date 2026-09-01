@@ -50,6 +50,50 @@ fn library_search_dirs<E: Arch>(ctx: &Context<E>) -> Vec<PathBuf> {
     dirs
 }
 
+/// Returns the directories to search for `-framework`, in order,
+/// mirroring the library search rules.
+fn framework_search_dirs<E: Arch>(ctx: &Context<E>) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+
+    for dir in &ctx.args.framework_paths {
+        let mut found = false;
+        for root in &ctx.args.syslibroot {
+            let path = Path::new(root).join(dir.trim_start_matches('/'));
+            if path.is_dir() {
+                dirs.push(path);
+                found = true;
+            }
+        }
+        if !found {
+            dirs.push(PathBuf::from(dir));
+        }
+    }
+
+    if ctx.args.syslibroot.is_empty() {
+        dirs.push(PathBuf::from("/System/Library/Frameworks"));
+        dirs.push(PathBuf::from("/Library/Frameworks"));
+    } else {
+        for root in &ctx.args.syslibroot {
+            dirs.push(Path::new(root).join("System/Library/Frameworks"));
+            dirs.push(Path::new(root).join("Library/Frameworks"));
+        }
+    }
+    dirs
+}
+
+fn find_framework<E: Arch>(ctx: &Context<E>, name: &str) -> Option<PathBuf> {
+    for dir in framework_search_dirs(ctx) {
+        let fw = dir.join(format!("{name}.framework"));
+        for file in [format!("{name}.tbd"), name.to_string()] {
+            let path = fw.join(file);
+            if path.is_file() {
+                return Some(path);
+            }
+        }
+    }
+    None
+}
+
 fn find_library<E: Arch>(ctx: &Context<E>, name: &str) -> Option<PathBuf> {
     for dir in library_search_dirs(ctx) {
         for ext in ["tbd", "dylib", "a"] {
@@ -103,6 +147,13 @@ pub fn read_input_files<E: Arch>(ctx: &mut Context<E>) {
                     read_file(ctx, mf);
                 }
                 None => error!(ctx, "library not found: -l{name}"),
+            },
+            InputArg::Framework(name) => match find_framework(ctx, name) {
+                Some(path) => {
+                    let mf = MappedFile::must_open(&ctx.diag, &path);
+                    read_file(ctx, mf);
+                }
+                None => error!(ctx, "framework not found: {name}"),
             },
         }
     }
