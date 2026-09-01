@@ -56,7 +56,6 @@ pub struct Args {
     pub unexported_symbols: Vec<String>,
     pub current_version: u32,
     pub compatibility_version: u32,
-
     pub dynamic: bool,
     pub headerpad: u64,
     pub pagezero_size: u64,
@@ -190,6 +189,22 @@ pub fn parse_args(diag: &Diagnostics, cmdline: &[String]) -> Args {
             "-install_name" | "-dylib_install_name" => {
                 args.install_name = Some(next_arg(&mut i).to_string())
             }
+            "-adhoc_codesign" => args.adhoc_codesign = true,
+            "-no_adhoc_codesign" => args.adhoc_codesign = false,
+            "-dynamic" => args.dynamic = true,
+            "-headerpad" => {
+                let val = next_arg(&mut i);
+                match u64::from_str_radix(val.trim_start_matches("0x"), 16) {
+                    Ok(num) => args.headerpad = num,
+                    Err(_) => fatal!(diag, "malformed -headerpad: {val}"),
+                }
+            }
+
+            "-dead_strip" => args.dead_strip = true,
+            "-all_load" => args.all_load = true,
+            "-u" => args
+                .forced_undefined
+                .push(next_arg(&mut i).to_string()),
             "-exported_symbol" => args
                 .exported_symbols
                 .get_or_insert_with(Vec::new)
@@ -218,48 +233,12 @@ pub fn parse_args(diag: &Diagnostics, cmdline: &[String]) -> Args {
             "-compatibility_version" => {
                 args.compatibility_version = parse_version(diag, next_arg(&mut i))
             }
-            "-adhoc_codesign" => args.adhoc_codesign = true,
-            "-no_adhoc_codesign" => args.adhoc_codesign = false,
-            "-dynamic" => args.dynamic = true,
-            "-headerpad" => {
-                let val = next_arg(&mut i);
-                match u64::from_str_radix(val.trim_start_matches("0x"), 16) {
-                    Ok(num) => args.headerpad = num,
-                    Err(_) => fatal!(diag, "malformed -headerpad: {val}"),
-                }
-            }
-
-            "-dead_strip" => args.dead_strip = true,
-            "-all_load" => args.all_load = true,
-            "-u" => args
-                .forced_undefined
-                .push(next_arg(&mut i).to_string()),
-            "-adhoc_codesign" => args.adhoc_codesign = true,
-            "-no_adhoc_codesign" => args.adhoc_codesign = false,
-            "-dynamic" => args.dynamic = true,
-            "-headerpad" => {
-                let val = next_arg(&mut i);
-                match u64::from_str_radix(val.trim_start_matches("0x"), 16) {
-                    Ok(num) => args.headerpad = num,
-                    Err(_) => fatal!(diag, "malformed -headerpad: {val}"),
-                }
-            }
-
-            "-dead_strip" => args.dead_strip = true,
-            "-all_load" => args.all_load = true,
-            "-u" => args
-                .forced_undefined
-                .push(next_arg(&mut i).to_string()),
-            "-v" => {
-                let _ = std::io::Write::write_all(
-                    &mut std::io::stderr(),
-                    format!(
-                        "mold-macho {} (compatible with Apple ld64)\n",
-                        env!("CARGO_PKG_VERSION")
-                    )
-                    .as_bytes(),
-                );
-            }
+            // ld64 prints its version banner to stdout and continues
+            // with the link.
+            "-v" => println!(
+                "mold-macho {} (compatible with Apple ld64)",
+                env!("CARGO_PKG_VERSION")
+            ),
             "-noall_load" => args.all_load = false,
             "-ObjC" => args.load_objc = true,
             "-force_load" => args
