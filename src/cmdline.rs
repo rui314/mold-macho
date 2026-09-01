@@ -60,6 +60,9 @@ pub struct Args {
     pub compatibility_version: u32,
     /// -map: write a map file describing the output layout.
     pub map: Option<String>,
+    /// Emit chained fixups instead of classic dyld info. None means
+    /// "decide from the deployment target".
+    pub fixup_chains: Option<bool>,
     pub dynamic: bool,
     pub headerpad: u64,
     pub pagezero_size: u64,
@@ -92,6 +95,7 @@ impl Default for Args {
             current_version: encode_version(1, 0, 0),
             compatibility_version: encode_version(1, 0, 0),
             map: None,
+            fixup_chains: None,
             dynamic: true,
             headerpad: 0x100,
             pagezero_size: 0x1_0000_0000,
@@ -196,6 +200,8 @@ pub fn parse_args(diag: &Diagnostics, cmdline: &[String]) -> Args {
                 args.install_name = Some(next_arg(&mut i).to_string())
             }
             "-map" => args.map = Some(next_arg(&mut i).to_string()),
+            "-fixup_chains" => args.fixup_chains = Some(true),
+            "-no_fixup_chains" => args.fixup_chains = Some(false),
             "-adhoc_codesign" => args.adhoc_codesign = true,
             "-no_adhoc_codesign" => args.adhoc_codesign = false,
             "-dynamic" => args.dynamic = true,

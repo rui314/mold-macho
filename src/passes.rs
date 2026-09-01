@@ -744,6 +744,7 @@ pub fn create_output_chunks<E: Arch>(ctx: &mut Context<E>) {
         ctx.chunks.push(chunk);
     }
 
+    ctx.chunks.push(Chunk::new("__LINKEDIT", "", ChunkKind::ChainedFixups));
     ctx.chunks.push(Chunk::new("__LINKEDIT", "", ChunkKind::RebaseInfo));
     ctx.chunks.push(Chunk::new("__LINKEDIT", "", ChunkKind::BindInfo));
     ctx.chunks.push(Chunk::new("__LINKEDIT", "", ChunkKind::ExportTrie));
@@ -1082,8 +1083,12 @@ pub fn assign_offsets<E: Arch>(ctx: &mut Context<E>) {
         // Everything the bind stream describes (the GOT, data sections)
         // is laid out by the time we reach __LINKEDIT.
         if ctx.segments[seg_idx].name == "__LINKEDIT" {
-            ctx.rebase_data = build_rebase_info(ctx);
-            ctx.bind_data = build_bind_info(ctx);
+            if ctx.use_chained_fixups() {
+                build_chained_fixups(ctx);
+            } else {
+                ctx.rebase_data = build_rebase_info(ctx);
+                ctx.bind_data = build_bind_info(ctx);
+            }
             ctx.function_starts_data = build_function_starts(ctx);
         }
 
@@ -1111,6 +1116,7 @@ pub fn assign_offsets<E: Arch>(ctx: &mut Context<E>) {
                 ChunkKind::Symtab => symtab_size,
                 ChunkKind::Strtab => strtab_size,
                 ChunkKind::UnwindInfo => output_chunks::encode_unwind_info(ctx).len() as u64,
+                ChunkKind::ChainedFixups => ctx.chained_data.len() as u64,
                 ChunkKind::RebaseInfo => ctx.rebase_data.len() as u64,
                 ChunkKind::BindInfo => ctx.bind_data.len() as u64,
                 ChunkKind::ExportTrie => output_chunks::encode_export_trie(ctx).len() as u64,
@@ -1124,7 +1130,7 @@ pub fn assign_offsets<E: Arch>(ctx: &mut Context<E>) {
             let chunk = &mut ctx.chunks[idx];
             let p2align = match chunk.kind {
                 ChunkKind::Symtab | ChunkKind::Strtab | ChunkKind::RebaseInfo
-                | ChunkKind::BindInfo | ChunkKind::ExportTrie
+                | ChunkKind::BindInfo | ChunkKind::ChainedFixups | ChunkKind::ExportTrie
                 | ChunkKind::FunctionStarts => 3,
                 ChunkKind::IndirectSymtab => 2,
                 ChunkKind::CodeSignature => 4,
@@ -1368,6 +1374,290 @@ fn build_bind_info<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
     buf
 }
 
+/// The largest addend a chained bind can carry inline; anything bigger
+/// goes into the import table.
+const MAX_INLINE_ADDEND: u64 = 255;
+
+/// Collects every dynamic fixup location: rebases (the linker wrote an
+/// absolute address that dyld must slide) and binds (dyld writes an
+/// imported symbol's address), with the bind addends.
+fn collect_fixups<E: Arch>(ctx: &Context<E>) -> Vec<(u64, Option<crate::symbol::SymbolId>, u64)> {
+    let mut fixups: Vec<(u64, Option<crate::symbol::SymbolId>, u64)> = Vec::new();
+
+    for isec in &ctx.isecs {
+        if !isec.is_alive || isec.replacement.is_some() {
+            continue;
+        }
+        let base = ctx.chunks[isec.osec].hdr.addr + isec.output_offset;
+        for rel in &isec.relocs {
+            if E::classify_reloc(rel.r_type) != RelocClass::Plain
+                || rel.size != 8
+                || rel.is_pcrel
+                || rel.is_subtracted
+            {
+                continue;
+            }
+            let addr = base + rel.offset as u64;
+            match ctx.reloc_target_sym(isec.obj, rel) {
+                Some(id) if ctx.symtab[id].is_imported => {
+                    fixups.push((addr, Some(id), rel.addend as u64));
+                }
+                _ => {
+                    if !ctx.reloc_target_is_tls(isec.obj, rel) {
+                        fixups.push((addr, None, 0));
+                    }
+                }
+            }
+        }
+    }
+
+    if let Some(idx) = output_chunks::find_chunk(ctx, |k| matches!(k, ChunkKind::Got)) {
+        let addr = ctx.chunks[idx].hdr.addr;
+        for (i, &id) in ctx.got_syms.iter().enumerate() {
+            let sym = Some(id).filter(|&id| ctx.symtab[id].is_imported);
+            fixups.push((addr + i as u64 * 8, sym, 0));
+        }
+    }
+    if let Some(idx) = output_chunks::find_chunk(ctx, |k| matches!(k, ChunkKind::ThreadPtrs)) {
+        let addr = ctx.chunks[idx].hdr.addr;
+        for (i, &id) in ctx.thread_ptr_syms.iter().enumerate() {
+            let sym = Some(id).filter(|&id| ctx.symtab[id].is_imported);
+            fixups.push((addr + i as u64 * 8, sym, 0));
+        }
+    }
+    if let Some(idx) = output_chunks::find_chunk(ctx, |k| matches!(k, ChunkKind::ObjcSelrefs)) {
+        let addr = ctx.chunks[idx].hdr.addr;
+        for i in 0..ctx.objc_stubs.len() {
+            fixups.push((addr + i as u64 * 8, None, 0));
+        }
+    }
+
+    fixups.sort_unstable_by_key(|&(addr, _, _)| addr);
+    fixups
+}
+
+/// Builds the LC_DYLD_CHAINED_FIXUPS payload. Instead of opcode
+/// streams, chained fixups store, per page of each segment, the offset
+/// of the first fixup; each 64-bit fixup word in the data itself then
+/// encodes its target (a rebase value or an import ordinal) plus the
+/// distance to the next fixup in the page, forming a chain dyld walks.
+fn build_chained_fixups<E: Arch>(ctx: &mut Context<E>) {
+    let fixups = collect_fixups(ctx);
+    if fixups.is_empty() {
+        ctx.chained_data.clear();
+        ctx.fixups.clear();
+        return;
+    }
+
+    // The import table: one entry per (symbol, table addend). Addends
+    // up to 255 are carried inline in the fixup word and use the
+    // symbol's base entry.
+    let mut dynsyms: Vec<(crate::symbol::SymbolId, u64)> = fixups
+        .iter()
+        .filter_map(|&(_, sym, addend)| {
+            sym.map(|s| (s, if addend <= MAX_INLINE_ADDEND { 0 } else { addend }))
+        })
+        .collect();
+    dynsyms.sort_unstable();
+    dynsyms.dedup();
+    let mut ordinals = std::collections::HashMap::new();
+    for (i, &(sym, _)) in dynsyms.iter().enumerate().rev() {
+        ordinals.insert(sym, i);
+    }
+
+    let max_addend = dynsyms.iter().map(|&(_, a)| a).max().unwrap_or(0);
+    let import_format = if max_addend == 0 {
+        DYLD_CHAINED_IMPORT
+    } else if max_addend <= u32::MAX as u64 {
+        DYLD_CHAINED_IMPORT_ADDEND
+    } else {
+        DYLD_CHAINED_IMPORT_ADDEND64
+    };
+
+    let push32 = |buf: &mut Vec<u8>, v: u32| buf.extend_from_slice(&v.to_le_bytes());
+    let push16 = |buf: &mut Vec<u8>, v: u16| buf.extend_from_slice(&v.to_le_bytes());
+    let push64 = |buf: &mut Vec<u8>, v: u64| buf.extend_from_slice(&v.to_le_bytes());
+    let pad8 = |buf: &mut Vec<u8>| {
+        while buf.len() % 8 != 0 {
+            buf.push(0);
+        }
+    };
+
+    let mut buf = Vec::new();
+    // dyld_chained_fixups_header; the offsets are backpatched.
+    push32(&mut buf, 0); // fixups_version
+    push32(&mut buf, 0); // starts_offset
+    push32(&mut buf, 0); // imports_offset
+    push32(&mut buf, 0); // symbols_offset
+    push32(&mut buf, dynsyms.len() as u32);
+    push32(&mut buf, import_format);
+    push32(&mut buf, 0); // symbols_format: uncompressed
+    pad8(&mut buf);
+
+    // dyld_chained_starts_in_image
+    let starts_offset = buf.len();
+    buf[4..8].copy_from_slice(&(starts_offset as u32).to_le_bytes());
+    let seg_count = ctx.segments.len();
+    push32(&mut buf, seg_count as u32);
+    let seg_info_table = buf.len();
+    for _ in 0..seg_count {
+        push32(&mut buf, 0);
+    }
+    pad8(&mut buf);
+
+    // Per-segment page tables
+    let image_base = ctx.args.pagezero_size;
+    for (seg_idx, seg) in ctx.segments.iter().enumerate() {
+        let lo = fixups.partition_point(|&(a, _, _)| a < seg.cmd.vmaddr);
+        let hi = fixups.partition_point(|&(a, _, _)| a < seg.cmd.vmaddr + seg.cmd.vmsize);
+        if lo == hi {
+            continue;
+        }
+        let fx = &fixups[lo..hi];
+
+        let off = buf.len() - starts_offset;
+        let ent = seg_info_table + seg_idx * 4;
+        buf[ent..ent + 4].copy_from_slice(&(off as u32).to_le_bytes());
+
+        let page_size = E::PAGE_SIZE;
+        let npages = ((fx.last().unwrap().0 + 1 - seg.cmd.vmaddr).div_ceil(page_size)) as usize;
+        // The record is 22 bytes of fields plus one u16 per page,
+        // padded to 8; the declared size must match the bytes present.
+        let size = crate::util::align_to(22 + npages as u64 * 2, 8) as u32;
+        let rec_start = buf.len();
+
+        push32(&mut buf, size);
+        push16(&mut buf, page_size as u16);
+        push16(&mut buf, DYLD_CHAINED_PTR_64);
+        push64(&mut buf, seg.cmd.vmaddr - image_base);
+        push32(&mut buf, 0); // max_valid_pointer
+        push16(&mut buf, npages as u16);
+        let mut j = 0;
+        for i in 0..npages {
+            let page_addr = seg.cmd.vmaddr + i as u64 * page_size;
+            while j < fx.len() && fx[j].0 < page_addr {
+                j += 1;
+            }
+            if j < fx.len() && fx[j].0 < page_addr + page_size {
+                push16(&mut buf, (fx[j].0 & (page_size - 1)) as u16);
+            } else {
+                push16(&mut buf, DYLD_CHAINED_PTR_START_NONE);
+            }
+        }
+        buf.resize(rec_start + size as usize, 0);
+    }
+
+    // Import table
+    let imports_offset = buf.len();
+    buf[8..12].copy_from_slice(&(imports_offset as u32).to_le_bytes());
+    let mut name_offs = Vec::with_capacity(dynsyms.len());
+    let mut nameoff: u32 = 0;
+    for (i, &(sym, _)) in dynsyms.iter().enumerate() {
+        name_offs.push(nameoff);
+        if i + 1 == dynsyms.len() || dynsyms[i + 1].0 != sym {
+            nameoff += ctx.symtab[sym].name.len() as u32 + 1;
+        }
+    }
+    for (i, &(sym, addend)) in dynsyms.iter().enumerate() {
+        let s = &ctx.symtab[sym];
+        let Origin::Dylib(dylib) = s.origin else {
+            unreachable!()
+        };
+        let ordinal = ctx.dylibs[dylib].dylib_idx as u32 as u8;
+        let weak = s.is_weak_ref as u32;
+        match import_format {
+            DYLD_CHAINED_IMPORT => {
+                push32(&mut buf, ordinal as u32 | (weak << 8) | (name_offs[i] << 9));
+            }
+            DYLD_CHAINED_IMPORT_ADDEND => {
+                push32(&mut buf, ordinal as u32 | (weak << 8) | (name_offs[i] << 9));
+                push32(&mut buf, addend as u32);
+            }
+            _ => {
+                push64(
+                    &mut buf,
+                    ordinal as u64 | ((weak as u64) << 16) | ((name_offs[i] as u64) << 32),
+                );
+                push64(&mut buf, addend);
+            }
+        }
+    }
+
+    // Symbol names
+    let symbols_offset = buf.len();
+    buf[12..16].copy_from_slice(&(symbols_offset as u32).to_le_bytes());
+    for (i, &(sym, _)) in dynsyms.iter().enumerate() {
+        if i + 1 == dynsyms.len() || dynsyms[i + 1].0 != sym {
+            buf.extend_from_slice(ctx.symtab[sym].name.as_bytes());
+            buf.push(0);
+        }
+    }
+    pad8(&mut buf);
+
+    ctx.chained_data = buf;
+    ctx.fixups = fixups;
+    ctx.fixup_imports = dynsyms;
+    ctx.fixup_ordinals = ordinals;
+}
+
+/// Writes the fixup chains into the copied output: every fixup word is
+/// rewritten to encode its payload plus the 4-byte-stride distance to
+/// the next fixup in the same page.
+fn write_fixup_chains<E: Arch>(ctx: &Context<E>, buf: &mut [u8]) {
+    let page_mask = !(E::PAGE_SIZE - 1);
+
+    for seg in &ctx.segments {
+        let lo = ctx.fixups.partition_point(|&(a, _, _)| a < seg.cmd.vmaddr);
+        let hi = ctx
+            .fixups
+            .partition_point(|&(a, _, _)| a < seg.cmd.vmaddr + seg.cmd.vmsize);
+        let fx = &ctx.fixups[lo..hi];
+
+        for (i, &(addr, sym, addend)) in fx.iter().enumerate() {
+            let next = match fx.get(i + 1) {
+                Some(&(next_addr, _, _)) if next_addr & page_mask == addr & page_mask => {
+                    (next_addr - addr) / 4
+                }
+                _ => 0,
+            };
+            if addr % 4 != 0 {
+                fatal!(ctx, "unaligned fixup; re-link with -no_fixup_chains");
+            }
+
+            let off = (seg.cmd.fileoff + (addr - seg.cmd.vmaddr)) as usize;
+            let word = match sym {
+                Some(sym) => {
+                    // dyld_chained_ptr_64_bind
+                    let ordinal = if addend <= MAX_INLINE_ADDEND {
+                        ctx.fixup_ordinals[&sym] as u64
+                    } else {
+                        let base = ctx.fixup_ordinals[&sym];
+                        ctx.fixup_imports[base..]
+                            .iter()
+                            .position(|&(s, a)| s == sym && a == addend)
+                            .map(|p| (base + p) as u64)
+                            .unwrap()
+                    };
+                    let inline_addend = if addend <= MAX_INLINE_ADDEND { addend } else { 0 };
+                    ordinal | (inline_addend << 24) | (next << 51) | (1 << 63)
+                }
+                None => {
+                    // dyld_chained_ptr_64_rebase; the word currently
+                    // holds the absolute target address.
+                    let val = u64::from_le_bytes(buf[off..off + 8].try_into().unwrap());
+                    if val & 0x00ff_fff0_0000_0000 != 0 {
+                        fatal!(ctx, "rebase target unencodable; re-link with -no_fixup_chains");
+                    }
+                    let target = val & 0xf_ffff_ffff;
+                    let high8 = val >> 56;
+                    target | (high8 << 36) | (next << 51)
+                }
+            };
+            buf[off..off + 8].copy_from_slice(&word.to_le_bytes());
+        }
+    }
+}
+
 /// Builds the LC_FUNCTION_STARTS payload: the addresses of all
 /// functions in __TEXT,__text, ULEB128 delta-encoded starting from the
 /// image base. Debuggers and crash reporters use it to attribute
@@ -1474,6 +1764,9 @@ fn copy_chunk<E: Arch>(ctx: &Context<E>, chunk: &Chunk, buf: &mut [u8]) {
             buf[..data.len()].copy_from_slice(&data);
         }
         ChunkKind::EhFrame => output_chunks::copy_eh_frame(ctx, buf),
+        ChunkKind::ChainedFixups => {
+            buf[..ctx.chained_data.len()].copy_from_slice(&ctx.chained_data)
+        }
         ChunkKind::RebaseInfo => buf[..ctx.rebase_data.len()].copy_from_slice(&ctx.rebase_data),
         ChunkKind::BindInfo => buf[..ctx.bind_data.len()].copy_from_slice(&ctx.bind_data),
         ChunkKind::ExportTrie => {
@@ -1542,6 +1835,9 @@ pub fn copy_chunks<E: Arch>(ctx: &Context<E>, buf: &mut [u8]) {
         .into_par_iter()
         .for_each(|(idx, slice)| copy_chunk(ctx, &ctx.chunks[idx], slice));
 
+    if ctx.use_chained_fixups() {
+        write_fixup_chains(ctx, buf);
+    }
     output_chunks::copy_symtab(ctx, buf);
     output_chunks::copy_mach_header(ctx, buf);
 

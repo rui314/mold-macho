@@ -196,6 +196,13 @@ pub const UNWIND_X86_64_MODE_DWARF: u32 = 0x0400_0000;
 // Export trie symbol flags
 pub const EXPORT_SYMBOL_FLAGS_WEAK_DEFINITION: u32 = 0x04;
 
+// Chained fixups (LC_DYLD_CHAINED_FIXUPS)
+pub const DYLD_CHAINED_PTR_64: u16 = 2;
+pub const DYLD_CHAINED_PTR_START_NONE: u16 = 0xffff;
+pub const DYLD_CHAINED_IMPORT: u32 = 1;
+pub const DYLD_CHAINED_IMPORT_ADDEND: u32 = 2;
+pub const DYLD_CHAINED_IMPORT_ADDEND64: u32 = 3;
+
 // Magic values in the indirect symbol table
 pub const INDIRECT_SYMBOL_LOCAL: u32 = 0x8000_0000;
 pub const INDIRECT_SYMBOL_ABS: u32 = 0x4000_0000;

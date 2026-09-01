@@ -63,6 +63,9 @@ pub enum ChunkKind {
     RebaseInfo,
     /// The bind opcode stream for LC_DYLD_INFO, in __LINKEDIT.
     BindInfo,
+    /// The chained-fixups payload (LC_DYLD_CHAINED_FIXUPS) in
+    /// __LINKEDIT: the modern replacement for the rebase/bind streams.
+    ChainedFixups,
     /// The export trie in __LINKEDIT: dyld's index of exported symbols.
     ExportTrie,
     /// LC_FUNCTION_STARTS data in __LINKEDIT: delta-encoded function
@@ -434,6 +437,17 @@ fn create_code_signature_cmd<E: Arch>(ctx: &Context<E>, idx: usize) -> Vec<u8> {
     to_vec(&cmd)
 }
 
+fn create_linkedit_data_cmd<E: Arch>(ctx: &Context<E>, cmd: u32, kind_idx: usize) -> Vec<u8> {
+    let chunk = &ctx.chunks[kind_idx];
+    let cmd = LinkEditDataCommand {
+        cmd,
+        cmdsize: size_of::<LinkEditDataCommand>() as u32,
+        dataoff: chunk.hdr.fileoff as u32,
+        datasize: chunk.hdr.size as u32,
+    };
+    to_vec(&cmd)
+}
+
 pub fn create_load_commands<E: Arch>(ctx: &Context<E>) -> Vec<Vec<u8>> {
     let mut vec = Vec::new();
 
@@ -441,7 +455,20 @@ pub fn create_load_commands<E: Arch>(ctx: &Context<E>) -> Vec<Vec<u8>> {
         vec.push(create_segment_cmd(ctx, seg));
     }
 
-    vec.push(create_dyld_info_cmd(ctx));
+    // Chained fixups replace the classic dyld info; the export trie
+    // then gets a load command of its own.
+    let chained = find_chunk(ctx, |k| matches!(k, ChunkKind::ChainedFixups))
+        .filter(|&idx| ctx.chunks[idx].hdr.size > 0);
+    if let Some(idx) = chained {
+        vec.push(create_linkedit_data_cmd(ctx, LC_DYLD_CHAINED_FIXUPS, idx));
+        if let Some(trie) = find_chunk(ctx, |k| matches!(k, ChunkKind::ExportTrie)) {
+            if ctx.chunks[trie].hdr.size > 0 {
+                vec.push(create_linkedit_data_cmd(ctx, LC_DYLD_EXPORTS_TRIE, trie));
+            }
+        }
+    } else {
+        vec.push(create_dyld_info_cmd(ctx));
+    }
     vec.push(create_symtab_cmd(ctx));
     vec.push(create_dysymtab_cmd(ctx));
     vec.push(create_uuid_cmd(ctx));

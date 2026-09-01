@@ -54,6 +54,16 @@ pub struct Context<E: Arch> {
     pub bind_data: Vec<u8>,
     /// The LC_FUNCTION_STARTS contents, built during layout.
     pub function_starts_data: Vec<u8>,
+    /// Every dynamic fixup location, sorted by address, when emitting
+    /// chained fixups: (address, bound symbol or None for a rebase,
+    /// addend).
+    pub fixups: Vec<(u64, Option<SymbolId>, u64)>,
+    /// The chained-fixups import table: (symbol, table addend), sorted;
+    /// and each symbol's first ordinal.
+    pub fixup_imports: Vec<(SymbolId, u64)>,
+    pub fixup_ordinals: std::collections::HashMap<SymbolId, usize>,
+    /// The encoded LC_DYLD_CHAINED_FIXUPS payload, built during layout.
+    pub chained_data: Vec<u8>,
     /// The address of the first thread-local data section. Thread
     /// pointers are encoded relative to it.
     pub tls_begin: u64,
@@ -103,6 +113,10 @@ impl<E: Arch> Context<E> {
             rebase_data: Vec::new(),
             bind_data: Vec::new(),
             function_starts_data: Vec::new(),
+            fixups: Vec::new(),
+            fixup_imports: Vec::new(),
+            fixup_ordinals: std::collections::HashMap::new(),
+            chained_data: Vec::new(),
             tls_begin: 0,
             literals: std::collections::HashMap::new(),
             objc_image_info_flags: 0,
@@ -111,6 +125,15 @@ impl<E: Arch> Context<E> {
             output_size: 0,
             _marker: PhantomData,
         }
+    }
+
+    /// Returns true if the output uses chained fixups rather than
+    /// classic dyld rebase/bind opcodes.
+    pub fn use_chained_fixups(&self) -> bool {
+        self.args.fixup_chains.unwrap_or_else(|| {
+            self.args.platform == crate::macho::PLATFORM_MACOS
+                && self.args.platform_minos >= crate::macho::encode_version(13, 0, 0)
+        })
     }
 
     /// Follows literal-merge redirects to the surviving subsection.
