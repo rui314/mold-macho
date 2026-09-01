@@ -74,6 +74,9 @@ pub struct Args {
     pub strip_locals: bool,
     /// -w: suppress warnings.
     pub suppress_warnings: bool,
+    /// -undefined dynamic_lookup: leave unresolved symbols to be looked
+    /// up in any loaded image at run time.
+    pub undefined_dynamic_lookup: bool,
     pub dynamic: bool,
     pub headerpad: u64,
     pub pagezero_size: u64,
@@ -112,6 +115,7 @@ impl Default for Args {
             sectcreate: Vec::new(),
             strip_locals: false,
             suppress_warnings: false,
+            undefined_dynamic_lookup: false,
             dynamic: true,
             headerpad: 0x100,
             pagezero_size: 0x1_0000_0000,
@@ -279,6 +283,11 @@ pub fn parse_args(diag: &Diagnostics, cmdline: &[String]) -> Args {
                 args.sectcreate.push((seg, sect, file));
             }
             "-x" => args.strip_locals = true,
+            "-undefined" => match next_arg(&mut i) {
+                "error" => args.undefined_dynamic_lookup = false,
+                "dynamic_lookup" => args.undefined_dynamic_lookup = true,
+                treatment => fatal!(diag, "-undefined: unsupported treatment: {treatment}"),
+            },
             "-w" => args.suppress_warnings = true,
             "-help" => {
                 println!("Usage: ld64.mold [options] file...");

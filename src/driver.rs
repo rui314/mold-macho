@@ -104,7 +104,7 @@ pub fn link<E: Arch>(cmdline: &[String], diag: &Diagnostics) -> Result<i32, Stri
     passes::convert_common_symbols(&mut ctx);
     passes::create_objc_msgsend_stubs(&mut ctx);
     passes::resolve_dylib_symbols(&mut ctx);
-    passes::check_undefined_symbols(&ctx);
+    passes::check_undefined_symbols(&mut ctx);
     ctx.diag.checkpoint();
     if ctx.args.dead_strip {
         passes::dead_strip(&mut ctx);

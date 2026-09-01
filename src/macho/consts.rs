@@ -160,6 +160,8 @@ pub const CS_PAGE_SIZE: u64 = 4096;
 // Special dylib ordinals for two-level namespace binds
 pub const BIND_SPECIAL_DYLIB_MAIN_EXECUTABLE: i32 = 0;
 pub const BIND_SPECIAL_DYLIB_SELF: i32 = -1;
+pub const BIND_SPECIAL_DYLIB_FLAT_LOOKUP: i32 = -2;
+pub const BIND_OPCODE_SET_DYLIB_SPECIAL_IMM: u8 = 0x30;
 
 // Segment flags
 pub const SG_READ_ONLY: u32 = 0x10;
