@@ -2376,6 +2376,18 @@ fn collect_fixups<E: Arch>(ctx: &Context<E>) -> Vec<(u64, Option<crate::symbol::
                 continue;
             }
             let addr = base + rel.offset as u64;
+            // A chain link's stride is 4 bytes, so a fixup at an
+            // unaligned address is unrepresentable. ld64 diagnoses
+            // the offending input section rather than the output.
+            if addr % 4 != 0 {
+                fatal!(
+                    ctx,
+                    "{}({},{}): unaligned base relocation",
+                    file_display(&ctx.objs[isec.obj]),
+                    isec.hdr.segname(),
+                    isec.hdr.sectname()
+                );
+            }
             match ctx.reloc_target_sym(isec.obj, rel) {
                 Some(id) if ctx.symtab[id].is_imported => {
                     fixups.push((addr, Some(id), rel.addend as u64));
