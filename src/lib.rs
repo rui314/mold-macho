@@ -1,6 +1,7 @@
 //! A high-performance Mach-O linker.
 
 pub mod arch;
+pub mod archive_file;
 pub mod cmdline;
 pub mod context;
 pub mod dead_strip;
