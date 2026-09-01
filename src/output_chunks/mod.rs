@@ -602,6 +602,7 @@ pub fn encode_export_trie<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
     for id in 0..ctx.symtab.syms.len() {
         let sym = &ctx.symtab[id];
         if !sym.is_extern
+            || sym.is_private_extern
             || !matches!(
                 sym.origin,
                 crate::symbol::Origin::Obj(_) | crate::symbol::Origin::Synthetic

@@ -353,7 +353,10 @@ pub fn dead_strip<E: Arch>(ctx: &mut Context<E>) {
     // Symbol-level roots
     for sym in &ctx.symtab.syms {
         let is_root = sym.no_dead_strip
-            || (ctx.args.output_type != MH_EXECUTE && sym.is_extern && sym.is_defined());
+            || (ctx.args.output_type != MH_EXECUTE
+                && sym.is_extern
+                && !sym.is_private_extern
+                && sym.is_defined());
         if is_root {
             if let Some(isec) = sym.isec {
                 mark(&mut live, &mut stack, isec);
@@ -800,6 +803,29 @@ pub fn compute_symtab<E: Arch>(ctx: &mut Context<E>) {
             data.entries.push((ent, Some(sym_id)));
         }
     }
+    // Private external symbols resolve globally but appear as locals
+    // (with N_PEXT still set) in the output.
+    for i in 0..ctx.symtab.syms.len() {
+        let sym = &ctx.symtab[i];
+        if !sym.is_extern || !sym.is_private_extern {
+            continue;
+        }
+        let Origin::Obj(_) = sym.origin else { continue };
+        let Some(isec) = sym.isec else { continue };
+        let isec = ctx.resolve_isec(isec);
+        if !ctx.isecs[isec].is_alive {
+            continue;
+        }
+        let n_strx = add_string(&mut data.strtab, sym.name);
+        let ent = NList {
+            n_strx,
+            n_type: N_SECT | N_PEXT,
+            n_sect: ordinals[ctx.isecs[isec].osec],
+            n_desc: 0,
+            n_value: 0,
+        };
+        data.entries.push((ent, Some(i)));
+    }
     data.nlocal = data.entries.len() as u32;
 
     // Defined global symbols, sorted by name
@@ -807,6 +833,7 @@ pub fn compute_symtab<E: Arch>(ctx: &mut Context<E>) {
         .filter(|&i| {
             let sym = &ctx.symtab[i];
             sym.is_extern
+                && !sym.is_private_extern
                 && matches!(sym.origin, Origin::Obj(_) | Origin::Synthetic)
                 && sym
                     .isec

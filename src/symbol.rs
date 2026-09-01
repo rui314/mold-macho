@@ -36,6 +36,10 @@ pub struct Symbol {
     /// True if some relocation refers to this symbol, which makes an
     /// unresolved symbol an error.
     pub is_used: bool,
+    /// True for a private external symbol (visibility hidden): it
+    /// resolves globally at link time but is neither exported nor kept
+    /// as an external symbol in the output.
+    pub is_private_extern: bool,
     /// True if references to this symbol may go unresolved at load
     /// time (a weak import).
     pub is_weak_ref: bool,
@@ -68,6 +72,7 @@ impl Symbol {
             is_weak_def: false,
             is_imported: false,
             is_used: false,
+            is_private_extern: false,
             is_weak_ref: false,
             no_dead_strip: false,
             is_common: false,
