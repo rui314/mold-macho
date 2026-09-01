@@ -19,6 +19,29 @@ pub fn sign_extend(val: u64, n: u32) -> i64 {
 }
 
 /// Appends a ULEB128-encoded value.
+/// Matches a symbol-list pattern: literal text with `*` wildcards,
+/// the dialect ld64 uses in its various symbol list files.
+pub fn glob_match(pat: &str, name: &str) -> bool {
+    let mut parts = pat.split('*');
+    let first = parts.next().unwrap_or("");
+    if !name.starts_with(first) {
+        return false;
+    }
+    let mut pos = first.len();
+    let mut rest: Vec<&str> = parts.collect();
+    let last = rest.pop();
+    for part in rest {
+        match name[pos..].find(part) {
+            Some(i) => pos = pos + i + part.len(),
+            None => return false,
+        }
+    }
+    match last {
+        Some(l) => name.len() >= pos + l.len() && name.ends_with(l),
+        None => pos == name.len(),
+    }
+}
+
 pub fn write_sleb(buf: &mut Vec<u8>, mut val: i64) {
     loop {
         let byte = (val & 0x7f) as u8;

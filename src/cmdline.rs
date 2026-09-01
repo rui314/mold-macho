@@ -177,6 +177,12 @@ pub struct Args {
     pub client_name: Option<String>,
     /// -t: print each file that takes part in the link.
     pub trace: bool,
+    /// -non_global_symbols_strip_list: local symbols to drop from the
+    /// output symbol table (glob patterns).
+    pub local_strip_list: Vec<String>,
+    /// -non_global_symbols_keep_list: if set, only matching local
+    /// symbols stay.
+    pub local_keep_list: Option<Vec<String>>,
     pub pagezero_size: u64,
     /// True when -pagezero_size was given explicitly (it is an error
     /// anywhere but a main executable).
@@ -251,6 +257,8 @@ impl Default for Args {
             allowable_clients: Vec::new(),
             client_name: None,
             trace: false,
+            local_strip_list: Vec::new(),
+            local_keep_list: None,
             pagezero_size: 0x1_0000_0000,
             explicit_pagezero: false,
         }
@@ -282,6 +290,14 @@ fn parse_platform(diag: &Diagnostics, arg: &str) -> u32 {
 
 /// Parses a symbol list file: one symbol per line, '#' starts a
 /// comment.
+/// Reads a symbol-list file for an option, fatal on I/O error.
+fn read_symbol_list(diag: &Diagnostics, path: &str) -> Vec<String> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => symbol_list(&text),
+        Err(_) => fatal!(diag, "cannot read symbol list: {path}"),
+    }
+}
+
 fn symbol_list(text: &str) -> Vec<String> {
     text.lines()
         .map(|line| line.split('#').next().unwrap_or("").trim())
@@ -525,6 +541,16 @@ pub fn parse_args(diag: &Diagnostics, cmdline: &[String]) -> Args {
             }
             "-client_name" => args.client_name = Some(next_arg(&mut i).to_string()),
             "-t" => args.trace = true,
+            "-non_global_symbols_strip_list" => {
+                let path = next_arg(&mut i);
+                args.local_strip_list.extend(read_symbol_list(diag, path));
+            }
+            "-non_global_symbols_keep_list" => {
+                let path = next_arg(&mut i);
+                args.local_keep_list
+                    .get_or_insert_with(Vec::new)
+                    .extend(read_symbol_list(diag, path));
+            }
             "-sectalign" => {
                 let seg = next_arg(&mut i).to_string();
                 let sect = next_arg(&mut i).to_string();

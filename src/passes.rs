@@ -1110,26 +1110,7 @@ fn print_why_live<E: Arch>(ctx: &Context<E>, pred: &[usize], live: &[bool]) {
         return;
     }
 
-    let matches = |pat: &str, name: &str| -> bool {
-        let mut parts = pat.split('*');
-        let first = parts.next().unwrap_or("");
-        if !name.starts_with(first) {
-            return false;
-        }
-        let mut pos = first.len();
-        let mut rest: Vec<&str> = parts.collect();
-        let last = rest.pop();
-        for part in rest {
-            match name[pos..].find(part) {
-                Some(i) => pos = pos + i + part.len(),
-                None => return false,
-            }
-        }
-        match last {
-            Some(l) => name.len() >= pos + l.len() && name.ends_with(l),
-            None => pos == name.len(),
-        }
-    };
+    let matches = crate::util::glob_match;
 
     // A displayable symbol for each live subsection: prefer an extern
     // symbol defined at it, else any named local.
@@ -2321,6 +2302,21 @@ pub fn compute_symtab<E: Arch>(ctx: &mut Context<E>) {
         for (nlist, &sym_id) in obj.nlists.iter().zip(&obj.syms) {
             let sym = &ctx.symtab[sym_id];
             if nlist.is_stab() || nlist.is_extern() || !keep_local_symbol(sym.name) {
+                continue;
+            }
+            // -non_global_symbols_keep_list / _strip_list filter the
+            // local symbols by name; stabs are unaffected.
+            if let Some(keep) = &ctx.args.local_keep_list {
+                if !keep.iter().any(|p| crate::util::glob_match(p, sym.name)) {
+                    continue;
+                }
+            }
+            if ctx
+                .args
+                .local_strip_list
+                .iter()
+                .any(|p| crate::util::glob_match(p, sym.name))
+            {
                 continue;
             }
             let Some(isec) = sym.isec else { continue };
