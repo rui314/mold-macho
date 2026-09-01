@@ -851,7 +851,12 @@ pub fn check_undefined_symbols<E: Arch>(ctx: &mut Context<E>) {
     for i in 0..ctx.symtab.syms.len() {
         let sym = &ctx.symtab[i];
         if sym.is_used && !sym.is_defined() {
-            if ctx.args.undefined_dynamic_lookup {
+            let allowed = ctx.args.undefined_dynamic_lookup
+                || ctx.args.allowed_undefined.iter().any(|n| n == sym.name);
+            if allowed {
+                if ctx.args.undefined_warning {
+                    crate::warn!(ctx, "undefined symbol: {}", ctx.symtab[i].name);
+                }
                 let sym = &mut ctx.symtab[i];
                 sym.origin = Origin::Dylib(usize::MAX);
                 sym.is_imported = true;

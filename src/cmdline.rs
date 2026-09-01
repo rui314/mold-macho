@@ -94,6 +94,11 @@ pub struct Args {
     /// -undefined dynamic_lookup: leave unresolved symbols to be looked
     /// up in any loaded image at run time.
     pub undefined_dynamic_lookup: bool,
+    /// -undefined warning/suppress: report unresolved symbols without
+    /// failing (they resolve like dynamic_lookup).
+    pub undefined_warning: bool,
+    /// -U: individual symbols allowed to stay undefined.
+    pub allowed_undefined: Vec<String>,
     /// -dead_strip_dylibs: drop load commands for dylibs nothing binds
     /// to.
     pub dead_strip_dylibs: bool,
@@ -148,6 +153,8 @@ impl Default for Args {
             uuid: true,
             suppress_warnings: false,
             undefined_dynamic_lookup: false,
+            undefined_warning: false,
+            allowed_undefined: Vec::new(),
             dead_strip_dylibs: false,
             bind_at_load: false,
             application_extension: false,
@@ -328,8 +335,15 @@ pub fn parse_args(diag: &Diagnostics, cmdline: &[String]) -> Args {
             "-undefined" => match next_arg(&mut i) {
                 "error" => args.undefined_dynamic_lookup = false,
                 "dynamic_lookup" => args.undefined_dynamic_lookup = true,
+                "warning" | "suppress" => {
+                    args.undefined_dynamic_lookup = true;
+                    args.undefined_warning = true;
+                }
                 treatment => fatal!(diag, "-undefined: unsupported treatment: {treatment}"),
             },
+            "-U" => args
+                .allowed_undefined
+                .push(next_arg(&mut i).to_string()),
             "-w" => args.suppress_warnings = true,
             "-help" => {
                 println!("Usage: ld64.mold [options] file...");
