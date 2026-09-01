@@ -58,6 +58,8 @@ pub struct Args {
     pub unexported_symbols: Vec<String>,
     pub current_version: u32,
     pub compatibility_version: u32,
+    /// -map: write a map file describing the output layout.
+    pub map: Option<String>,
     pub dynamic: bool,
     pub headerpad: u64,
     pub pagezero_size: u64,
@@ -89,6 +91,7 @@ impl Default for Args {
             unexported_symbols: Vec::new(),
             current_version: encode_version(1, 0, 0),
             compatibility_version: encode_version(1, 0, 0),
+            map: None,
             dynamic: true,
             headerpad: 0x100,
             pagezero_size: 0x1_0000_0000,
@@ -192,6 +195,7 @@ pub fn parse_args(diag: &Diagnostics, cmdline: &[String]) -> Args {
             "-install_name" | "-dylib_install_name" => {
                 args.install_name = Some(next_arg(&mut i).to_string())
             }
+            "-map" => args.map = Some(next_arg(&mut i).to_string()),
             "-adhoc_codesign" => args.adhoc_codesign = true,
             "-no_adhoc_codesign" => args.adhoc_codesign = false,
             "-dynamic" => args.dynamic = true,

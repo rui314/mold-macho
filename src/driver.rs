@@ -103,6 +103,7 @@ pub fn link<E: Arch>(cmdline: &[String], diag: &Diagnostics) -> Result<i32, Stri
     passes::assign_offsets(&mut ctx);
     passes::resolve_entry(&mut ctx);
     ctx.diag.checkpoint();
+    crate::mapfile::print_map(&ctx);
 
     // Write the output
     let mut buf = vec![0; ctx.output_size as usize];
