@@ -873,7 +873,8 @@ pub fn encode_unwind_info<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
 pub fn copy_eh_frame<E: Arch>(ctx: &Context<E>, buf: &mut [u8]) {
     let chunk_idx = find_chunk(ctx, |k| matches!(k, ChunkKind::EhFrame)).unwrap();
     let chunk = &ctx.chunks[chunk_idx];
-    let base_off = chunk.hdr.fileoff as usize;
+    // `buf` is the chunk's own slice of the output.
+    let base_off = 0;
     let base_addr = chunk.hdr.addr;
 
     for cie in &ctx.cies {
@@ -1004,13 +1005,21 @@ pub fn write_code_signature<E: Arch>(ctx: &Context<E>, buf: &mut [u8]) {
     sig.extend_from_slice(ident.as_bytes());
     sig.resize(sig.len() + ident_size as usize - ident.len(), 0);
 
-    // Hash each page of the file up to the signature itself.
-    for i in 0..nblocks {
-        let start = (i * CS_PAGE_SIZE) as usize;
-        let end = std::cmp::min(start + CS_PAGE_SIZE as usize, cs_off as usize);
-        let mut hash = [0; SHA256_SIZE];
-        crate::util::sha256(&buf[start..end], &mut hash);
-        sig.extend_from_slice(&hash);
+    // Hash each page of the file up to the signature itself, in
+    // parallel: the hashes are independent.
+    use rayon::prelude::*;
+    let hashes: Vec<[u8; SHA256_SIZE]> = (0..nblocks)
+        .into_par_iter()
+        .map(|i| {
+            let start = (i * CS_PAGE_SIZE) as usize;
+            let end = std::cmp::min(start + CS_PAGE_SIZE as usize, cs_off as usize);
+            let mut hash = [0; SHA256_SIZE];
+            crate::util::sha256(&buf[start..end], &mut hash);
+            hash
+        })
+        .collect();
+    for hash in &hashes {
+        sig.extend_from_slice(hash);
     }
 
     debug_assert_eq!(sig.len() as u64, chunk.hdr.size);

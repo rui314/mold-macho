@@ -1416,114 +1416,133 @@ pub fn resolve_entry<E: Arch>(ctx: &mut Context<E>) {
 
 /// Copies all chunks to the output buffer and applies relocations. The
 /// code signature is computed last, over everything else.
-pub fn copy_chunks<E: Arch>(ctx: &Context<E>, buf: &mut [u8]) {
-    for chunk in &ctx.chunks {
-        match &chunk.kind {
-            ChunkKind::Output { isecs } => {
-                for &id in isecs {
-                    let isec = &ctx.isecs[id];
-                    if isec.data.is_empty() {
-                        continue;
-                    }
-                    let off = (chunk.hdr.fileoff + isec.output_offset) as usize;
-                    let end = off + isec.data.len();
-                    buf[off..end].copy_from_slice(isec.data);
-                    let base = chunk.hdr.addr + isec.output_offset;
-                    E::apply_relocs(ctx, &isec.relocs, isec.obj, base, &mut buf[off..end]);
+/// Copies one chunk's contents into its slice of the output buffer.
+/// The slice covers exactly [fileoff, fileoff + size).
+fn copy_chunk<E: Arch>(ctx: &Context<E>, chunk: &Chunk, buf: &mut [u8]) {
+    match &chunk.kind {
+        ChunkKind::Output { isecs } => {
+            for &id in isecs {
+                let isec = &ctx.isecs[id];
+                if isec.data.is_empty() {
+                    continue;
                 }
+                let off = isec.output_offset as usize;
+                let end = off + isec.data.len();
+                buf[off..end].copy_from_slice(isec.data);
+                let base = chunk.hdr.addr + isec.output_offset;
+                E::apply_relocs(ctx, &isec.relocs, isec.obj, base, &mut buf[off..end]);
             }
-            ChunkKind::Stubs => {
-                let off = chunk.hdr.fileoff as usize;
-                let end = off + chunk.hdr.size as usize;
-                E::write_stubs(ctx, chunk.hdr.addr, &mut buf[off..end]);
-            }
-            ChunkKind::Got => {
-                // Slots for imported symbols stay zero; dyld fills them
-                // via the bind stream.
-                for (i, &id) in ctx.got_syms.iter().enumerate() {
-                    if !ctx.symtab[id].is_imported {
-                        let off = chunk.hdr.fileoff as usize + i * 8;
-                        buf[off..off + 8].copy_from_slice(&ctx.sym_addr(id).to_le_bytes());
-                    }
-                }
-            }
-            ChunkKind::ThreadPtrs => {
-                for (i, &id) in ctx.thread_ptr_syms.iter().enumerate() {
-                    if !ctx.symtab[id].is_imported {
-                        let off = chunk.hdr.fileoff as usize + i * 8;
-                        buf[off..off + 8].copy_from_slice(&ctx.sym_addr(id).to_le_bytes());
-                    }
-                }
-            }
-            ChunkKind::ObjcImageInfo => {
-                let off = chunk.hdr.fileoff as usize;
-                buf[off..off + 4].copy_from_slice(&0u32.to_le_bytes());
-                buf[off + 4..off + 8]
-                    .copy_from_slice(&ctx.objc_image_info_flags.to_le_bytes());
-            }
-            ChunkKind::ObjcStubs => {
-                let off = chunk.hdr.fileoff as usize;
-                let end = off + chunk.hdr.size as usize;
-                E::write_objc_stubs(ctx, chunk.hdr.addr, &mut buf[off..end]);
-            }
-            ChunkKind::ObjcMethname => {
-                let off = chunk.hdr.fileoff as usize;
-                buf[off..off + ctx.objc_methname_data.len()]
-                    .copy_from_slice(&ctx.objc_methname_data);
-            }
-            ChunkKind::ObjcSelrefs => {
-                let methname = output_chunks::find_chunk(ctx, |k| {
-                    matches!(k, ChunkKind::ObjcMethname)
-                })
-                .unwrap();
-                let methname_addr = ctx.chunks[methname].hdr.addr;
-                for (i, &sel_off) in ctx.objc_methname_offs.iter().enumerate() {
-                    let off = chunk.hdr.fileoff as usize + i * 8;
-                    let val = methname_addr + sel_off;
-                    buf[off..off + 8].copy_from_slice(&val.to_le_bytes());
-                }
-            }
-            ChunkKind::UnwindInfo => {
-                let data = output_chunks::encode_unwind_info(ctx);
-                debug_assert_eq!(data.len() as u64, chunk.hdr.size);
-                let off = chunk.hdr.fileoff as usize;
-                buf[off..off + data.len()].copy_from_slice(&data);
-            }
-            ChunkKind::EhFrame => output_chunks::copy_eh_frame(ctx, buf),
-            ChunkKind::RebaseInfo => {
-                let off = chunk.hdr.fileoff as usize;
-                buf[off..off + ctx.rebase_data.len()].copy_from_slice(&ctx.rebase_data);
-            }
-            ChunkKind::BindInfo => {
-                let off = chunk.hdr.fileoff as usize;
-                buf[off..off + ctx.bind_data.len()].copy_from_slice(&ctx.bind_data);
-            }
-            ChunkKind::ExportTrie => {
-                let data = output_chunks::encode_export_trie(ctx);
-                let off = chunk.hdr.fileoff as usize;
-                buf[off..off + data.len()].copy_from_slice(&data);
-            }
-            ChunkKind::FunctionStarts => {
-                let off = chunk.hdr.fileoff as usize;
-                buf[off..off + ctx.function_starts_data.len()]
-                    .copy_from_slice(&ctx.function_starts_data);
-            }
-            ChunkKind::IndirectSymtab => {
-                let mut off = chunk.hdr.fileoff as usize;
-                for &id in ctx.stub_syms.iter().chain(&ctx.got_syms) {
-                    let val = match ctx.symtab_data.global_index.get(&id) {
-                        Some(&idx) => idx,
-                        None => INDIRECT_SYMBOL_LOCAL,
-                    };
-                    buf[off..off + 4].copy_from_slice(&val.to_le_bytes());
-                    off += 4;
-                }
-            }
-            ChunkKind::Symtab => output_chunks::copy_symtab(ctx, buf),
-            ChunkKind::MachHeader | ChunkKind::Strtab | ChunkKind::CodeSignature => {}
         }
+        ChunkKind::Stubs => E::write_stubs(ctx, chunk.hdr.addr, buf),
+        ChunkKind::Got => {
+            // Slots for imported symbols stay zero; dyld fills them
+            // via the bind stream.
+            for (i, &id) in ctx.got_syms.iter().enumerate() {
+                if !ctx.symtab[id].is_imported {
+                    buf[i * 8..i * 8 + 8].copy_from_slice(&ctx.sym_addr(id).to_le_bytes());
+                }
+            }
+        }
+        ChunkKind::ThreadPtrs => {
+            for (i, &id) in ctx.thread_ptr_syms.iter().enumerate() {
+                if !ctx.symtab[id].is_imported {
+                    buf[i * 8..i * 8 + 8].copy_from_slice(&ctx.sym_addr(id).to_le_bytes());
+                }
+            }
+        }
+        ChunkKind::ObjcImageInfo => {
+            buf[..4].copy_from_slice(&0u32.to_le_bytes());
+            buf[4..8].copy_from_slice(&ctx.objc_image_info_flags.to_le_bytes());
+        }
+        ChunkKind::ObjcStubs => E::write_objc_stubs(ctx, chunk.hdr.addr, buf),
+        ChunkKind::ObjcMethname => {
+            buf[..ctx.objc_methname_data.len()].copy_from_slice(&ctx.objc_methname_data);
+        }
+        ChunkKind::ObjcSelrefs => {
+            let methname =
+                output_chunks::find_chunk(ctx, |k| matches!(k, ChunkKind::ObjcMethname))
+                    .unwrap();
+            let methname_addr = ctx.chunks[methname].hdr.addr;
+            for (i, &sel_off) in ctx.objc_methname_offs.iter().enumerate() {
+                let val = methname_addr + sel_off;
+                buf[i * 8..i * 8 + 8].copy_from_slice(&val.to_le_bytes());
+            }
+        }
+        ChunkKind::UnwindInfo => {
+            let data = output_chunks::encode_unwind_info(ctx);
+            debug_assert_eq!(data.len() as u64, chunk.hdr.size);
+            buf[..data.len()].copy_from_slice(&data);
+        }
+        ChunkKind::EhFrame => output_chunks::copy_eh_frame(ctx, buf),
+        ChunkKind::RebaseInfo => buf[..ctx.rebase_data.len()].copy_from_slice(&ctx.rebase_data),
+        ChunkKind::BindInfo => buf[..ctx.bind_data.len()].copy_from_slice(&ctx.bind_data),
+        ChunkKind::ExportTrie => {
+            let data = output_chunks::encode_export_trie(ctx);
+            buf[..data.len()].copy_from_slice(&data);
+        }
+        ChunkKind::FunctionStarts => {
+            buf[..ctx.function_starts_data.len()].copy_from_slice(&ctx.function_starts_data);
+        }
+        ChunkKind::IndirectSymtab => {
+            let mut off = 0;
+            for &id in ctx.stub_syms.iter().chain(&ctx.got_syms) {
+                let val = match ctx.symtab_data.global_index.get(&id) {
+                    Some(&idx) => idx,
+                    None => INDIRECT_SYMBOL_LOCAL,
+                };
+                buf[off..off + 4].copy_from_slice(&val.to_le_bytes());
+                off += 4;
+            }
+        }
+        ChunkKind::MachHeader
+        | ChunkKind::Symtab
+        | ChunkKind::Strtab
+        | ChunkKind::CodeSignature => {}
+    }
+}
+
+/// Copies all chunks to the output buffer and applies relocations, in
+/// parallel: the buffer is carved into disjoint per-chunk slices, and
+/// every chunk writes only within its own. The mach header, symbol
+/// table (which also fills the string table), UUID and code signature
+/// run serially afterwards, in that order, since each depends on the
+/// bytes before it.
+pub fn copy_chunks<E: Arch>(ctx: &Context<E>, buf: &mut [u8]) {
+    use rayon::prelude::*;
+
+    let mut jobs: Vec<(usize, usize, usize)> = ctx
+        .chunks
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| {
+            !matches!(
+                c.kind,
+                ChunkKind::MachHeader
+                    | ChunkKind::Symtab
+                    | ChunkKind::Strtab
+                    | ChunkKind::CodeSignature
+            ) && !c.is_zerofill()
+        })
+        .map(|(i, c)| (i, c.hdr.fileoff as usize, c.hdr.size as usize))
+        .collect();
+    jobs.sort_by_key(|&(_, off, _)| off);
+
+    let mut slices: Vec<(usize, &mut [u8])> = Vec::with_capacity(jobs.len());
+    let mut tail = &mut *buf;
+    let mut consumed = 0;
+    for &(idx, off, size) in &jobs {
+        let (_gap, rest) = tail.split_at_mut(off - consumed);
+        let (slice, rest) = rest.split_at_mut(size);
+        slices.push((idx, slice));
+        tail = rest;
+        consumed = off + size;
     }
 
+    slices
+        .into_par_iter()
+        .for_each(|(idx, slice)| copy_chunk(ctx, &ctx.chunks[idx], slice));
+
+    output_chunks::copy_symtab(ctx, buf);
     output_chunks::copy_mach_header(ctx, buf);
 
     // The UUID identifies this build: a hash of the output contents,

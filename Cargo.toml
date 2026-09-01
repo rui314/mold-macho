@@ -17,3 +17,4 @@ default-members = [".", "cli", "targets/*", "tests"]
 
 [dependencies]
 libc = "0.2"
+rayon = "1.12.0"
