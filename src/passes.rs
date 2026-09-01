@@ -1555,6 +1555,17 @@ pub fn create_output_chunks<E: Arch>(ctx: &mut Context<E>) {
         ctx.isecs[i].osec = chunk_idx;
     }
 
+    // -order_file moves the atoms it names to the front of their
+    // output sections, in the file's order; everything else keeps its
+    // input order behind them. A stable sort by rank does both.
+    if let Some(ranks) = order_file_ranks(ctx) {
+        for chunk in &mut ctx.chunks {
+            if let ChunkKind::Output { isecs, .. } = &mut chunk.kind {
+                isecs.sort_by_key(|&id| ranks[id]);
+            }
+        }
+    }
+
     // Compute each input section's offset within its output section,
     // inserting range-extension thunks into large executable sections.
     for chunk_idx in 0..ctx.chunks.len() {
@@ -2729,6 +2740,47 @@ fn write_fixup_chains<E: Arch>(ctx: &Context<E>, buf: &mut [u8]) {
 /// functions in __TEXT,__text, ULEB128 delta-encoded starting from the
 /// image base. Debuggers and crash reporters use it to attribute
 /// addresses to functions even for stripped binaries.
+/// Reads the -order_file lists and ranks every subsection: the
+/// subsection defining the file's first symbol gets rank 0 and so on;
+/// unlisted subsections rank last. ld64's format is one
+/// [arch:][object:]symbol per line with #-comments; the qualifiers
+/// narrow a match, which this implementation approximates by
+/// matching the bare symbol name.
+fn order_file_ranks<E: Arch>(ctx: &Context<E>) -> Option<Vec<u64>> {
+    if ctx.args.order_files.is_empty() {
+        return None;
+    }
+    let mut rank_of: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+    let mut next = 0u64;
+    for path in &ctx.args.order_files {
+        let Ok(text) = std::fs::read_to_string(path) else {
+            fatal!(ctx, "-order_file: cannot read {path}");
+        };
+        for line in text.lines() {
+            let line = line.split('#').next().unwrap_or("").trim();
+            if line.is_empty() {
+                continue;
+            }
+            let name = line.rsplit(':').next().unwrap_or(line).trim();
+            rank_of.entry(name.to_string()).or_insert(next);
+            next += 1;
+        }
+    }
+
+    let mut ranks = vec![u64::MAX; ctx.isecs.len()];
+    for sym in &ctx.symtab.syms {
+        if !matches!(sym.origin, Origin::Obj(_)) {
+            continue;
+        }
+        let Some(isec) = sym.isec else { continue };
+        if let Some(&r) = rank_of.get(sym.name) {
+            let isec = ctx.resolve_isec(isec);
+            ranks[isec] = ranks[isec].min(r);
+        }
+    }
+    Some(ranks)
+}
+
 /// Live data-in-code entries as (subsection, offset within it,
 /// length, kind). In an object, an entry's offset is an address in
 /// the object's own address space (sections there are laid out from

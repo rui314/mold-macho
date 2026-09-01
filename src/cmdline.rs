@@ -146,6 +146,9 @@ pub struct Args {
     /// -export_dynamic: keep all global symbols through LTO even in an
     /// executable, for dlsym or plugin use.
     pub export_dynamic: bool,
+    /// -order_file: files of symbol names; matching atoms are placed
+    /// first in their output sections, in file order.
+    pub order_files: Vec<String>,
     pub pagezero_size: u64,
     /// True when -pagezero_size was given explicitly (it is an error
     /// anywhere but a main executable).
@@ -209,6 +212,7 @@ impl Default for Args {
             oso_prefix: None,
             mark_dead_strippable_dylib: false,
             export_dynamic: false,
+            order_files: Vec::new(),
             pagezero_size: 0x1_0000_0000,
             explicit_pagezero: false,
         }
@@ -474,6 +478,7 @@ pub fn parse_args(diag: &Diagnostics, cmdline: &[String]) -> Args {
             "-oso_prefix" => args.oso_prefix = Some(next_arg(&mut i).to_string()),
             "-mark_dead_strippable_dylib" => args.mark_dead_strippable_dylib = true,
             "-export_dynamic" => args.export_dynamic = true,
+            "-order_file" => args.order_files.push(next_arg(&mut i).to_string()),
 
             // Reserve enough header padding that install_name_tool can
             // grow install names in place.
