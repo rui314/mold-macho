@@ -1,4 +1,16 @@
 //! Output file writing.
+//!
+//! Unlike mold for ELF, the output is built in an anonymous buffer and
+//! written with one write() call, not through a shared mapping of the
+//! file. That is deliberate: on macOS, a vnode that has ever had a
+//! writable shared mapping fails ad-hoc code-signature validation at
+//! exec time - the binary is killed with SIGKILL even though codesign
+//! reports it valid on disk, msync changes nothing, and rename()ing a
+//! mapped-written temp file over the destination does not help because
+//! the taint follows the vnode. Only content that reaches the file via
+//! write() (or a fresh copy) executes. LLVM's FileOutputBuffer falls
+//! back to in-memory buffers for executables on Darwin for the same
+//! reason.
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
