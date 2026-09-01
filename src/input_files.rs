@@ -162,9 +162,15 @@ fn parse_symbol<E: Arch>(
 
     match nlist.n_type() {
         N_UNDF => {
-            // The definition may come from another file; leave the slot
-            // as it is, but remember that it is referenced.
-            ctx.symtab[id].is_used = true;
+            let sym = &mut ctx.symtab[id];
+            sym.is_used = true;
+            // A common symbol is a tentative definition: any real
+            // definition beats it, and the largest tentative size wins.
+            if nlist.is_common() && !sym.is_defined() {
+                sym.is_common = true;
+                sym.value = sym.value.max(nlist.n_value);
+                sym.common_p2align = sym.common_p2align.max(((nlist.n_desc >> 8) & 0xf) as u8);
+            }
         }
         N_ABS => {
             let sym = &mut ctx.symtab[id];
@@ -207,6 +213,7 @@ fn parse_symbol<E: Arch>(
                     sym.is_extern = nlist.is_extern();
                     sym.is_weak_def = is_weak;
                     sym.is_imported = false;
+                    sym.is_common = false;
                 }
             }
         }

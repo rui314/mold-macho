@@ -9,6 +9,7 @@ use crate::error;
 use crate::fatal;
 use crate::filetype::{get_file_type, FileType};
 use crate::input_files;
+use crate::input_sections::InputSection;
 use crate::macho::*;
 use crate::mapped_file::MappedFile;
 use crate::output_chunks::{
@@ -101,6 +102,42 @@ pub fn read_input_files<E: Arch>(ctx: &mut Context<E>) {
         }
     }
     ctx.args.inputs = inputs;
+}
+
+/// Converts surviving tentative definitions (common symbols) into real
+/// definitions in a synthetic __DATA,__common zero-fill section.
+pub fn convert_common_symbols<E: Arch>(ctx: &mut Context<E>) {
+    for i in 0..ctx.symtab.syms.len() {
+        let sym = &ctx.symtab[i];
+        if !sym.is_common || sym.is_defined() {
+            continue;
+        }
+        let (size, p2align) = (sym.value, sym.common_p2align);
+
+        let hdr = MachSection {
+            sectname: str_to_name("__common"),
+            segname: str_to_name("__DATA"),
+            size,
+            p2align: p2align as u32,
+            flags: S_ZEROFILL,
+            ..Default::default()
+        };
+        ctx.isecs.push(InputSection {
+            obj: usize::MAX,
+            hdr,
+            data: &[],
+            relocs: Vec::new(),
+            osec: usize::MAX,
+            output_offset: 0,
+        });
+
+        let sym = &mut ctx.symtab[i];
+        sym.origin = Origin::Synthetic;
+        sym.isec = Some(ctx.isecs.len() - 1);
+        sym.value = 0;
+        sym.is_common = false;
+        sym.is_extern = true;
+    }
 }
 
 /// Resolves symbols that no object file defines against the dylibs, in
