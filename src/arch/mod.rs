@@ -33,6 +33,8 @@ pub trait Arch: Copy + Default + Send + Sync + 'static {
     const PAGE_SIZE: u64;
     /// The size of one __stubs entry.
     const STUB_SIZE: u64;
+    /// The compact unwind encoding mode meaning "use DWARF instead".
+    const UNWIND_MODE_DWARF: u32;
 
     /// Classifies a relocation type by how it uses its target.
     fn classify_reloc(r_type: u8) -> RelocClass;

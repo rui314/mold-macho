@@ -24,6 +24,8 @@ pub struct Context<E: Arch> {
     /// Archive members not yet loaded; a member is loaded when it
     /// defines a symbol that is still undefined.
     pub lazy_objs: Vec<&'static crate::mapped_file::MappedFile>,
+    /// Unwind records from all objects' __compact_unwind sections.
+    pub unwind_records: Vec<crate::input_files::UnwindRecord>,
     pub chunks: Vec<Chunk>,
     pub segments: Vec<OutputSegment>,
     pub symtab_data: SymtabData,
@@ -58,6 +60,7 @@ impl<E: Arch> Context<E> {
             symtab: SymbolTable::default(),
             isecs: Vec::new(),
             lazy_objs: Vec::new(),
+            unwind_records: Vec::new(),
             chunks: Vec::new(),
             segments: Vec::new(),
             symtab_data: SymtabData::default(),

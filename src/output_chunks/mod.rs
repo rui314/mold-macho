@@ -40,6 +40,9 @@ pub enum ChunkKind {
     /// The global offset table: pointers to symbols, bound by dyld for
     /// imported ones.
     Got,
+    /// The __TEXT,__unwind_info section, generated from the objects'
+    /// compact unwind records.
+    UnwindInfo,
     /// The rebase opcode stream for LC_DYLD_INFO, in __LINKEDIT.
     RebaseInfo,
     /// The bind opcode stream for LC_DYLD_INFO, in __LINKEDIT.
@@ -75,7 +78,10 @@ impl Chunk {
                 reserved2: 0,
                 is_sect: matches!(
                     kind,
-                    ChunkKind::Output { .. } | ChunkKind::Stubs | ChunkKind::Got
+                    ChunkKind::Output { .. }
+                        | ChunkKind::Stubs
+                        | ChunkKind::Got
+                        | ChunkKind::UnwindInfo
                 ),
             },
             kind,
@@ -417,6 +423,164 @@ pub fn copy_symtab<E: Arch>(ctx: &Context<E>, buf: &mut [u8]) {
     let chunk = &ctx.chunks[find_chunk(ctx, |k| matches!(k, ChunkKind::Strtab)).unwrap()];
     let off = chunk.hdr.fileoff as usize;
     buf[off..off + ctx.symtab_data.strtab.len()].copy_from_slice(&ctx.symtab_data.strtab);
+}
+
+/// Encodes the __unwind_info section from the compact unwind records.
+///
+/// __unwind_info stores unwind records in two-level tables: a first-level
+/// table of page entries, each covering up to 2^24 bytes of code, and
+/// second-level pages holding 32-bit entries with the function's low
+/// address bits and an index into a per-page encoding table.
+///
+/// This runs twice: once during layout for the section's size (function
+/// addresses are final by then, so the size is stable) and once when the
+/// output is written, with every referenced address final.
+pub fn encode_unwind_info<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
+    let mut records = ctx.unwind_records.clone();
+    if records.is_empty() {
+        return Vec::new();
+    }
+
+    let base = ctx.args.pagezero_size;
+    let func_addr =
+        |r: &crate::input_files::UnwindRecord| ctx.isec_addr(r.isec) + r.input_offset as u64;
+
+    // Assign personality indices, encoded in bits 28-29 of the encoding.
+    let mut personalities: Vec<SymbolId> = Vec::new();
+    for rec in &mut records {
+        if let Some(p) = rec.personality {
+            let idx = match personalities.iter().position(|&s| s == p) {
+                Some(idx) => idx,
+                None => {
+                    personalities.push(p);
+                    personalities.len() - 1
+                }
+            };
+            if idx >= 3 {
+                crate::fatal!(ctx, "too many personality functions");
+            }
+            rec.encoding |= ((idx + 1) as u32) << UNWIND_PERSONALITY_MASK.trailing_zeros();
+        }
+    }
+
+    records.sort_by_key(func_addr);
+
+    // Merge adjacent records with identical contents.
+    let mut merged: Vec<crate::input_files::UnwindRecord> = Vec::with_capacity(records.len());
+    for rec in records {
+        match merged.last_mut() {
+            Some(last)
+                if func_addr(last) + last.code_len as u64 == func_addr(&rec)
+                    && last.encoding == rec.encoding
+                    && last.personality == rec.personality
+                    && last.lsda.is_none()
+                    && rec.lsda.is_none() =>
+            {
+                last.code_len += rec.code_len;
+            }
+            _ => merged.push(rec),
+        }
+    }
+    let records = merged;
+
+    // Split records into pages: each second-level page covers at most
+    // 2^24 bytes of code and holds a bounded number of records.
+    const MAX_PAGE_RECORDS: usize = 200;
+    let mut pages: Vec<&[crate::input_files::UnwindRecord]> = Vec::new();
+    let mut rest = &records[..];
+    while !rest.is_empty() {
+        let end_addr = func_addr(&rest[0]) + (1 << 24);
+        let mut i = 1;
+        while i < rest.len() && i < MAX_PAGE_RECORDS && func_addr(&rest[i]) < end_addr {
+            i += 1;
+        }
+        pages.push(&rest[..i]);
+        rest = &rest[i..];
+    }
+
+    let num_lsda = records.iter().filter(|r| r.lsda.is_some()).count();
+
+    // Compute the layout of the section.
+    let personality_off = 28;
+    let page1_off = personality_off + personalities.len() * 4;
+    let lsda_off = page1_off + (pages.len() + 1) * 12;
+    let page2_off = lsda_off + num_lsda * 8;
+
+    let push32 = |buf: &mut Vec<u8>, val: u32| buf.extend_from_slice(&val.to_le_bytes());
+    let push16 = |buf: &mut Vec<u8>, val: u16| buf.extend_from_slice(&val.to_le_bytes());
+
+    let mut buf = Vec::new();
+    push32(&mut buf, UNWIND_SECTION_VERSION);
+    push32(&mut buf, personality_off as u32); // common encodings (none)
+    push32(&mut buf, 0);
+    push32(&mut buf, personality_off as u32);
+    push32(&mut buf, personalities.len() as u32);
+    push32(&mut buf, page1_off as u32);
+    push32(&mut buf, pages.len() as u32 + 1);
+
+    // Personalities are image-relative pointers to the functions' GOT
+    // slots.
+    for &sym in &personalities {
+        push32(&mut buf, ctx.sym_got_addr(sym).wrapping_sub(base) as u32);
+    }
+
+    // First-level pages, second-level pages and the LSDA table are
+    // interdependent, so build the second-level pages and the LSDA table
+    // in side buffers.
+    let mut page1 = Vec::new();
+    let mut lsda = Vec::new();
+    let mut page2 = Vec::new();
+
+    for span in &pages {
+        push32(&mut page1, (func_addr(&span[0]) - base) as u32);
+        push32(&mut page1, (page2_off + page2.len()) as u32);
+        push32(&mut page1, (lsda_off + lsda.len()) as u32);
+
+        for rec in *span {
+            if let Some((isec, off)) = rec.lsda {
+                push32(&mut lsda, (func_addr(rec) - base) as u32);
+                push32(
+                    &mut lsda,
+                    (ctx.isec_addr(isec) + off as u64 - base) as u32,
+                );
+            }
+        }
+
+        // The page's encoding table, indexed by the entries.
+        let mut encodings: Vec<u32> = Vec::new();
+        for rec in *span {
+            if !encodings.contains(&rec.encoding) {
+                encodings.push(rec.encoding);
+            }
+        }
+
+        push32(&mut page2, UNWIND_SECOND_LEVEL_COMPRESSED);
+        push16(&mut page2, 12); // entries offset within the page
+        push16(&mut page2, span.len() as u16);
+        push16(&mut page2, (12 + span.len() * 4) as u16); // encodings offset
+        push16(&mut page2, encodings.len() as u16);
+
+        let page_base = func_addr(&span[0]);
+        for rec in *span {
+            let enc_idx = encodings.iter().position(|&e| e == rec.encoding).unwrap();
+            let entry = (func_addr(rec) - page_base) as u32 | (enc_idx as u32) << 24;
+            push32(&mut page2, entry);
+        }
+        for enc in &encodings {
+            push32(&mut page2, *enc);
+        }
+    }
+
+    // The terminating first-level entry.
+    let last = records.last().unwrap();
+    push32(&mut page1, (func_addr(last) + last.code_len as u64 + 1 - base) as u32);
+    push32(&mut page1, 0);
+    push32(&mut page1, (lsda_off + lsda.len()) as u32);
+
+    buf.extend_from_slice(&page1);
+    buf.extend_from_slice(&lsda);
+    buf.extend_from_slice(&page2);
+    buf
 }
 
 /// Returns the size of the code signature given the file offset it will

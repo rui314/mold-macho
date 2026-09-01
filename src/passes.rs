@@ -229,6 +229,19 @@ pub fn scan_relocs<E: Arch>(ctx: &mut Context<E>) {
     }
 }
 
+/// Personality functions are referenced from __unwind_info through the
+/// GOT.
+pub fn scan_unwind_personalities<E: Arch>(ctx: &mut Context<E>) {
+    let personalities: Vec<_> = ctx
+        .unwind_records
+        .iter()
+        .filter_map(|rec| rec.personality)
+        .collect();
+    for id in personalities {
+        add_got(ctx, id);
+    }
+}
+
 fn add_stub<E: Arch>(ctx: &mut Context<E>, id: crate::symbol::SymbolId) {
     if ctx.symtab[id].stub_idx.is_none() {
         ctx.symtab[id].stub_idx = Some(ctx.stub_syms.len() as u32);
@@ -340,6 +353,12 @@ pub fn create_output_chunks<E: Arch>(ctx: &mut Context<E>) {
         ctx.chunks.push(chunk);
     }
 
+    if !ctx.unwind_records.is_empty() {
+        let mut chunk = Chunk::new("__TEXT", "__unwind_info", ChunkKind::UnwindInfo);
+        chunk.hdr.p2align = 2;
+        ctx.chunks.push(chunk);
+    }
+
     ctx.chunks.push(Chunk::new("__LINKEDIT", "", ChunkKind::RebaseInfo));
     ctx.chunks.push(Chunk::new("__LINKEDIT", "", ChunkKind::BindInfo));
     ctx.chunks.push(Chunk::new("__LINKEDIT", "", ChunkKind::Symtab));
@@ -368,6 +387,7 @@ pub fn create_output_chunks<E: Arch>(ctx: &mut Context<E>) {
         };
         let sect_rank = match c.kind {
             ChunkKind::MachHeader => 0,
+            ChunkKind::UnwindInfo => 100,
             ChunkKind::CodeSignature => u32::MAX,
             _ => 1 + output_section_rank(c.hdr.segname, &c.hdr.sectname),
         };
@@ -552,6 +572,7 @@ pub fn assign_offsets<E: Arch>(ctx: &mut Context<E>) {
                 ChunkKind::MachHeader => header_size,
                 ChunkKind::Symtab => symtab_size,
                 ChunkKind::Strtab => strtab_size,
+                ChunkKind::UnwindInfo => output_chunks::encode_unwind_info(ctx).len() as u64,
                 ChunkKind::RebaseInfo => ctx.rebase_data.len() as u64,
                 ChunkKind::BindInfo => ctx.bind_data.len() as u64,
                 ChunkKind::CodeSignature => {
@@ -799,6 +820,12 @@ pub fn copy_chunks<E: Arch>(ctx: &Context<E>, buf: &mut [u8]) {
                         buf[off..off + 8].copy_from_slice(&ctx.sym_addr(id).to_le_bytes());
                     }
                 }
+            }
+            ChunkKind::UnwindInfo => {
+                let data = output_chunks::encode_unwind_info(ctx);
+                debug_assert_eq!(data.len() as u64, chunk.hdr.size);
+                let off = chunk.hdr.fileoff as usize;
+                buf[off..off + data.len()].copy_from_slice(&data);
             }
             ChunkKind::RebaseInfo => {
                 let off = chunk.hdr.fileoff as usize;

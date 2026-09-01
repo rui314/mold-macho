@@ -65,6 +65,7 @@ pub fn link<E: Arch>(cmdline: &[String], diag: &Diagnostics) -> Result<i32, Stri
     passes::check_undefined_symbols(&ctx);
     ctx.diag.checkpoint();
     passes::scan_relocs(&mut ctx);
+    passes::scan_unwind_personalities(&mut ctx);
 
     // Decide the output layout
     passes::create_output_chunks(&mut ctx);

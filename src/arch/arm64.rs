@@ -64,6 +64,7 @@ impl Arch for Arm64 {
     const CPUSUBTYPE: u32 = CPU_SUBTYPE_ARM64_ALL;
     const PAGE_SIZE: u64 = 16384;
     const STUB_SIZE: u64 = 12;
+    const UNWIND_MODE_DWARF: u32 = UNWIND_ARM64_MODE_DWARF;
 
     fn classify_reloc(r_type: u8) -> crate::arch::RelocClass {
         use crate::arch::RelocClass;

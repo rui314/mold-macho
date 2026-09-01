@@ -161,6 +161,15 @@ pub const REBASE_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB: u8 = 0x20;
 pub const REBASE_OPCODE_DO_REBASE_IMM_TIMES: u8 = 0x50;
 pub const REBASE_OPCODE_DO_REBASE_ULEB_TIMES: u8 = 0x60;
 
+// __TEXT,__unwind_info section encoding
+pub const UNWIND_SECTION_VERSION: u32 = 1;
+pub const UNWIND_SECOND_LEVEL_REGULAR: u32 = 2;
+pub const UNWIND_SECOND_LEVEL_COMPRESSED: u32 = 3;
+pub const UNWIND_PERSONALITY_MASK: u32 = 0x3000_0000;
+pub const UNWIND_MODE_MASK: u32 = 0x0f00_0000;
+pub const UNWIND_ARM64_MODE_DWARF: u32 = 0x0300_0000;
+pub const UNWIND_X86_64_MODE_DWARF: u32 = 0x0400_0000;
+
 // Magic values in the indirect symbol table
 pub const INDIRECT_SYMBOL_LOCAL: u32 = 0x8000_0000;
 pub const INDIRECT_SYMBOL_ABS: u32 = 0x4000_0000;

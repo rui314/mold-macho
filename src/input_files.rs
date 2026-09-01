@@ -122,6 +122,13 @@ pub fn parse_object<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile) -> u
         syms.push(parse_symbol(ctx, obj_idx, &sect_hdrs, &sections, strtab, nlist, &mf.name));
     }
 
+    if let Some(hdr) = sect_hdrs
+        .iter()
+        .find(|s| s.segname() == "__LD" && s.sectname() == "__compact_unwind")
+    {
+        parse_compact_unwind(ctx, hdr, &sect_hdrs, &sections, &syms, &nlists, data, &mf.name);
+    }
+
     ctx.objs.push(ObjectFile {
         mf,
         sect_hdrs,
@@ -220,6 +227,143 @@ fn parse_symbol<E: Arch>(
         _ => fatal!(ctx, "{file_name}: unsupported symbol type for {name}"),
     }
     id
+}
+
+/// A record from a __compact_unwind section, describing how to unwind
+/// the stack through one function.
+#[derive(Clone, Debug)]
+pub struct UnwindRecord {
+    /// The input section holding the function.
+    pub isec: usize,
+    /// The function's offset within `isec`.
+    pub input_offset: u32,
+    pub code_len: u32,
+    pub encoding: u32,
+    pub personality: Option<SymbolId>,
+    /// The language-specific data area: an input section and an offset
+    /// within it.
+    pub lsda: Option<(usize, u32)>,
+}
+
+/// Parses a __LD,__compact_unwind section into unwind records. The
+/// section is an array of 32-byte entries whose pointer fields are set by
+/// relocations.
+fn parse_compact_unwind<E: Arch>(
+    ctx: &mut Context<E>,
+    hdr: &MachSection,
+    sect_hdrs: &[MachSection],
+    sections: &[Option<usize>],
+    syms: &[SymbolId],
+    nlists: &[NList],
+    data: &'static [u8],
+    file_name: &str,
+) {
+    const ENTRY_SIZE: usize = 32;
+    if hdr.size % ENTRY_SIZE as u64 != 0 {
+        fatal!(ctx, "{file_name}: invalid __compact_unwind section size");
+    }
+
+    let read_u64 = |off: u64| {
+        let off = (hdr.offset as u64 + off) as usize;
+        u64::from_le_bytes(data[off..off + 8].try_into().unwrap())
+    };
+
+    let num_entries = (hdr.size / ENTRY_SIZE as u64) as usize;
+    let mut records = Vec::with_capacity(num_entries);
+    for i in 0..num_entries {
+        records.push(UnwindRecord {
+            isec: usize::MAX,
+            input_offset: 0,
+            code_len: u32::from_le_bytes({
+                let off = hdr.offset as usize + i * ENTRY_SIZE + 8;
+                data[off..off + 4].try_into().unwrap()
+            }),
+            encoding: u32::from_le_bytes({
+                let off = hdr.offset as usize + i * ENTRY_SIZE + 12;
+                data[off..off + 4].try_into().unwrap()
+            }),
+            personality: None,
+            lsda: None,
+        });
+    }
+
+    // A section and the offset within it, for an address in the object.
+    let find_section = |addr: u64| -> Option<(usize, u32)> {
+        let idx = sect_hdrs
+            .iter()
+            .position(|sec| sec.addr <= addr && addr < sec.addr + sec.size)?;
+        Some((sections[idx]?, (addr - sect_hdrs[idx].addr) as u32))
+    };
+
+    let rels: Vec<MachRel> = read_array(data, hdr.reloff as usize, hdr.nreloc as usize);
+    for r in &rels {
+        if r.r_address as u64 >= hdr.size || r.r_length() != 3 {
+            fatal!(ctx, "{file_name}: __compact_unwind: unsupported relocation");
+        }
+        let idx = r.r_address as usize / ENTRY_SIZE;
+        let value = read_u64(r.r_address as u64);
+
+        match r.r_address as usize % ENTRY_SIZE {
+            // The function the record covers
+            0 => {
+                if r.is_extern() {
+                    let sym = &ctx.symtab[syms[r.r_symbolnum() as usize]];
+                    let Some(isec) = sym.isec else {
+                        fatal!(ctx, "{file_name}: __compact_unwind: bad function reference");
+                    };
+                    records[idx].isec = isec;
+                    records[idx].input_offset = (sym.value + value) as u32;
+                } else {
+                    let Some((isec, off)) = find_section(value) else {
+                        fatal!(ctx, "{file_name}: __compact_unwind: bad function reference");
+                    };
+                    records[idx].isec = isec;
+                    records[idx].input_offset = off;
+                }
+            }
+            // The personality function
+            16 => {
+                let sym = if r.is_extern() {
+                    Some(syms[r.r_symbolnum() as usize])
+                } else {
+                    // Resolve a section-relative reference back to the
+                    // symbol at that address.
+                    nlists
+                        .iter()
+                        .position(|n| n.is_extern() && n.n_value == value)
+                        .map(|i| syms[i])
+                };
+                let Some(sym) = sym else {
+                    fatal!(ctx, "{file_name}: __compact_unwind: unsupported personality");
+                };
+                records[idx].personality = Some(sym);
+            }
+            // The language-specific data area
+            24 => {
+                if r.is_extern() {
+                    let sym = &ctx.symtab[syms[r.r_symbolnum() as usize]];
+                    let Some(isec) = sym.isec else {
+                        fatal!(ctx, "{file_name}: __compact_unwind: bad LSDA reference");
+                    };
+                    records[idx].lsda = Some((isec, (sym.value + value) as u32));
+                } else {
+                    let Some(lsda) = find_section(value) else {
+                        fatal!(ctx, "{file_name}: __compact_unwind: bad LSDA reference");
+                    };
+                    records[idx].lsda = Some(lsda);
+                }
+            }
+            _ => fatal!(ctx, "{file_name}: __compact_unwind: unsupported relocation"),
+        }
+    }
+
+    // Ignore records that point to DWARF unwind info; those are
+    // synthesized from __eh_frame instead. Object files usually don't
+    // contain such records, but `ld -r` output does.
+    records.retain(|rec| {
+        rec.isec != usize::MAX && (rec.encoding & UNWIND_MODE_MASK) != E::UNWIND_MODE_DWARF
+    });
+    ctx.unwind_records.extend(records);
 }
 
 /// Splits an archive into its members. Members use the BSD convention:
