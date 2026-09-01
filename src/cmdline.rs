@@ -132,8 +132,10 @@ pub fn parse_args(diag: &Diagnostics, cmdline: &[String]) -> Args {
                 }
             }
 
-            // Ignored options
-            "-demangle" | "-no_deduplicate" | "-no_uuid" => {}
+            // Ignored options. -dead_strip is accepted but not yet
+            // implemented; keeping unreferenced code is correct, just
+            // larger.
+            "-demangle" | "-no_deduplicate" | "-no_uuid" | "-dead_strip" => {}
 
             // Ignored options with an argument
             "-lto_library" | "-mllvm" | "-dependency_info" | "-object_path_lto" => {
