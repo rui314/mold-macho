@@ -24,6 +24,8 @@ pub struct TbdFile {
     /// .tbd files; a TLV can only be referenced through TLV
     /// relocations).
     pub tlv_exports: Vec<String>,
+    /// The library was built without -application_extension.
+    pub not_app_extension_safe: bool,
     /// Install names of reexported libraries described in *other* files
     /// (reexports inlined as documents in this file are already merged
     /// into `exports`).
@@ -96,6 +98,7 @@ pub fn parse(diag: &Diagnostics, mf: &MappedFile) -> TbdFile {
         exports: Vec::new(),
         weak_exports: Vec::new(),
         tlv_exports: Vec::new(),
+        not_app_extension_safe: false,
         external_reexports: Vec::new(),
     };
 
@@ -112,6 +115,10 @@ pub fn parse(diag: &Diagnostics, mf: &MappedFile) -> TbdFile {
             } else if i == 0 {
                 if let Some(val) = line.strip_prefix("current-version:") {
                     tbd.current_version = parse_version(unquote(val));
+                } else if let Some(val) = line.strip_prefix("flags:") {
+                    if val.contains("not_app_extension_safe") {
+                        tbd.not_app_extension_safe = true;
+                    }
                 }
             }
         }

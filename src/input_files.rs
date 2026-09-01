@@ -87,6 +87,9 @@ pub struct DylibFile {
     /// MH_DEAD_STRIPPABLE_DYLIB: drop the load command whenever no
     /// symbol binds to this dylib, even without -dead_strip_dylibs.
     pub is_dead_strippable: bool,
+    /// MH_APP_EXTENSION_SAFE: built with -application_extension, so
+    /// app-extension clients may link it.
+    pub is_app_extension_safe: bool,
     pub exports: std::collections::HashSet<String>,
     /// The subset of exports that are thread-local variables.
     pub tlv_exports: std::collections::HashSet<String>,
@@ -1250,6 +1253,7 @@ pub fn parse_dylib_binary<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile
             is_reexported: false,
             is_needed: false,
             is_dead_strippable: hdr.flags & MH_DEAD_STRIPPABLE_DYLIB != 0,
+            is_app_extension_safe: hdr.flags & MH_APP_EXTENSION_SAFE != 0,
             exports,
             tlv_exports,
         },
@@ -1461,6 +1465,7 @@ pub fn parse_dylib<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile) -> us
             is_reexported: false,
             is_needed: false,
             is_dead_strippable: false,
+            is_app_extension_safe: !tbd.not_app_extension_safe,
             exports,
             tlv_exports,
         },
@@ -1471,6 +1476,17 @@ pub fn parse_dylib<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile) -> us
 /// (libc, libm, ...) are stubs for the same /usr/lib/libSystem.B.dylib,
 /// and dyld refuses an image that lists one install name twice.
 fn add_dylib<E: Arch>(ctx: &mut Context<E>, dylib: DylibFile) -> usize {
+    // An app extension runs in a constrained sandbox; a dylib must opt
+    // in (ld64's -application_extension sets MH_APP_EXTENSION_SAFE, or
+    // a .tbd omits not_app_extension_safe) before extension code may
+    // link it. ld64 warns rather than errs, and -w silences it.
+    if ctx.args.application_extension && !dylib.is_app_extension_safe {
+        crate::warn!(
+            ctx,
+            "linking against a dylib which is not safe for use in application extensions: {}",
+            dylib.install_name
+        );
+    }
     if let Some(idx) = ctx
         .dylibs
         .iter()
