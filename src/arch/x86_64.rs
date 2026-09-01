@@ -1,0 +1,210 @@
+//! The x86-64 target.
+
+use crate::arch::Arch;
+use crate::context::Context;
+use crate::error::Diagnostics;
+use crate::fatal;
+use crate::input_sections::{Reloc, RelocTarget};
+use crate::macho::*;
+use crate::output_chunks;
+
+#[derive(Clone, Copy, Default)]
+pub struct X86_64;
+
+fn write32(loc: &mut [u8], val: u32) {
+    loc[..4].copy_from_slice(&val.to_le_bytes());
+}
+
+fn write64(loc: &mut [u8], val: u64) {
+    loc[..8].copy_from_slice(&val.to_le_bytes());
+}
+
+/// The SIGNED_K relocation types describe a pcrel field followed by K
+/// more instruction bytes; the extra distance is folded into the addend
+/// when reading and taken back out when writing.
+fn reloc_bias(r_type: u8) -> i64 {
+    match r_type {
+        X86_64_RELOC_SIGNED_1 => 1,
+        X86_64_RELOC_SIGNED_2 => 2,
+        X86_64_RELOC_SIGNED_4 => 4,
+        _ => 0,
+    }
+}
+
+impl Arch for X86_64 {
+    const NAME: &'static str = "x86_64";
+    const CPUTYPE: u32 = CPU_TYPE_X86_64;
+    const CPUSUBTYPE: u32 = CPU_SUBTYPE_X86_64_ALL;
+    const PAGE_SIZE: u64 = 4096;
+    const STUB_SIZE: u64 = 6;
+    const UNWIND_MODE_DWARF: u32 = UNWIND_X86_64_MODE_DWARF;
+    const OBJC_STUB_SIZE: u64 = 16;
+    const RELOC_UNSIGNED: u8 = X86_64_RELOC_UNSIGNED;
+    const RELOC_SUBTRACTOR: u8 = X86_64_RELOC_SUBTRACTOR;
+    const RELOC_GOTPC: u8 = X86_64_RELOC_GOT;
+
+    fn classify_reloc(r_type: u8) -> crate::arch::RelocClass {
+        use crate::arch::RelocClass;
+        match r_type {
+            X86_64_RELOC_BRANCH => RelocClass::Branch,
+            X86_64_RELOC_GOT_LOAD | X86_64_RELOC_GOT => RelocClass::Got,
+            X86_64_RELOC_TLV => RelocClass::Tlv,
+            _ => RelocClass::Plain,
+        }
+    }
+
+    fn write_stubs(ctx: &Context<Self>, addr: u64, buf: &mut [u8]) {
+        for (i, &sym) in ctx.stub_syms.iter().enumerate() {
+            let ent = &mut buf[i * 6..];
+            let ent_addr = addr + i as u64 * 6;
+            let ptr_addr = ctx.sym_got_addr(sym);
+
+            // jmp *ptr(%rip)
+            ent[0] = 0xff;
+            ent[1] = 0x25;
+            write32(&mut ent[2..], ptr_addr.wrapping_sub(ent_addr + 6) as u32);
+        }
+    }
+
+    fn write_objc_stubs(ctx: &Context<Self>, addr: u64, buf: &mut [u8]) {
+        let selrefs =
+            output_chunks::find_chunk(ctx, |k| matches!(k, output_chunks::ChunkKind::ObjcSelrefs))
+                .unwrap();
+        let selrefs_addr = ctx.chunks[selrefs].hdr.addr;
+        let msgsend_got = ctx.sym_got_addr(ctx.objc_msgsend_sym.unwrap());
+
+        for i in 0..ctx.objc_stubs.len() {
+            let ent = &mut buf[i * 16..];
+            let ent_addr = addr + i as u64 * 16;
+            let sel_addr = selrefs_addr + i as u64 * 8;
+
+            // mov sel(%rip), %rsi; jmp *_objc_msgSend@GOT(%rip); int3 x3
+            ent[..16].copy_from_slice(&[
+                0x48, 0x8b, 0x35, 0, 0, 0, 0, 0xff, 0x25, 0, 0, 0, 0, 0xcc, 0xcc, 0xcc,
+            ]);
+            write32(&mut ent[3..], sel_addr.wrapping_sub(ent_addr + 7) as u32);
+            write32(&mut ent[9..], msgsend_got.wrapping_sub(ent_addr + 13) as u32);
+        }
+    }
+
+    fn read_relocs(
+        diag: &Diagnostics,
+        file_name: &str,
+        sections: &[MachSection],
+        hdr: &MachSection,
+        file_data: &[u8],
+        rels: &[MachRel],
+    ) -> Vec<Reloc> {
+        let mut vec = Vec::with_capacity(rels.len());
+
+        for (i, r) in rels.iter().enumerate() {
+            // On x86-64 every relocation's addend is embedded in the
+            // relocated field.
+            let off = hdr.offset as usize + r.r_address as usize;
+            let embedded = match 1 << r.r_length() {
+                4 => i32::from_le_bytes(file_data[off..off + 4].try_into().unwrap()) as i64,
+                8 => i64::from_le_bytes(file_data[off..off + 8].try_into().unwrap()),
+                _ => fatal!(diag, "{file_name}: bad relocation size"),
+            };
+            let addend = embedded + reloc_bias(r.r_type());
+            let is_subtracted =
+                i > 0 && rels[i - 1].r_type() == X86_64_RELOC_SUBTRACTOR;
+
+            let (target, addend) = if r.is_extern() {
+                (RelocTarget::Sym(r.r_symbolnum() as usize), addend)
+            } else {
+                let addr = if r.is_pcrel() {
+                    (hdr.addr + r.r_address as u64 + 4).wrapping_add_signed(addend)
+                } else {
+                    addend as u64
+                };
+                let Some(idx) = sections
+                    .iter()
+                    .position(|sec| sec.addr <= addr && addr < sec.addr + sec.size)
+                else {
+                    fatal!(diag, "{file_name}: bad relocation: {}", r.r_address);
+                };
+                (RelocTarget::Section(idx), (addr - sections[idx].addr) as i64)
+            };
+
+            vec.push(Reloc {
+                offset: r.r_address,
+                r_type: r.r_type(),
+                size: 1 << r.r_length(),
+                is_pcrel: r.is_pcrel(),
+                is_subtracted,
+                target,
+                addend,
+            });
+        }
+        vec
+    }
+
+    fn apply_relocs(ctx: &Context<Self>, rels: &[Reloc], obj: usize, base: u64, buf: &mut [u8]) {
+        let mut i = 0;
+        while i < rels.len() {
+            let r = &rels[i];
+            let loc = &mut buf[r.offset as usize..];
+            let s = ctx.reloc_target_addr(obj, r);
+            let a = r.addend;
+            let p = base + r.offset as u64;
+
+            match r.r_type {
+                X86_64_RELOC_UNSIGNED => {
+                    debug_assert!(r.size == 8);
+                    let imported = ctx
+                        .reloc_target_sym(obj, r)
+                        .is_some_and(|id| ctx.symtab[id].is_imported);
+                    if imported {
+                        // The slot is filled by dyld.
+                    } else if ctx.reloc_target_is_tls(obj, r) {
+                        write64(loc, s.wrapping_add_signed(a) - ctx.tls_begin);
+                    } else {
+                        write64(loc, s.wrapping_add_signed(a));
+                    }
+                }
+                X86_64_RELOC_SUBTRACTOR => {
+                    i += 1;
+                    debug_assert!(rels[i].r_type == X86_64_RELOC_UNSIGNED);
+                    let val = ctx
+                        .reloc_target_addr(obj, &rels[i])
+                        .wrapping_add_signed(rels[i].addend)
+                        .wrapping_sub(s);
+                    match r.size {
+                        4 => write32(loc, val as u32),
+                        8 => write64(loc, val),
+                        _ => fatal!(ctx, "bad SUBTRACTOR relocation size"),
+                    }
+                }
+                X86_64_RELOC_BRANCH => {
+                    debug_assert!(r.size == 4);
+                    let val = s.wrapping_add_signed(a).wrapping_sub(p + 4);
+                    write32(loc, val as u32);
+                }
+                X86_64_RELOC_SIGNED | X86_64_RELOC_SIGNED_1 | X86_64_RELOC_SIGNED_2
+                | X86_64_RELOC_SIGNED_4 => {
+                    debug_assert!(r.size == 4);
+                    let val = s
+                        .wrapping_add_signed(a)
+                        .wrapping_sub(p + 4)
+                        .wrapping_sub(reloc_bias(r.r_type) as u64);
+                    write32(loc, val as u32);
+                }
+                X86_64_RELOC_GOT_LOAD | X86_64_RELOC_GOT => {
+                    debug_assert!(r.size == 4);
+                    let g = ctx.sym_got_addr(ctx.reloc_target_sym(obj, r).unwrap());
+                    let val = g.wrapping_add_signed(a).wrapping_sub(p + 4);
+                    write32(loc, val as u32);
+                }
+                X86_64_RELOC_TLV => {
+                    debug_assert!(r.size == 4);
+                    let t = ctx.sym_tlv_ptr_addr(ctx.reloc_target_sym(obj, r).unwrap());
+                    let val = t.wrapping_add_signed(a).wrapping_sub(p + 4);
+                    write32(loc, val as u32);
+                }
+                _ => fatal!(ctx, "unsupported relocation type: {}", r.r_type),
+            }
+            i += 1;
+        }
+    }
+}

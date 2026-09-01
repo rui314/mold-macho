@@ -118,6 +118,18 @@ pub const ARM64_RELOC_TLVP_LOAD_PAGE21: u8 = 8;
 pub const ARM64_RELOC_TLVP_LOAD_PAGEOFF12: u8 = 9;
 pub const ARM64_RELOC_ADDEND: u8 = 10;
 
+// x86-64 relocation types
+pub const X86_64_RELOC_UNSIGNED: u8 = 0;
+pub const X86_64_RELOC_SIGNED: u8 = 1;
+pub const X86_64_RELOC_BRANCH: u8 = 2;
+pub const X86_64_RELOC_GOT_LOAD: u8 = 3;
+pub const X86_64_RELOC_GOT: u8 = 4;
+pub const X86_64_RELOC_SUBTRACTOR: u8 = 5;
+pub const X86_64_RELOC_SIGNED_1: u8 = 6;
+pub const X86_64_RELOC_SIGNED_2: u8 = 7;
+pub const X86_64_RELOC_SIGNED_4: u8 = 8;
+pub const X86_64_RELOC_TLV: u8 = 9;
+
 // Code signature constants. Note that unlike the rest of Mach-O, code
 // signature data structures are big-endian.
 pub const CSMAGIC_EMBEDDED_SIGNATURE: u32 = 0xfade_0cc0;

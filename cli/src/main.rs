@@ -9,6 +9,8 @@ fn link_for_target(target: &str, cmdline: &[String], diag: &Diagnostics) -> Resu
     match target {
         #[cfg(feature = "arm64")]
         "arm64" => mold_macho_target_arm64::link(cmdline, diag),
+        #[cfg(feature = "x86_64")]
+        "x86_64" => mold_macho_target_x86_64::link(cmdline, diag),
         _ => {
             diag.fatal(format_args!("unsupported target: {target}"));
         }

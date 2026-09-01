@@ -13,6 +13,27 @@ use std::sync::Mutex;
 struct TestJob {
     script: PathBuf,
     name: String,
+    arch: &'static str,
+}
+
+/// Returns the architectures to test: the host's, plus x86_64 under
+/// Rosetta when available.
+fn test_archs() -> Vec<&'static str> {
+    let host = if cfg!(target_arch = "aarch64") {
+        "arm64"
+    } else {
+        "x86_64"
+    };
+    let mut archs = vec![host];
+    if host == "arm64"
+        && Command::new("arch")
+            .args(["-x86_64", "/usr/bin/true"])
+            .status()
+            .is_ok_and(|s| s.success())
+    {
+        archs.push("x86_64");
+    }
+    archs
 }
 
 #[derive(PartialEq, Eq)]
@@ -27,6 +48,7 @@ fn run_one(job: &TestJob, root: &Path, linker: &Path) -> (Outcome, String) {
         .arg(&job.script)
         .current_dir(root)
         .env("mold", linker)
+        .env("ARCH", job.arch)
         .output();
 
     let output = match output {
@@ -60,13 +82,20 @@ pub fn run(cases: &Path, linker: &Path) -> ExitCode {
         .collect();
     entries.sort();
 
+    let archs = test_archs();
     for path in entries {
         if path.extension().map_or(true, |e| e != "sh") {
             continue;
         }
         let name = path.file_stem().unwrap().to_string_lossy().into_owned();
         if patterns.is_empty() || patterns.iter().any(|p| name.contains(p.as_str())) {
-            jobs.push(TestJob { script: path, name });
+            for &arch in &archs {
+                jobs.push(TestJob {
+                    script: path.clone(),
+                    name: format!("{name} ({arch})"),
+                    arch,
+                });
+            }
         }
     }
 

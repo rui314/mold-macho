@@ -59,7 +59,7 @@ impl Default for Args {
             framework_paths: Vec::new(),
             inputs: Vec::new(),
             rpaths: Vec::new(),
-            adhoc_codesign: cfg!(target_arch = "aarch64"),
+            adhoc_codesign: true,
             dead_strip: false,
             dynamic: true,
             headerpad: 0x100,

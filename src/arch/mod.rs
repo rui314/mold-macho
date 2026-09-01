@@ -5,8 +5,10 @@
 //! crate of its own under targets/.
 
 mod arm64;
+mod x86_64;
 
 pub use arm64::Arm64;
+pub use x86_64::X86_64;
 
 use crate::context::Context;
 use crate::error::Diagnostics;

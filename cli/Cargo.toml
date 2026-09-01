@@ -17,6 +17,7 @@ harness = false
 [dependencies]
 mold-macho = { path = ".." }
 mold-macho-target-arm64 = { path = "../targets/arm64", optional = true }
+mold-macho-target-x86_64 = { path = "../targets/x86_64", optional = true }
 
 [dev-dependencies]
 mold-macho-tests = { path = "../tests" }
@@ -24,5 +25,6 @@ mold-macho-tests = { path = "../tests" }
 # One feature per target. All are built by default; a build for one
 # target alone (`--no-default-features --features arm64`) is much faster.
 [features]
-default = ["arm64"]
+default = ["arm64", "x86_64"]
 arm64 = ["dep:mold-macho-target-arm64"]
+x86_64 = ["dep:mold-macho-target-x86_64"]
