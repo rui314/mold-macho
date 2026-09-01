@@ -46,6 +46,10 @@ pub struct Args {
     pub dead_strip: bool,
     pub all_load: bool,
     pub load_objc: bool,
+    /// Symbols to treat as undefined from the start (-u), forcing
+    /// archive members that define them to be linked.
+    pub forced_undefined: Vec<String>,
+
     pub dynamic: bool,
     pub headerpad: u64,
     pub pagezero_size: u64,
@@ -71,6 +75,7 @@ impl Default for Args {
             dead_strip: false,
             all_load: false,
             load_objc: false,
+            forced_undefined: Vec::new(),
             dynamic: true,
             headerpad: 0x100,
             pagezero_size: 0x1_0000_0000,
@@ -177,6 +182,35 @@ pub fn parse_args(diag: &Diagnostics, cmdline: &[String]) -> Args {
 
             "-dead_strip" => args.dead_strip = true,
             "-all_load" => args.all_load = true,
+            "-u" => args
+                .forced_undefined
+                .push(next_arg(&mut i).to_string()),
+            "-adhoc_codesign" => args.adhoc_codesign = true,
+            "-no_adhoc_codesign" => args.adhoc_codesign = false,
+            "-dynamic" => args.dynamic = true,
+            "-headerpad" => {
+                let val = next_arg(&mut i);
+                match u64::from_str_radix(val.trim_start_matches("0x"), 16) {
+                    Ok(num) => args.headerpad = num,
+                    Err(_) => fatal!(diag, "malformed -headerpad: {val}"),
+                }
+            }
+
+            "-dead_strip" => args.dead_strip = true,
+            "-all_load" => args.all_load = true,
+            "-u" => args
+                .forced_undefined
+                .push(next_arg(&mut i).to_string()),
+            "-v" => {
+                let _ = std::io::Write::write_all(
+                    &mut std::io::stderr(),
+                    format!(
+                        "mold-macho {} (compatible with Apple ld64)\n",
+                        env!("CARGO_PKG_VERSION")
+                    )
+                    .as_bytes(),
+                );
+            }
             "-noall_load" => args.all_load = false,
             "-ObjC" => args.load_objc = true,
             "-force_load" => args

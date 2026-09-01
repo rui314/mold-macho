@@ -189,6 +189,15 @@ pub fn read_input_files<E: Arch>(ctx: &mut Context<E>) {
 /// member is needed anymore. A loaded member may itself use symbols that
 /// another member defines, so this iterates to a fixed point.
 pub fn resolve_archive_members<E: Arch>(ctx: &mut Context<E>) {
+    // -u symbols count as undefined references from the start.
+    let forced = std::mem::take(&mut ctx.args.forced_undefined);
+    for name in &forced {
+        let name: &'static str = String::leak(name.clone());
+        let id = ctx.symtab.intern(name);
+        ctx.symtab[id].is_used = true;
+    }
+    ctx.args.forced_undefined = forced;
+
     loop {
         let undefined: std::collections::HashSet<&str> = ctx
             .symtab
