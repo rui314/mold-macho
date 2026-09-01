@@ -106,16 +106,22 @@ fn find_library<E: Arch>(ctx: &Context<E>, name: &str) -> Option<PathBuf> {
     None
 }
 
-fn read_file<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile, force_load: bool) {
+fn read_file<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile, force_load: bool, weak: bool) {
     match get_file_type(mf) {
         FileType::Object => {
             input_files::parse_object(ctx, mf);
         }
         FileType::Tapi => {
-            input_files::parse_dylib(ctx, mf);
+            let idx = input_files::parse_dylib(ctx, mf);
+            if weak {
+                ctx.dylibs[idx].is_weak = true;
+            }
         }
         FileType::Dylib => {
-            input_files::parse_dylib_binary(ctx, mf);
+            let idx = input_files::parse_dylib_binary(ctx, mf);
+            if weak {
+                ctx.dylibs[idx].is_weak = true;
+            }
         }
         FileType::Archive => {
             // Archive members are normally loaded lazily: a member is
@@ -137,7 +143,7 @@ fn read_file<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile, force_load:
         }
         FileType::Fat => {
             let slice = input_files::get_fat_slice(ctx, mf);
-            read_file(ctx, slice, force_load);
+            read_file(ctx, slice, force_load, weak);
         }
         FileType::Empty => {}
         _ => fatal!(ctx, "{}: unknown file type", mf.name),
@@ -150,23 +156,27 @@ pub fn read_input_files<E: Arch>(ctx: &mut Context<E>) {
         match arg {
             InputArg::File(path) => {
                 let mf = MappedFile::must_open(&ctx.diag, Path::new(path));
-                read_file(ctx, mf, false);
+                read_file(ctx, mf, false, false);
             }
             InputArg::ForceLoad(path) => {
                 let mf = MappedFile::must_open(&ctx.diag, Path::new(path));
-                read_file(ctx, mf, true);
+                read_file(ctx, mf, true, false);
             }
-            InputArg::Lib(name) => match find_library(ctx, name) {
+            InputArg::WeakFile(path) => {
+                let mf = MappedFile::must_open(&ctx.diag, Path::new(path));
+                read_file(ctx, mf, false, true);
+            }
+            InputArg::Lib(name, weak) => match find_library(ctx, name) {
                 Some(path) => {
                     let mf = MappedFile::must_open(&ctx.diag, &path);
-                    read_file(ctx, mf, false);
+                    read_file(ctx, mf, false, *weak);
                 }
                 None => error!(ctx, "library not found: -l{name}"),
             },
-            InputArg::Framework(name) => match find_framework(ctx, name) {
+            InputArg::Framework(name, weak) => match find_framework(ctx, name) {
                 Some(path) => {
                     let mf = MappedFile::must_open(&ctx.diag, &path);
-                    read_file(ctx, mf, false);
+                    read_file(ctx, mf, false, *weak);
                 }
                 None => error!(ctx, "framework not found: {name}"),
             },

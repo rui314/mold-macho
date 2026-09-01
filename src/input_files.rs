@@ -52,6 +52,9 @@ pub struct DylibFile {
     pub compatibility_version: u32,
     /// The 1-based ordinal used to refer to this dylib in bind records.
     pub dylib_idx: i32,
+    /// True if loaded with LC_LOAD_WEAK_DYLIB: dyld tolerates the
+    /// library missing at load time.
+    pub is_weak: bool,
     pub exports: std::collections::HashSet<String>,
 }
 
@@ -144,6 +147,8 @@ pub fn parse_object<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile) -> u
     let mut subsecs: Vec<usize> = Vec::new();
 
     for (i, sect) in sect_hdrs.iter().enumerate() {
+        // __eh_frame is re-synthesized from parsed CIE/FDE records, and
+        // is not copied through.
         if is_discarded_section(sect)
             || (sect.segname() == "__TEXT" && sect.sectname() == "__eh_frame")
         {
@@ -1027,6 +1032,7 @@ pub fn parse_dylib_binary<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile
             current_version,
             compatibility_version,
             dylib_idx: idx as i32 + 1,
+            is_weak: false,
             exports,
         },
     )
@@ -1092,6 +1098,7 @@ pub fn parse_dylib<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile) -> us
             current_version: tbd.current_version,
             compatibility_version: encode_version(1, 0, 0),
             dylib_idx: idx as i32 + 1,
+            is_weak: false,
             exports,
         },
     )

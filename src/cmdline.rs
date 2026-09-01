@@ -12,13 +12,17 @@ use crate::macho::*;
 pub enum InputArg {
     /// A file path.
     File(String),
-    /// `-lfoo`: a library to search for in the library paths.
-    Lib(String),
+    /// `-lfoo`: a library to search for in the library paths. The flag
+    /// marks a weak library (`-weak-lfoo`).
+    Lib(String, bool),
     /// `-framework Foo`: a framework to search for in the framework
-    /// paths.
-    Framework(String),
+    /// paths. The flag marks a weak framework.
+    Framework(String, bool),
     /// `-force_load path`: an archive all of whose members are linked.
     ForceLoad(String),
+    /// `-weak_library path`: a dylib whose absence is tolerated at load
+    /// time.
+    WeakFile(String),
 }
 
 /// Parsed command line arguments.
@@ -122,11 +126,18 @@ pub fn parse_args(diag: &Diagnostics, cmdline: &[String]) -> Args {
             }
             "-syslibroot" => args.syslibroot.push(next_arg(&mut i).to_string()),
             "-L" => args.library_paths.push(next_arg(&mut i).to_string()),
-            "-l" => args.inputs.push(InputArg::Lib(next_arg(&mut i).to_string())),
+            "-l" => args
+                .inputs
+                .push(InputArg::Lib(next_arg(&mut i).to_string(), false)),
             "-framework" => args
                 .inputs
-                .push(InputArg::Framework(next_arg(&mut i).to_string())),
-            "-F" => args.framework_paths.push(next_arg(&mut i).to_string()),
+                .push(InputArg::Framework(next_arg(&mut i).to_string(), false)),
+            "-weak_framework" => args
+                .inputs
+                .push(InputArg::Framework(next_arg(&mut i).to_string(), true)),
+            "-weak_library" => args
+                .inputs
+                .push(InputArg::WeakFile(next_arg(&mut i).to_string())),
             "-dylib" => args.output_type = MH_DYLIB,
             "-bundle" => args.output_type = MH_BUNDLE,
             "-rpath" => args.rpaths.push(next_arg(&mut i).to_string()),
@@ -161,8 +172,10 @@ pub fn parse_args(diag: &Diagnostics, cmdline: &[String]) -> Args {
             }
 
             _ => {
-                if let Some(name) = opt.strip_prefix("-l") {
-                    args.inputs.push(InputArg::Lib(name.to_string()));
+                if let Some(name) = opt.strip_prefix("-weak-l") {
+                    args.inputs.push(InputArg::Lib(name.to_string(), true));
+                } else if let Some(name) = opt.strip_prefix("-l") {
+                    args.inputs.push(InputArg::Lib(name.to_string(), false));
                 } else if let Some(path) = opt.strip_prefix("-L") {
                     args.library_paths.push(path.to_string());
                 } else if let Some(path) = opt.strip_prefix("-F") {

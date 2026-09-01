@@ -345,7 +345,11 @@ fn create_source_version_cmd<E: Arch>(_ctx: &Context<E>) -> Vec<u8> {
 
 fn create_load_dylib_cmd(dylib: &crate::input_files::DylibFile) -> Vec<u8> {
     let cmd = DylibCommand {
-        cmd: LC_LOAD_DYLIB,
+        cmd: if dylib.is_weak {
+            LC_LOAD_WEAK_DYLIB
+        } else {
+            LC_LOAD_DYLIB
+        },
         cmdsize: 0,
         nameoff: size_of::<DylibCommand>() as u32,
         timestamp: 2,
