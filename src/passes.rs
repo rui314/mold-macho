@@ -1333,6 +1333,23 @@ pub fn copy_chunks<E: Arch>(ctx: &Context<E>, buf: &mut [u8]) {
 
     output_chunks::copy_mach_header(ctx, buf);
 
+    // The UUID identifies this build: a hash of the output contents,
+    // stamped as a version-4 UUID. Hash with the UUID zeroed, then
+    // rewrite the header; the code signature comes last and covers the
+    // final bytes.
+    let sig_start = output_chunks::find_chunk(ctx, |k| {
+        matches!(k, ChunkKind::CodeSignature)
+    })
+    .map_or(buf.len(), |idx| ctx.chunks[idx].hdr.fileoff as usize);
+
+    let mut hash = [0; 32];
+    crate::util::sha256(&buf[..sig_start], &mut hash);
+    let mut uuid: [u8; 16] = hash[..16].try_into().unwrap();
+    uuid[6] = (uuid[6] & 0x0f) | 0x40; // version 4
+    uuid[8] = (uuid[8] & 0x3f) | 0x80; // RFC 4122 variant
+    *ctx.uuid.lock().unwrap() = uuid;
+    output_chunks::copy_mach_header(ctx, buf);
+
     if ctx.args.adhoc_codesign {
         output_chunks::write_code_signature(ctx, buf);
     }

@@ -313,11 +313,11 @@ fn create_function_starts_cmd<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
     to_vec(&cmd)
 }
 
-fn create_uuid_cmd<E: Arch>(_ctx: &Context<E>) -> Vec<u8> {
+fn create_uuid_cmd<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
     let cmd = UuidCommand {
         cmd: LC_UUID,
         cmdsize: size_of::<UuidCommand>() as u32,
-        uuid: [0; 16],
+        uuid: *ctx.uuid.lock().unwrap(),
     };
     to_vec(&cmd)
 }

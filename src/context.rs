@@ -60,6 +60,8 @@ pub struct Context<E: Arch> {
     /// Deduplication map for literal elements: (section type, contents)
     /// to the surviving subsection.
     pub literals: std::collections::HashMap<(u32, &'static [u8]), usize>,
+    /// The output's UUID, computed from its contents.
+    pub uuid: std::sync::Mutex<[u8; 16]>,
     /// The resolved address of the entry point symbol.
     pub entry_addr: u64,
     /// Total size of the output file.
@@ -101,6 +103,7 @@ impl<E: Arch> Context<E> {
             function_starts_data: Vec::new(),
             tls_begin: 0,
             literals: std::collections::HashMap::new(),
+            uuid: std::sync::Mutex::new([0; 16]),
             entry_addr: 0,
             output_size: 0,
             _marker: PhantomData,
