@@ -185,7 +185,13 @@ impl Arch for Arm64 {
                     let imported = ctx
                         .reloc_target_sym(obj, r)
                         .is_some_and(|id| ctx.symtab[id].is_imported);
-                    if !imported {
+                    if imported {
+                        // The slot is filled by dyld.
+                    } else if ctx.reloc_target_is_tls(obj, r) {
+                        // __thread_vars holds thread-pointer-relative
+                        // offsets into the TLS initialization image.
+                        write64(loc, s.wrapping_add_signed(a) - ctx.tls_begin);
+                    } else {
                         write64(loc, s.wrapping_add_signed(a));
                     }
                 }
@@ -211,6 +217,15 @@ impl Arch for Arm64 {
                         error!(ctx, "branch target out of range: {val:x}");
                     }
                     write32(loc, read32(loc) | bits(val as u64, 27, 2) as u32);
+                }
+                ARM64_RELOC_TLVP_LOAD_PAGE21 => {
+                    let t = ctx.sym_tlv_ptr_addr(ctx.reloc_target_sym(obj, r).unwrap());
+                    let val = read32(loc) | page_offset(t.wrapping_add_signed(a), p);
+                    write32(loc, val);
+                }
+                ARM64_RELOC_TLVP_LOAD_PAGEOFF12 => {
+                    let t = ctx.sym_tlv_ptr_addr(ctx.reloc_target_sym(obj, r).unwrap());
+                    write_add_ldst(loc, t.wrapping_add_signed(a));
                 }
                 ARM64_RELOC_PAGE21 => {
                     let val = read32(loc) | page_offset(s.wrapping_add_signed(a), p);

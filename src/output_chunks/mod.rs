@@ -40,6 +40,9 @@ pub enum ChunkKind {
     /// The global offset table: pointers to symbols, bound by dyld for
     /// imported ones.
     Got,
+    /// Pointers to thread-local variable descriptors: what a
+    /// TLVP-relocated instruction sequence loads from.
+    ThreadPtrs,
     /// The __TEXT,__unwind_info section, generated from the objects'
     /// compact unwind records.
     UnwindInfo,
@@ -81,6 +84,7 @@ impl Chunk {
                     ChunkKind::Output { .. }
                         | ChunkKind::Stubs
                         | ChunkKind::Got
+                        | ChunkKind::ThreadPtrs
                         | ChunkKind::UnwindInfo
                 ),
             },
@@ -89,7 +93,10 @@ impl Chunk {
     }
 
     pub fn is_zerofill(&self) -> bool {
-        self.hdr.flags & SECTION_TYPE == S_ZEROFILL
+        matches!(
+            self.hdr.flags & SECTION_TYPE,
+            S_ZEROFILL | S_THREAD_LOCAL_ZEROFILL
+        )
     }
 }
 
@@ -399,6 +406,15 @@ pub fn copy_mach_header<E: Arch>(ctx: &Context<E>, buf: &mut [u8]) {
         flags: MH_NOUNDEFS | MH_DYLDLINK | MH_TWOLEVEL | MH_PIE,
         reserved: 0,
     };
+
+    let mut hdr = hdr;
+    if ctx
+        .chunks
+        .iter()
+        .any(|c| c.hdr.flags & SECTION_TYPE == S_THREAD_LOCAL_VARIABLES)
+    {
+        hdr.flags |= MH_HAS_TLV_DESCRIPTORS;
+    }
     hdr.write_to(buf);
 
     let mut off = size_of::<MachHeader>();

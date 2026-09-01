@@ -222,7 +222,10 @@ pub fn scan_relocs<E: Arch>(ctx: &mut Context<E>) {
             }
             RelocClass::Got => add_got(ctx, id),
             RelocClass::Tlv => {
-                fatal!(ctx, "not implemented: thread-local variables");
+                if ctx.symtab[id].is_imported {
+                    fatal!(ctx, "not implemented: thread-locals imported from a dylib");
+                }
+                add_thread_ptr(ctx, id);
             }
             _ => {}
         }
@@ -239,6 +242,13 @@ pub fn scan_unwind_personalities<E: Arch>(ctx: &mut Context<E>) {
         .collect();
     for id in personalities {
         add_got(ctx, id);
+    }
+}
+
+fn add_thread_ptr<E: Arch>(ctx: &mut Context<E>, id: crate::symbol::SymbolId) {
+    if ctx.symtab[id].tlv_idx.is_none() {
+        ctx.symtab[id].tlv_idx = Some(ctx.thread_ptr_syms.len() as u32);
+        ctx.thread_ptr_syms.push(id);
     }
 }
 
@@ -273,6 +283,15 @@ fn output_section_rank(segname: &str, sectname: &str) -> u32 {
     match (segname, sectname) {
         ("__TEXT", "__text") => 0,
         ("__TEXT", _) => 1,
+        // The thread-local initialization image must be contiguous:
+        // __thread_data last among file-backed __DATA sections, and
+        // __thread_bss first among zero-fill ones (zero-fill sections
+        // sort after all file-backed ones).
+        ("__DATA", "__thread_vars") => 8,
+        ("__DATA", "__thread_data") => 9,
+        ("__DATA", "__thread_bss") => 0,
+        ("__DATA", "__bss") => 3,
+        ("__DATA", "__common") => 4,
         _ => 2,
     }
 }
@@ -310,6 +329,11 @@ pub fn create_output_chunks<E: Arch>(ctx: &mut Context<E>) {
 
         let chunk = &mut ctx.chunks[chunk_idx];
         chunk.hdr.p2align = chunk.hdr.p2align.max(ctx.isecs[i].hdr.p2align);
+        // __thread_vars contains pointers but clang emits it with an
+        // alignment of 1, so override.
+        if chunk.hdr.flags & SECTION_TYPE == S_THREAD_LOCAL_VARIABLES {
+            chunk.hdr.p2align = chunk.hdr.p2align.max(3);
+        }
         chunk.hdr.flags |= ctx.isecs[i].hdr.flags & !SECTION_TYPE & !S_ATTR_DEBUG;
         let ChunkKind::Output { isecs } = &mut chunk.kind else {
             unreachable!()
@@ -350,6 +374,14 @@ pub fn create_output_chunks<E: Arch>(ctx: &mut Context<E>) {
         // GOT's.
         chunk.hdr.reserved1 = ctx.stub_syms.len() as u32;
         chunk.hdr.size = ctx.got_syms.len() as u64 * 8;
+        ctx.chunks.push(chunk);
+    }
+
+    if !ctx.thread_ptr_syms.is_empty() {
+        let mut chunk = Chunk::new("__DATA", "__thread_ptrs", ChunkKind::ThreadPtrs);
+        chunk.hdr.flags = S_THREAD_LOCAL_VARIABLE_POINTERS;
+        chunk.hdr.p2align = 3;
+        chunk.hdr.size = ctx.thread_ptr_syms.len() as u64 * 8;
         ctx.chunks.push(chunk);
     }
 
@@ -629,6 +661,21 @@ pub fn assign_offsets<E: Arch>(ctx: &mut Context<E>) {
     }
 
     ctx.output_size = fileoff;
+
+    // Thread pointers are relative to the start of the first
+    // thread-local data section.
+    ctx.tls_begin = ctx
+        .chunks
+        .iter()
+        .filter(|c| {
+            matches!(
+                c.hdr.flags & SECTION_TYPE,
+                S_THREAD_LOCAL_REGULAR | S_THREAD_LOCAL_ZEROFILL
+            )
+        })
+        .map(|c| c.hdr.addr)
+        .min()
+        .unwrap_or(0);
 }
 
 /// Returns the load-command index of the segment containing `addr`, and
@@ -662,11 +709,24 @@ fn build_rebase_info<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
             {
                 continue;
             }
+            // Pointers to thread-local data are thread-pointer-relative
+            // offsets, not addresses, so they are not rebased.
             let imported = ctx
                 .reloc_target_sym(isec.obj, rel)
                 .is_some_and(|id| ctx.symtab[id].is_imported);
-            if !imported {
+            if !imported && !ctx.reloc_target_is_tls(isec.obj, rel) {
                 locs.push(base + rel.offset as u64);
+            }
+        }
+    }
+
+    // __thread_ptrs slots hold descriptor addresses, which need
+    // sliding.
+    if let Some(idx) = output_chunks::find_chunk(ctx, |k| matches!(k, ChunkKind::ThreadPtrs)) {
+        let addr = ctx.chunks[idx].hdr.addr;
+        for (i, &id) in ctx.thread_ptr_syms.iter().enumerate() {
+            if !ctx.symtab[id].is_imported {
+                locs.push(addr + i as u64 * 8);
             }
         }
     }
@@ -815,6 +875,14 @@ pub fn copy_chunks<E: Arch>(ctx: &Context<E>, buf: &mut [u8]) {
                 // Slots for imported symbols stay zero; dyld fills them
                 // via the bind stream.
                 for (i, &id) in ctx.got_syms.iter().enumerate() {
+                    if !ctx.symtab[id].is_imported {
+                        let off = chunk.hdr.fileoff as usize + i * 8;
+                        buf[off..off + 8].copy_from_slice(&ctx.sym_addr(id).to_le_bytes());
+                    }
+                }
+            }
+            ChunkKind::ThreadPtrs => {
+                for (i, &id) in ctx.thread_ptr_syms.iter().enumerate() {
                     if !ctx.symtab[id].is_imported {
                         let off = chunk.hdr.fileoff as usize + i * 8;
                         buf[off..off + 8].copy_from_slice(&ctx.sym_addr(id).to_le_bytes());

@@ -45,6 +45,8 @@ pub struct Symbol {
     /// The symbol's entry in __got, if it is address-taken through the
     /// GOT.
     pub got_idx: Option<u32>,
+    /// The symbol's slot in __thread_ptrs, for thread-local variables.
+    pub tlv_idx: Option<u32>,
 }
 
 impl Symbol {
@@ -62,6 +64,7 @@ impl Symbol {
             common_p2align: 0,
             stub_idx: None,
             got_idx: None,
+            tlv_idx: None,
         }
     }
 

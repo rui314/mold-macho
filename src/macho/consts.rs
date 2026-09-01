@@ -77,6 +77,7 @@ pub const S_16BYTE_LITERALS: u32 = 0xe;
 pub const S_THREAD_LOCAL_REGULAR: u32 = 0x11;
 pub const S_THREAD_LOCAL_ZEROFILL: u32 = 0x12;
 pub const S_THREAD_LOCAL_VARIABLES: u32 = 0x13;
+pub const S_THREAD_LOCAL_VARIABLE_POINTERS: u32 = 0x14;
 pub const S_INIT_FUNC_OFFSETS: u32 = 0x16;
 
 // Section attributes

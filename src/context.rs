@@ -9,6 +9,7 @@ use crate::cmdline::Args;
 use crate::error;
 use crate::error::{Diagnostics, HasDiagnostics};
 use crate::input_files::{DylibFile, ObjectFile};
+use crate::macho::{S_THREAD_LOCAL_REGULAR, S_THREAD_LOCAL_ZEROFILL};
 use crate::input_sections::{InputSection, InputSectionId, Reloc, RelocTarget};
 use crate::output_chunks::{find_chunk, Chunk, ChunkKind, OutputSegment, SymtabData};
 use crate::symbol::{Origin, SymbolId, SymbolTable};
@@ -33,10 +34,15 @@ pub struct Context<E: Arch> {
     pub stub_syms: Vec<SymbolId>,
     /// Symbols with a __got slot, in slot order.
     pub got_syms: Vec<SymbolId>,
+    /// Thread-local symbols with a __thread_ptrs slot, in slot order.
+    pub thread_ptr_syms: Vec<SymbolId>,
     /// The rebase opcode stream for LC_DYLD_INFO, built during layout.
     pub rebase_data: Vec<u8>,
     /// The bind opcode stream for LC_DYLD_INFO, built during layout.
     pub bind_data: Vec<u8>,
+    /// The address of the first thread-local data section. Thread
+    /// pointers are encoded relative to it.
+    pub tls_begin: u64,
     /// The resolved address of the entry point symbol.
     pub entry_addr: u64,
     /// Total size of the output file.
@@ -66,8 +72,10 @@ impl<E: Arch> Context<E> {
             symtab_data: SymtabData::default(),
             stub_syms: Vec::new(),
             got_syms: Vec::new(),
+            thread_ptr_syms: Vec::new(),
             rebase_data: Vec::new(),
             bind_data: Vec::new(),
+            tls_begin: 0,
             entry_addr: 0,
             output_size: 0,
             _marker: PhantomData,
@@ -114,12 +122,36 @@ impl<E: Arch> Context<E> {
         self.chunks[idx].hdr.addr + self.symtab[id].got_idx.unwrap() as u64 * 8
     }
 
+    /// Returns the address of a symbol's __thread_ptrs slot.
+    pub fn sym_tlv_ptr_addr(&self, id: SymbolId) -> u64 {
+        let idx = find_chunk(self, |k| matches!(k, ChunkKind::ThreadPtrs)).unwrap();
+        self.chunks[idx].hdr.addr + self.symtab[id].tlv_idx.unwrap() as u64 * 8
+    }
+
     /// Returns the symbol a relocation refers to, if it refers to one.
     pub fn reloc_target_sym(&self, obj: usize, rel: &Reloc) -> Option<SymbolId> {
         match rel.target {
             RelocTarget::Sym(idx) => Some(self.objs[obj].syms[idx]),
             RelocTarget::Section(_) => None,
         }
+    }
+
+    /// Returns the input section a relocation's target lives in, if any.
+    pub fn reloc_target_isec(&self, obj: usize, rel: &Reloc) -> Option<InputSectionId> {
+        match rel.target {
+            RelocTarget::Sym(idx) => self.symtab[self.objs[obj].syms[idx]].isec,
+            RelocTarget::Section(idx) => self.objs[obj].sections[idx],
+        }
+    }
+
+    /// Returns true if a relocation's target is thread-local data.
+    pub fn reloc_target_is_tls(&self, obj: usize, rel: &Reloc) -> bool {
+        self.reloc_target_isec(obj, rel).is_some_and(|isec| {
+            matches!(
+                self.isecs[isec].hdr.section_type(),
+                S_THREAD_LOCAL_REGULAR | S_THREAD_LOCAL_ZEROFILL
+            )
+        })
     }
 
     /// Resolves a relocation target to its output address.
