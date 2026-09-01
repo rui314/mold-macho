@@ -185,7 +185,7 @@ impl Arch for X86_64 {
             // the target itself. The opcode sits before the fixup, so
             // it is rewritten before the slice below is taken.
             let mut relaxed_got_load = false;
-            if r.r_type == X86_64_RELOC_GOT_LOAD
+            if matches!(r.r_type, X86_64_RELOC_GOT_LOAD | X86_64_RELOC_TLV)
                 && r.offset >= 2
                 && buf[r.offset as usize - 2] == 0x8b
                 && ctx
@@ -250,6 +250,14 @@ impl Arch for X86_64 {
                     debug_assert!(r.size == 4);
                     let g = ctx.sym_got_addr(ctx.reloc_target_sym(obj, r).unwrap());
                     let val = g.wrapping_add_signed(a).wrapping_sub(p + 4);
+                    write32(loc, val as u32);
+                }
+                // A local thread-local's TLV load relaxes just like a
+                // GOT load: the movq of the __thread_ptrs slot becomes
+                // a leaq of the __thread_vars descriptor itself.
+                X86_64_RELOC_TLV if relaxed_got_load => {
+                    debug_assert!(r.size == 4);
+                    let val = s.wrapping_add_signed(a).wrapping_sub(p + 4);
                     write32(loc, val as u32);
                 }
                 X86_64_RELOC_TLV => {

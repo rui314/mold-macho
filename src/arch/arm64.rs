@@ -297,14 +297,33 @@ impl Arch for Arm64 {
                     }
                     write32(loc, read32(loc) | bits(val as u64, 27, 2) as u32);
                 }
+                // A local thread-local's TLV load relaxes like a GOT
+                // load: the adrp retargets to the __thread_vars
+                // descriptor's page and the ldr becomes an add.
                 ARM64_RELOC_TLVP_LOAD_PAGE21 => {
-                    let t = ctx.sym_tlv_ptr_addr(ctx.reloc_target_sym(obj, r).unwrap());
-                    let val = read32(loc) | page_offset(t.wrapping_add_signed(a), p);
+                    let id = ctx.reloc_target_sym(obj, r).unwrap();
+                    let target = if ctx.symtab[id].is_imported {
+                        ctx.sym_tlv_ptr_addr(id)
+                    } else {
+                        s
+                    };
+                    let val = read32(loc) | page_offset(target.wrapping_add_signed(a), p);
                     write32(loc, val);
                 }
                 ARM64_RELOC_TLVP_LOAD_PAGEOFF12 => {
-                    let t = ctx.sym_tlv_ptr_addr(ctx.reloc_target_sym(obj, r).unwrap());
-                    write_add_ldst(loc, t.wrapping_add_signed(a));
+                    let id = ctx.reloc_target_sym(obj, r).unwrap();
+                    if ctx.symtab[id].is_imported {
+                        let t = ctx.sym_tlv_ptr_addr(id);
+                        write_add_ldst(loc, t.wrapping_add_signed(a));
+                    } else {
+                        let insn = read32(loc);
+                        if insn & 0xffc0_0000 != 0xf940_0000 {
+                            fatal!(ctx, "unexpected instruction under TLVP_LOAD_PAGEOFF12");
+                        }
+                        let target = s.wrapping_add_signed(a);
+                        let add = 0x9100_0000 | (insn & 0x3ff) | ((target as u32 & 0xfff) << 10);
+                        write32(loc, add);
+                    }
                 }
                 ARM64_RELOC_PAGE21 => {
                     let val = read32(loc) | page_offset(s.wrapping_add_signed(a), p);

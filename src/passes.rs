@@ -1442,7 +1442,10 @@ pub fn scan_relocs<E: Arch>(ctx: &mut Context<E>) {
             }
             RelocClass::Got => add_got(ctx, id),
             RelocClass::GotLoad if sym.is_imported => add_got(ctx, id),
-            RelocClass::Tlv => add_thread_ptr(ctx, id),
+            // A TLV load of a local thread-local relaxes to the
+            // descriptor's address; only imported ones need a
+            // __thread_ptrs slot for dyld to fill.
+            RelocClass::Tlv if sym.is_imported => add_thread_ptr(ctx, id),
             _ => {}
         }
     }
