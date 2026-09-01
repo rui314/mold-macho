@@ -112,6 +112,9 @@ pub fn link<E: Arch>(cmdline: &[String], diag: &Diagnostics) -> Result<i32, Stri
     if ctx.args.dead_strip {
         passes::dead_strip(&mut ctx);
     }
+    if ctx.args.deduplicate {
+        crate::icf::fold_identical_code(&mut ctx);
+    }
     passes::scan_relocs(&mut ctx);
     passes::scan_unwind_personalities(&mut ctx);
     passes::scan_objc_stubs(&mut ctx);

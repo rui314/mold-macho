@@ -6,6 +6,7 @@ pub mod context;
 pub mod driver;
 pub mod error;
 pub mod filetype;
+pub mod icf;
 pub mod input_files;
 pub mod input_sections;
 pub mod lto;

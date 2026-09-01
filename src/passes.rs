@@ -1433,6 +1433,11 @@ pub fn create_output_chunks<E: Arch>(ctx: &mut Context<E>) {
     // Lay out the surviving DWARF records: live CIEs first, then FDEs.
     // Their offsets are needed before layout, because the __unwind_info
     // encoding embeds each FDE's offset.
+    // FDEs of folded copies duplicate their leader's; drop them.
+    {
+        let isecs = &ctx.isecs;
+        ctx.fdes.retain(|fde| isecs[fde.isec].replacement.is_none());
+    }
     if !ctx.fdes.is_empty() {
         for fde in &ctx.fdes {
             ctx.cies[fde.cie].is_alive = true;

@@ -72,6 +72,9 @@ pub struct Args {
     pub sectcreate: Vec<(String, String, String)>,
     /// -x: strip non-global symbols from the output symbol table.
     pub strip_locals: bool,
+    /// Fold identical functions (on by default; -no_deduplicate turns
+    /// it off).
+    pub deduplicate: bool,
     /// -w: suppress warnings.
     pub suppress_warnings: bool,
     /// -undefined dynamic_lookup: leave unresolved symbols to be looked
@@ -124,6 +127,7 @@ impl Default for Args {
             stack_size: 0,
             sectcreate: Vec::new(),
             strip_locals: false,
+            deduplicate: true,
             suppress_warnings: false,
             undefined_dynamic_lookup: false,
             dead_strip_dylibs: false,
@@ -372,9 +376,11 @@ pub fn parse_args(diag: &Diagnostics, cmdline: &[String]) -> Args {
                 args.headerpad = args.headerpad.max(1024);
             }
 
+            "-no_deduplicate" => args.deduplicate = false,
+
             // Ignored options. ld64 takes -O<n> as a linker
             // optimization level hint.
-            "-demangle" | "-no_deduplicate" | "-no_uuid" | "-O0" | "-O1" | "-O2" | "-O3" => {}
+            "-demangle" | "-no_uuid" | "-O0" | "-O1" | "-O2" | "-O3" => {}
 
             "-lto_library" => args.lto_library = Some(next_arg(&mut i).to_string()),
 
