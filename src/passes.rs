@@ -2779,32 +2779,59 @@ fn order_file_ranks<E: Arch>(ctx: &Context<E>) -> Option<Vec<u64>> {
     if ctx.args.order_files.is_empty() {
         return None;
     }
-    let mut rank_of: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+
+    // A line is [arch:][object-file:]symbol. An arch qualifier gates
+    // the whole line; an object qualifier narrows the match to
+    // symbols from that file (compared by leaf name, as ld64 does).
+    const ARCHS: [&str; 6] = ["arm64", "arm64e", "x86_64", "i386", "armv7", "ppc"];
+    let mut rank_of: std::collections::HashMap<String, Vec<(Option<String>, u64)>> =
+        std::collections::HashMap::new();
     let mut next = 0u64;
     for path in &ctx.args.order_files {
         let Ok(text) = std::fs::read_to_string(path) else {
             fatal!(ctx, "-order_file: cannot read {path}");
         };
         for line in text.lines() {
-            let line = line.split('#').next().unwrap_or("").trim();
+            let mut line = line.split('#').next().unwrap_or("").trim();
             if line.is_empty() {
                 continue;
             }
-            let name = line.rsplit(':').next().unwrap_or(line).trim();
-            rank_of.entry(name.to_string()).or_insert(next);
+            if let Some((first, rest)) = line.split_once(':') {
+                if ARCHS.contains(&first.trim()) {
+                    if first.trim() != E::NAME {
+                        continue;
+                    }
+                    line = rest.trim();
+                }
+            }
+            let (file, name) = match line.split_once(':') {
+                Some((file, name)) => (Some(file.trim().to_string()), name.trim()),
+                None => (None, line),
+            };
+            rank_of.entry(name.to_string()).or_default().push((file, next));
             next += 1;
         }
     }
 
     let mut ranks = vec![u64::MAX; ctx.isecs.len()];
     for sym in &ctx.symtab.syms {
-        if !matches!(sym.origin, Origin::Obj(_)) {
+        let Origin::Obj(obj) = sym.origin else {
             continue;
-        }
+        };
         let Some(isec) = sym.isec else { continue };
-        if let Some(&r) = rank_of.get(sym.name) {
-            let isec = ctx.resolve_isec(isec);
-            ranks[isec] = ranks[isec].min(r);
+        let Some(entries) = rank_of.get(sym.name) else {
+            continue;
+        };
+        let leaf = ctx.objs[obj].mf.name.rsplit('/').next().unwrap_or("");
+        for (file, r) in entries {
+            let applies = match file {
+                Some(f) => leaf == f || ctx.objs[obj].mf.name.ends_with(f),
+                None => true,
+            };
+            if applies {
+                let isec = ctx.resolve_isec(isec);
+                ranks[isec] = ranks[isec].min(*r);
+            }
         }
     }
     Some(ranks)
