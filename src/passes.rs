@@ -1679,6 +1679,9 @@ pub fn create_output_chunks<E: Arch>(ctx: &mut Context<E>) {
     ctx.chunks.push(Chunk::new("__LINKEDIT", "", ChunkKind::BindInfo));
     ctx.chunks.push(Chunk::new("__LINKEDIT", "", ChunkKind::ExportTrie));
     ctx.chunks.push(Chunk::new("__LINKEDIT", "", ChunkKind::FunctionStarts));
+    if ctx.args.data_in_code_info {
+        ctx.chunks.push(Chunk::new("__LINKEDIT", "", ChunkKind::DataInCode));
+    }
     ctx.chunks.push(Chunk::new("__LINKEDIT", "", ChunkKind::Symtab));
     if !ctx.stub_syms.is_empty() || !ctx.got_syms.is_empty() {
         let mut chunk = Chunk::new("__LINKEDIT", "", ChunkKind::IndirectSymtab);
@@ -2082,6 +2085,7 @@ pub fn assign_offsets<E: Arch>(ctx: &mut Context<E>) {
                 ChunkKind::BindInfo => ctx.bind_data.len() as u64,
                 ChunkKind::ExportTrie => output_chunks::encode_export_trie(ctx).len() as u64,
                 ChunkKind::FunctionStarts => ctx.function_starts_data.len() as u64,
+                ChunkKind::DataInCode => (dice_entries(ctx).len() * 8) as u64,
                 ChunkKind::CodeSignature => {
                     cursor = align_to(cursor, 16);
                     code_signature_size(&ctx.args.output, cursor)
@@ -2092,7 +2096,7 @@ pub fn assign_offsets<E: Arch>(ctx: &mut Context<E>) {
             let p2align = match chunk.kind {
                 ChunkKind::Symtab | ChunkKind::Strtab | ChunkKind::RebaseInfo
                 | ChunkKind::BindInfo | ChunkKind::ChainedFixups | ChunkKind::ExportTrie
-                | ChunkKind::FunctionStarts => 3,
+                | ChunkKind::FunctionStarts | ChunkKind::DataInCode => 3,
                 ChunkKind::IndirectSymtab => 2,
                 ChunkKind::CodeSignature => 4,
                 _ => chunk.hdr.p2align,
@@ -2636,6 +2640,32 @@ fn write_fixup_chains<E: Arch>(ctx: &Context<E>, buf: &mut [u8]) {
 /// functions in __TEXT,__text, ULEB128 delta-encoded starting from the
 /// image base. Debuggers and crash reporters use it to attribute
 /// addresses to functions even for stripped binaries.
+/// Live data-in-code entries as (subsection, offset within it,
+/// length, kind). In an object, an entry's offset is an address in
+/// the object's own address space (sections there are laid out from
+/// zero), which find_subsec maps to the owning subsection - entries
+/// whose subsection was dead-stripped vanish with it.
+fn dice_entries<E: Arch>(ctx: &Context<E>) -> Vec<(usize, u64, u16, u16)> {
+    let mut out = Vec::new();
+    for obj in &ctx.objs {
+        if !obj.is_alive {
+            continue;
+        }
+        for &(off, len, kind) in &obj.dice {
+            let Some((isec, off_in)) =
+                crate::input_files::find_subsec(&ctx.isecs, &obj.subsecs, off as u64)
+            else {
+                continue;
+            };
+            let isec = ctx.resolve_isec(isec);
+            if ctx.isecs[isec].is_alive {
+                out.push((isec, off_in, len, kind));
+            }
+        }
+    }
+    out
+}
+
 fn build_function_starts<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
     if !ctx.args.function_starts {
         return Vec::new();
@@ -2764,6 +2794,25 @@ fn copy_chunk<E: Arch>(ctx: &Context<E>, chunk: &Chunk, buf: &mut [u8]) {
         }
         ChunkKind::FunctionStarts => {
             buf[..ctx.function_starts_data.len()].copy_from_slice(&ctx.function_starts_data);
+        }
+        ChunkKind::DataInCode => {
+            let mut entries: Vec<(u32, u16, u16)> = dice_entries(ctx)
+                .into_iter()
+                .map(|(isec, off, len, kind)| {
+                    let isec = &ctx.isecs[isec];
+                    let fileoff =
+                        ctx.chunks[isec.osec].hdr.fileoff + isec.output_offset + off;
+                    (fileoff as u32, len, kind)
+                })
+                .collect();
+            entries.sort_unstable();
+            let mut p = 0;
+            for (off, len, kind) in entries {
+                buf[p..p + 4].copy_from_slice(&off.to_le_bytes());
+                buf[p + 4..p + 6].copy_from_slice(&len.to_le_bytes());
+                buf[p + 6..p + 8].copy_from_slice(&kind.to_le_bytes());
+                p += 8;
+            }
         }
         ChunkKind::IndirectSymtab => {
             let mut off = 0;

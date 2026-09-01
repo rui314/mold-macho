@@ -41,6 +41,9 @@ pub struct ObjectFile {
     pub nlists: Vec<NList>,
     /// The symbol slot for each nlist entry.
     pub syms: Vec<SymbolId>,
+    /// LC_DATA_IN_CODE entries: (file offset in the object, length,
+    /// kind).
+    pub dice: Vec<(u32, u16, u16)>,
 }
 
 /// Finds the subsection containing `addr` among `subsecs` (sorted by
@@ -116,6 +119,9 @@ pub struct StagedObject {
     pub fdes: Vec<Fde>,
     pub objc_image_info: Option<u32>,
     pub has_debug_info: bool,
+    /// LC_DATA_IN_CODE entries: (file offset in the object, length,
+    /// kind).
+    pub dice: Vec<(u32, u16, u16)>,
 }
 
 /// Parses one object file without touching any linker state.
@@ -142,6 +148,7 @@ pub fn stage_object<E: Arch>(
     let mut sect_hdrs = Vec::new();
     let mut symtab_cmd = None;
     let mut linker_options = Vec::new();
+    let mut dice = Vec::new();
 
     // Read load commands
     let mut off = size_of::<MachHeader>();
@@ -170,6 +177,17 @@ pub fn stage_object<E: Arch>(
                     p += len + 1;
                 }
                 linker_options.push(strs);
+            }
+            LC_DATA_IN_CODE => {
+                let cmd = LinkEditDataCommand::read_from(&data[off..]);
+                for i in 0..cmd.datasize as usize / 8 {
+                    let p = cmd.dataoff as usize + i * 8;
+                    dice.push((
+                        u32::from_le_bytes(data[p..p + 4].try_into().unwrap()),
+                        u16::from_le_bytes(data[p + 4..p + 6].try_into().unwrap()),
+                        u16::from_le_bytes(data[p + 6..p + 8].try_into().unwrap()),
+                    ));
+                }
             }
             _ => {}
         }
@@ -373,6 +391,7 @@ pub fn stage_object<E: Arch>(
         sym_names,
         unwind,
         cies,
+        dice,
         fdes,
         objc_image_info,
         has_debug_info,
@@ -451,6 +470,7 @@ pub fn integrate_object<E: Arch>(ctx: &mut Context<E>, staged: StagedObject) -> 
         nlists: staged.nlists,
         syms,
         lto_module: None,
+        dice: staged.dice,
     });
     obj_idx
 }
@@ -520,6 +540,7 @@ pub fn parse_bitcode<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile, ali
         nlists,
         syms,
         lto_module: Some(module),
+        dice: Vec::new(),
     });
     ctx.lto_modules.push((obj_idx, module));
     obj_idx

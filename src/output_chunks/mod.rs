@@ -89,6 +89,10 @@ pub enum ChunkKind {
     /// LC_FUNCTION_STARTS data in __LINKEDIT: delta-encoded function
     /// addresses, used by debuggers and crash reporters.
     FunctionStarts,
+    /// LC_DATA_IN_CODE: ranges inside __text that hold data (jump
+    /// tables, inline constants), so disassemblers and the signature
+    /// verifier can treat them as bytes.
+    DataInCode,
     /// The indirect symbol table in __LINKEDIT.
     IndirectSymtab,
     /// The symbol table in __LINKEDIT.
@@ -504,6 +508,18 @@ pub fn create_load_commands<E: Arch>(ctx: &Context<E>) -> Vec<Vec<u8>> {
         if ctx.chunks[idx].hdr.size > 0 {
             vec.push(create_function_starts_cmd(ctx));
         }
+    }
+
+    // ld64 always writes LC_DATA_IN_CODE, even with no entries;
+    // tooling takes its absence as "old linker".
+    if let Some(idx) = find_chunk(ctx, |k| matches!(k, ChunkKind::DataInCode)) {
+        let chunk = &ctx.chunks[idx];
+        vec.push(to_vec(&LinkEditDataCommand {
+            cmd: LC_DATA_IN_CODE,
+            cmdsize: size_of::<LinkEditDataCommand>() as u32,
+            dataoff: chunk.hdr.fileoff as u32,
+            datasize: chunk.hdr.size as u32,
+        }));
     }
 
     for dylib in &ctx.dylibs {

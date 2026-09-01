@@ -101,6 +101,8 @@ pub struct Args {
     pub deduplicate: bool,
     /// Emit LC_FUNCTION_STARTS (on by default).
     pub function_starts: bool,
+    /// Emit LC_DATA_IN_CODE (on by default).
+    pub data_in_code_info: bool,
     /// -init_offsets: emit initializers as 32-bit image offsets
     /// (__init_offsets) instead of absolute pointers (__mod_init_func).
     pub init_offsets: bool,
@@ -186,6 +188,7 @@ impl Default for Args {
             strip_locals: false,
             deduplicate: true,
             function_starts: true,
+            data_in_code_info: true,
             init_offsets: false,
             uuid: true,
             suppress_warnings: false,
@@ -477,6 +480,8 @@ pub fn parse_args(diag: &Diagnostics, cmdline: &[String]) -> Args {
             "-function_starts" => args.function_starts = true,
             "-init_offsets" => args.init_offsets = true,
             "-no_function_starts" => args.function_starts = false,
+            "-data_in_code_info" => args.data_in_code_info = true,
+            "-no_data_in_code_info" => args.data_in_code_info = false,
 
             "-no_uuid" => args.uuid = false,
 
