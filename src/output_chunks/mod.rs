@@ -356,13 +356,21 @@ fn create_uuid_cmd<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
 fn create_build_version_cmd<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
     let cmd = BuildVersionCommand {
         cmd: LC_BUILD_VERSION,
-        cmdsize: size_of::<BuildVersionCommand>() as u32,
+        cmdsize: (size_of::<BuildVersionCommand>() + 8) as u32,
         platform: ctx.args.platform,
         minos: ctx.args.platform_minos,
         sdk: ctx.args.platform_sdk,
-        ntools: 0,
+        ntools: 1,
     };
-    to_vec(&cmd)
+    let mut buf = to_vec(&cmd);
+    // A build_tool_version entry stamping which linker made the
+    // image: {u32 tool, u32 version}. Apple's tools are 1..3
+    // (clang/swift/ld); this linker identifies itself with sold's
+    // number, 54321, so "otool -l | grep 'tool 54321'" spots our
+    // output.
+    buf.extend_from_slice(&54321u32.to_le_bytes());
+    buf.extend_from_slice(&1u32.to_le_bytes());
+    buf
 }
 
 fn create_source_version_cmd<E: Arch>(_ctx: &Context<E>) -> Vec<u8> {
