@@ -71,9 +71,11 @@ fn read_file<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile) {
             input_files::parse_dylib(ctx, mf);
         }
         FileType::Archive => {
-            // Archive members are loaded lazily to resolve undefined
-            // symbols. Not implemented yet; an unresolved symbol that a
-            // member would satisfy is reported as undefined.
+            // Archive members are loaded lazily: a member is loaded only
+            // once it defines a symbol that is undefined at resolution
+            // time.
+            let members = input_files::read_archive_members(ctx, mf);
+            ctx.lazy_objs.extend(members);
         }
         FileType::Fat => {
             let slice = input_files::get_fat_slice(ctx, mf);
@@ -102,6 +104,37 @@ pub fn read_input_files<E: Arch>(ctx: &mut Context<E>) {
         }
     }
     ctx.args.inputs = inputs;
+}
+
+/// Loads archive members that define symbols still undefined, until no
+/// member is needed anymore. A loaded member may itself use symbols that
+/// another member defines, so this iterates to a fixed point.
+pub fn resolve_archive_members<E: Arch>(ctx: &mut Context<E>) {
+    loop {
+        let undefined: std::collections::HashSet<&str> = ctx
+            .symtab
+            .syms
+            .iter()
+            .filter(|sym| sym.is_used && !sym.is_defined() && !sym.is_common)
+            .map(|sym| sym.name)
+            .collect();
+        if undefined.is_empty() {
+            return;
+        }
+
+        let needed = ctx.lazy_objs.iter().position(|mf| {
+            input_files::defined_symbol_names(mf)
+                .iter()
+                .any(|name| undefined.contains(name))
+        });
+        match needed {
+            Some(idx) => {
+                let mf = ctx.lazy_objs.remove(idx);
+                input_files::parse_object(ctx, mf);
+            }
+            None => return,
+        }
+    }
 }
 
 /// Converts surviving tentative definitions (common symbols) into real

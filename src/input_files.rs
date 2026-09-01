@@ -222,6 +222,89 @@ fn parse_symbol<E: Arch>(
     id
 }
 
+/// Splits an archive into its members. Members use the BSD convention:
+/// a name of "#1/<len>" means the real name is the first <len> bytes of
+/// the member data.
+pub fn read_archive_members<E: Arch>(
+    ctx: &Context<E>,
+    mf: &'static MappedFile,
+) -> Vec<&'static MappedFile> {
+    let data = mf.data;
+    let mut members = Vec::new();
+    let mut off = 8;
+
+    while off + 60 <= data.len() {
+        let hdr = &data[off..off + 60];
+        let field = |range: std::ops::Range<usize>| {
+            std::str::from_utf8(&hdr[range])
+                .unwrap_or("")
+                .trim_end()
+                .to_string()
+        };
+        let name = field(0..16);
+        let Ok(size) = field(48..58).parse::<usize>() else {
+            fatal!(ctx, "{}: malformed archive member header", mf.name);
+        };
+
+        let mut body = off + 60;
+        let mut body_size = size;
+        let name = if let Some(len) = name.strip_prefix("#1/") {
+            let Ok(len) = len.parse::<usize>() else {
+                fatal!(ctx, "{}: malformed archive member name", mf.name);
+            };
+            let raw = &data[body..body + len];
+            body += len;
+            body_size -= len;
+            let end = raw.iter().position(|&b| b == 0).unwrap_or(len);
+            String::from_utf8_lossy(&raw[..end]).into_owned()
+        } else {
+            name
+        };
+
+        if !name.starts_with("__.SYMDEF") {
+            let full_name = format!("{}({})", mf.name, name);
+            members.push(mf.slice(full_name, &data[body..body + body_size]));
+        }
+
+        off += 60 + size;
+        off += off & 1; // members are aligned to even offsets
+    }
+    members
+}
+
+/// Returns the names of the global symbols an object file defines,
+/// without creating any linker state. Used to decide whether to load an
+/// archive member.
+pub fn defined_symbol_names(mf: &MappedFile) -> Vec<&'static str> {
+    let data = mf.data;
+    let hdr = MachHeader::read_from(data);
+    let mut names = Vec::new();
+
+    let mut off = size_of::<MachHeader>();
+    for _ in 0..hdr.ncmds {
+        let lc = LoadCommand::read_from(&data[off..]);
+        if lc.cmd == LC_SYMTAB {
+            let cmd = SymtabCommand::read_from(&data[off..]);
+            let nlists: Vec<NList> = read_array(data, cmd.symoff as usize, cmd.nsyms as usize);
+            let strtab: &[u8] =
+                &data[cmd.stroff as usize..(cmd.stroff + cmd.strsize) as usize];
+            // SAFETY: input files are leaked, so the string table lives
+            // for the rest of the process.
+            let strtab: &'static [u8] = unsafe { std::mem::transmute(strtab) };
+            for nlist in &nlists {
+                if !nlist.is_stab()
+                    && nlist.is_extern()
+                    && (nlist.n_type() != N_UNDF || nlist.is_common())
+                {
+                    names.push(symbol_name(strtab, nlist));
+                }
+            }
+        }
+        off += lc.cmdsize as usize;
+    }
+    names
+}
+
 /// Returns the slice of a fat (universal) file matching the target's CPU
 /// type. Fat headers are big-endian.
 pub fn get_fat_slice<E: Arch>(

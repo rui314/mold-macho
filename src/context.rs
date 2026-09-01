@@ -21,6 +21,9 @@ pub struct Context<E: Arch> {
     pub symtab: SymbolTable,
     /// All input sections, in one arena.
     pub isecs: Vec<InputSection>,
+    /// Archive members not yet loaded; a member is loaded when it
+    /// defines a symbol that is still undefined.
+    pub lazy_objs: Vec<&'static crate::mapped_file::MappedFile>,
     pub chunks: Vec<Chunk>,
     pub segments: Vec<OutputSegment>,
     pub symtab_data: SymtabData,
@@ -54,6 +57,7 @@ impl<E: Arch> Context<E> {
             dylibs: Vec::new(),
             symtab: SymbolTable::default(),
             isecs: Vec::new(),
+            lazy_objs: Vec::new(),
             chunks: Vec::new(),
             segments: Vec::new(),
             symtab_data: SymtabData::default(),
