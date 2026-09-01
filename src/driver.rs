@@ -18,12 +18,14 @@ pub fn main(
 ) -> i32 {
     let diag = Diagnostics::new(false);
 
-    // Guess the target from -arch, falling back to the host. If the
-    // guess turns out wrong, start over with the right one.
+    // Guess the target from -arch, then from the first Mach-O input
+    // file, falling back to the host. If the guess turns out wrong,
+    // start over with the right one.
     let mut target = argv
         .windows(2)
         .find(|w| w[0] == "-arch")
         .map(|w| w[1].clone())
+        .or_else(|| sniff_target(&argv))
         .unwrap_or_else(|| host_target().to_string());
 
     loop {
@@ -32,6 +34,29 @@ pub fn main(
             Err(actual) => target = actual,
         }
     }
+}
+
+/// Reads the CPU type of the first Mach-O file named on the command
+/// line, if any.
+fn sniff_target(argv: &[String]) -> Option<String> {
+    use crate::macho::*;
+    for arg in &argv[1..] {
+        if arg.starts_with('-') {
+            continue;
+        }
+        let Ok(data) = std::fs::read(arg) else { continue };
+        if data.len() < 8 {
+            continue;
+        }
+        let magic = u32::from_le_bytes(data[..4].try_into().unwrap());
+        if magic == MH_MAGIC_64 {
+            let cputype = u32::from_le_bytes(data[4..8].try_into().unwrap());
+            if let Some(name) = crate::arch::cputype_name(cputype) {
+                return Some(name.to_string());
+            }
+        }
+    }
+    None
 }
 
 fn host_target() -> &'static str {
