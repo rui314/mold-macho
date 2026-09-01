@@ -70,7 +70,8 @@ fn host_target() -> &'static str {
 /// Links for the target `E`, or reports the target the inputs are
 /// actually for.
 pub fn link<E: Arch>(cmdline: &[String], diag: &Diagnostics) -> Result<i32, String> {
-    let args = cmdline::parse_args(diag, cmdline);
+    let cmdline = cmdline::expand_response_files(diag, cmdline);
+    let args = cmdline::parse_args(diag, &cmdline);
 
     if let Some(arch) = &args.arch {
         if arch != E::NAME {
@@ -79,6 +80,7 @@ pub fn link<E: Arch>(cmdline: &[String], diag: &Diagnostics) -> Result<i32, Stri
     }
 
     let mut ctx: Context<E> = Context::new(args, Diagnostics::new(false));
+    ctx.diag.set_suppress_warnings(ctx.args.suppress_warnings);
 
     // Read input files and resolve symbols
     passes::read_input_files(&mut ctx);

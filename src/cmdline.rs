@@ -65,6 +65,15 @@ pub struct Args {
     pub fixup_chains: Option<bool>,
     /// The libLTO to load for bitcode inputs (-lto_library).
     pub lto_library: Option<String>,
+    /// -stack_size: the main thread's stack size, recorded in LC_MAIN.
+    pub stack_size: u64,
+    /// -sectcreate: sections to synthesize from files:
+    /// (segment, section, path).
+    pub sectcreate: Vec<(String, String, String)>,
+    /// -x: strip non-global symbols from the output symbol table.
+    pub strip_locals: bool,
+    /// -w: suppress warnings.
+    pub suppress_warnings: bool,
     pub dynamic: bool,
     pub headerpad: u64,
     pub pagezero_size: u64,
@@ -99,6 +108,10 @@ impl Default for Args {
             map: None,
             fixup_chains: None,
             lto_library: None,
+            stack_size: 0,
+            sectcreate: Vec::new(),
+            strip_locals: false,
+            suppress_warnings: false,
             dynamic: true,
             headerpad: 0x100,
             pagezero_size: 0x1_0000_0000,
@@ -137,6 +150,52 @@ fn symbol_list(text: &str) -> Vec<String> {
         .filter(|line| !line.is_empty())
         .map(String::from)
         .collect()
+}
+
+/// ld64 numeric option arguments are hexadecimal, with or without a
+/// 0x prefix.
+fn parse_hex(diag: &Diagnostics, opt: &str, val: &str) -> u64 {
+    match u64::from_str_radix(val.trim_start_matches("0x"), 16) {
+        Ok(num) => num,
+        Err(_) => fatal!(diag, "malformed {opt}: {val}"),
+    }
+}
+
+/// Expands @file response-file arguments, splitting the file's contents
+/// on whitespace with simple quote handling.
+pub fn expand_response_files(diag: &Diagnostics, argv: &[String]) -> Vec<String> {
+    let mut out = Vec::with_capacity(argv.len());
+    for arg in argv {
+        if let Some(path) = arg.strip_prefix('@') {
+            // Option arguments like "@rpath/libfoo.dylib" also start
+            // with '@': expand only when the file actually exists.
+            let Ok(text) = std::fs::read_to_string(path) else {
+                out.push(arg.clone());
+                continue;
+            };
+            let mut cur = String::new();
+            let mut quote: Option<char> = None;
+            for c in text.chars() {
+                match quote {
+                    Some(q) if c == q => quote = None,
+                    Some(_) => cur.push(c),
+                    None if c == '"' || c == '\'' => quote = Some(c),
+                    None if c.is_whitespace() => {
+                        if !cur.is_empty() {
+                            out.push(std::mem::take(&mut cur));
+                        }
+                    }
+                    None => cur.push(c),
+                }
+            }
+            if !cur.is_empty() {
+                out.push(cur);
+            }
+        } else {
+            out.push(arg.clone());
+        }
+    }
+    out
 }
 
 pub fn parse_args(diag: &Diagnostics, cmdline: &[String]) -> Args {
@@ -208,12 +267,22 @@ pub fn parse_args(diag: &Diagnostics, cmdline: &[String]) -> Args {
             "-adhoc_codesign" => args.adhoc_codesign = true,
             "-no_adhoc_codesign" => args.adhoc_codesign = false,
             "-dynamic" => args.dynamic = true,
-            "-headerpad" => {
-                let val = next_arg(&mut i);
-                match u64::from_str_radix(val.trim_start_matches("0x"), 16) {
-                    Ok(num) => args.headerpad = num,
-                    Err(_) => fatal!(diag, "malformed -headerpad: {val}"),
-                }
+            "-headerpad" => args.headerpad = parse_hex(diag, opt, next_arg(&mut i)),
+            "-pagezero_size" => {
+                args.pagezero_size = parse_hex(diag, opt, next_arg(&mut i))
+            }
+            "-stack_size" => args.stack_size = parse_hex(diag, opt, next_arg(&mut i)),
+            "-sectcreate" => {
+                let seg = next_arg(&mut i).to_string();
+                let sect = next_arg(&mut i).to_string();
+                let file = next_arg(&mut i).to_string();
+                args.sectcreate.push((seg, sect, file));
+            }
+            "-x" => args.strip_locals = true,
+            "-w" => args.suppress_warnings = true,
+            "-help" => {
+                println!("Usage: ld64.mold [options] file...");
+                crate::error::exit_after_cleanup(0);
             }
 
             "-dead_strip" => args.dead_strip = true,

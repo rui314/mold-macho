@@ -14,6 +14,7 @@ use std::sync::{Arc, Mutex};
 pub struct Diagnostics {
     color: AtomicBool,
     fatal_warnings: AtomicBool,
+    suppress_warnings: AtomicBool,
     has_error: AtomicBool,
     lock: Mutex<()>,
 }
@@ -31,6 +32,10 @@ impl Diagnostics {
 
     pub fn set_fatal_warnings(&self, on: bool) {
         self.fatal_warnings.store(on, Ordering::Relaxed);
+    }
+
+    pub fn set_suppress_warnings(&self, on: bool) {
+        self.suppress_warnings.store(on, Ordering::Relaxed);
     }
 
     pub fn has_error(&self) -> bool {
@@ -66,6 +71,9 @@ impl Diagnostics {
 
     /// Reports a warning. With `-fatal_warnings` it is promoted to an error.
     pub fn warn(&self, msg: fmt::Arguments) {
+        if self.suppress_warnings.load(Ordering::Relaxed) {
+            return;
+        }
         if self.fatal_warnings.load(Ordering::Relaxed) {
             self.emit("mold: error: ", "mold: \x1b[0;1;31merror:\x1b[0m ", msg);
             self.has_error.store(true, Ordering::Relaxed);

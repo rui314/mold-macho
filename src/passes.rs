@@ -837,6 +837,28 @@ pub fn create_output_chunks<E: Arch>(ctx: &mut Context<E>) {
         ctx.chunks.push(chunk);
     }
 
+    // Sections synthesized from files by -sectcreate.
+    let sectcreate = std::mem::take(&mut ctx.args.sectcreate);
+    for (seg, sect, path) in &sectcreate {
+        let Ok(data) = std::fs::read(path) else {
+            fatal!(ctx, "-sectcreate: cannot read {path}");
+        };
+        let segname: &'static str = String::leak(seg.clone());
+        let mut chunk = Chunk::new(
+            segname,
+            sect,
+            ChunkKind::SectCreate {
+                data: Vec::leak(data),
+            },
+        );
+        let ChunkKind::SectCreate { data } = chunk.kind else {
+            unreachable!()
+        };
+        chunk.hdr.size = data.len() as u64;
+        ctx.chunks.push(chunk);
+    }
+    ctx.args.sectcreate = sectcreate;
+
     // Merge the objects' __objc_imageinfo records: the Swift version
     // must agree, the Swift language version is the newest, and the
     // category-class-properties bit holds only if every Objective-C
@@ -1081,8 +1103,11 @@ pub fn compute_symtab<E: Arch>(ctx: &mut Context<E>) {
         }
     }
 
-    // Local symbols
+    // Local symbols (-x drops them)
     for obj in &ctx.objs {
+        if ctx.args.strip_locals {
+            break;
+        }
         for (nlist, &sym_id) in obj.nlists.iter().zip(&obj.syms) {
             let sym = &ctx.symtab[sym_id];
             if nlist.is_stab() || nlist.is_extern() || !keep_local_symbol(sym.name) {
@@ -1894,6 +1919,7 @@ fn copy_chunk<E: Arch>(ctx: &Context<E>, chunk: &Chunk, buf: &mut [u8]) {
             buf[..4].copy_from_slice(&0u32.to_le_bytes());
             buf[4..8].copy_from_slice(&ctx.objc_image_info_flags.to_le_bytes());
         }
+        ChunkKind::SectCreate { data } => buf[..data.len()].copy_from_slice(data),
         ChunkKind::ObjcStubs => E::write_objc_stubs(ctx, chunk.hdr.addr, buf),
         ChunkKind::ObjcMethname => {
             buf[..ctx.objc_methname_data.len()].copy_from_slice(&ctx.objc_methname_data);

@@ -53,6 +53,8 @@ pub enum ChunkKind {
     /// The merged __objc_imageinfo section: the Objective-C runtime
     /// reads exactly one 8-byte record per image.
     ObjcImageInfo,
+    /// A section created from a file by -sectcreate.
+    SectCreate { data: &'static [u8] },
     /// The __TEXT,__unwind_info section, generated from the objects'
     /// compact unwind records.
     UnwindInfo,
@@ -110,6 +112,7 @@ impl Chunk {
                         | ChunkKind::ObjcMethname
                         | ChunkKind::ObjcSelrefs
                         | ChunkKind::ObjcImageInfo
+                        | ChunkKind::SectCreate { .. }
                         | ChunkKind::UnwindInfo
                         | ChunkKind::EhFrame
                 ),
@@ -421,7 +424,7 @@ fn create_main_cmd<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
         cmd: LC_MAIN,
         cmdsize: size_of::<EntryPointCommand>() as u32,
         entryoff: ctx.entry_addr - text.cmd.vmaddr,
-        stacksize: 0,
+        stacksize: ctx.args.stack_size,
     };
     to_vec(&cmd)
 }
