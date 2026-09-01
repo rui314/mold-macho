@@ -114,6 +114,7 @@ pub fn link<E: Arch>(cmdline: &[String], diag: &Diagnostics) -> Result<i32, Stri
     passes::create_synthetic_symbols(&mut ctx);
     passes::convert_common_symbols(&mut ctx);
     passes::create_objc_msgsend_stubs(&mut ctx);
+    passes::auto_hide_weak_defs(&mut ctx);
     passes::check_undefined_symbols(&mut ctx);
     passes::dead_strip_dylibs(&mut ctx);
     ctx.diag.checkpoint();

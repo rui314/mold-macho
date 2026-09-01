@@ -596,9 +596,13 @@ pub fn copy_mach_header<E: Arch>(ctx: &Context<E>, buf: &mut [u8]) {
         }
         _ => {}
     }
+    // MH_WEAK_DEFINES advertises exported weak symbols; auto-hidden
+    // and private-extern weak definitions don't count, since no other
+    // image can coalesce against them.
     if ctx.symtab.syms.iter().any(|sym| {
         sym.is_weak_def
             && sym.is_extern
+            && !sym.is_private_extern
             && sym.isec.is_some_and(|isec| ctx.isecs[isec].is_alive)
     }) {
         hdr.flags |= MH_WEAK_DEFINES;

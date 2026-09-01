@@ -658,12 +658,31 @@ pub fn run_lto<E: Arch>(ctx: &mut Context<E>) -> bool {
         }
 
         // Everything the rest of the link can see must survive the LTO
-        // internalizer: every external symbol a bitcode module defines,
-        // plus the entry point.
+        // internalizer. For a dylib that is every external symbol a
+        // bitcode module defines - each is an export. An executable
+        // exports nothing that matters, so only symbols some non-LTO
+        // code references (plus the entry point, and everything under
+        // -export_dynamic, which exists exactly to let executables
+        // keep their globals for dlsym) must survive; the rest can be
+        // internalized and dead-stripped inside the module.
+        let executable = ctx.args.output_type == MH_EXECUTE;
         let mut preserve: Vec<std::ffi::CString> = Vec::new();
         for sym in &ctx.symtab.syms {
             if let Origin::Obj(idx) = sym.origin {
                 if ctx.objs[idx].lto_module.is_some() && sym.is_extern {
+                    if executable
+                        && !ctx.args.export_dynamic
+                        && !sym.is_used
+                        && sym.name != ctx.args.entry
+                        && !ctx.args.forced_undefined.iter().any(|n| n == sym.name)
+                        && !ctx
+                            .args
+                            .exported_symbols
+                            .as_ref()
+                            .is_some_and(|list| list.iter().any(|n| n == sym.name))
+                    {
+                        continue;
+                    }
                     if let Ok(name) = std::ffi::CString::new(sym.name) {
                         preserve.push(name);
                     }
@@ -919,6 +938,61 @@ pub fn create_objc_msgsend_stubs<E: Arch>(ctx: &mut Context<E>) {
 /// Reports references to symbols that are still unresolved; with
 /// `-undefined dynamic_lookup` they become flat-namespace imports that
 /// dyld resolves against any loaded image at run time.
+/// Auto-hides eligible weak definitions in a main executable.
+/// Compilers mark a weak definition whose address is never observed
+/// with .weak_def_can_be_hidden (nlist n_desc carries N_WEAK_DEF and
+/// N_WEAK_REF together); since dyld's runtime weak coalescing only
+/// considers images that export the symbol and the executable is
+/// first in load order anyway, ld64 demotes such symbols to
+/// non-external - gone from the export trie and the external symbol
+/// table. The scopes of coalesced copies merge: one plain
+/// .weak_definition among them pins the symbol exported, and an
+/// -exported_symbols_list naming it does too.
+pub fn auto_hide_weak_defs<E: Arch>(ctx: &mut Context<E>) {
+    if ctx.args.output_type != MH_EXECUTE {
+        return;
+    }
+
+    // sym -> "every live weak definition may be hidden".
+    let mut can_hide: std::collections::HashMap<crate::symbol::SymbolId, bool> =
+        std::collections::HashMap::new();
+    for obj in &ctx.objs {
+        if !obj.is_alive {
+            continue;
+        }
+        for (nlist, &sym_id) in obj.nlists.iter().zip(&obj.syms) {
+            if nlist.is_stab()
+                || !nlist.is_extern()
+                || nlist.n_type() != N_SECT
+                || nlist.n_desc & N_WEAK_DEF == 0
+            {
+                continue;
+            }
+            let hidable = nlist.n_desc & N_WEAK_REF != 0;
+            can_hide
+                .entry(sym_id)
+                .and_modify(|h| *h &= hidable)
+                .or_insert(hidable);
+        }
+    }
+
+    for (id, hidable) in can_hide {
+        let sym = &mut ctx.symtab[id];
+        if hidable
+            && sym.is_weak_def
+            && sym.is_extern
+            && matches!(sym.origin, Origin::Obj(_))
+            && !ctx
+                .args
+                .exported_symbols
+                .as_ref()
+                .is_some_and(|list| list.iter().any(|n| n == sym.name))
+        {
+            sym.is_private_extern = true;
+        }
+    }
+}
+
 pub fn check_undefined_symbols<E: Arch>(ctx: &mut Context<E>) {
     // Errors name a file that wants the symbol; the map from symbol to
     // referencing object is built only once an error is certain.

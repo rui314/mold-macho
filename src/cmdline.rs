@@ -143,6 +143,9 @@ pub struct Args {
     /// -mark_dead_strippable_dylib: mark the output dylib as
     /// removable when a client binds nothing from it.
     pub mark_dead_strippable_dylib: bool,
+    /// -export_dynamic: keep all global symbols through LTO even in an
+    /// executable, for dlsym or plugin use.
+    pub export_dynamic: bool,
     pub pagezero_size: u64,
     /// True when -pagezero_size was given explicitly (it is an error
     /// anywhere but a main executable).
@@ -205,6 +208,7 @@ impl Default for Args {
             umbrella: None,
             oso_prefix: None,
             mark_dead_strippable_dylib: false,
+            export_dynamic: false,
             pagezero_size: 0x1_0000_0000,
             explicit_pagezero: false,
         }
@@ -469,6 +473,7 @@ pub fn parse_args(diag: &Diagnostics, cmdline: &[String]) -> Args {
             "-umbrella" => args.umbrella = Some(next_arg(&mut i).to_string()),
             "-oso_prefix" => args.oso_prefix = Some(next_arg(&mut i).to_string()),
             "-mark_dead_strippable_dylib" => args.mark_dead_strippable_dylib = true,
+            "-export_dynamic" => args.export_dynamic = true,
 
             // Reserve enough header padding that install_name_tool can
             // grow install names in place.
