@@ -690,6 +690,7 @@ pub fn create_output_chunks<E: Arch>(ctx: &mut Context<E>) {
     ctx.chunks.push(Chunk::new("__LINKEDIT", "", ChunkKind::RebaseInfo));
     ctx.chunks.push(Chunk::new("__LINKEDIT", "", ChunkKind::BindInfo));
     ctx.chunks.push(Chunk::new("__LINKEDIT", "", ChunkKind::ExportTrie));
+    ctx.chunks.push(Chunk::new("__LINKEDIT", "", ChunkKind::FunctionStarts));
     ctx.chunks.push(Chunk::new("__LINKEDIT", "", ChunkKind::Symtab));
     if !ctx.stub_syms.is_empty() || !ctx.got_syms.is_empty() {
         let mut chunk = Chunk::new("__LINKEDIT", "", ChunkKind::IndirectSymtab);
@@ -886,6 +887,7 @@ pub fn assign_offsets<E: Arch>(ctx: &mut Context<E>) {
         if ctx.segments[seg_idx].name == "__LINKEDIT" {
             ctx.rebase_data = build_rebase_info(ctx);
             ctx.bind_data = build_bind_info(ctx);
+            ctx.function_starts_data = build_function_starts(ctx);
         }
 
         if ctx.segments[seg_idx].name == "__PAGEZERO" {
@@ -915,6 +917,7 @@ pub fn assign_offsets<E: Arch>(ctx: &mut Context<E>) {
                 ChunkKind::RebaseInfo => ctx.rebase_data.len() as u64,
                 ChunkKind::BindInfo => ctx.bind_data.len() as u64,
                 ChunkKind::ExportTrie => output_chunks::encode_export_trie(ctx).len() as u64,
+                ChunkKind::FunctionStarts => ctx.function_starts_data.len() as u64,
                 ChunkKind::CodeSignature => {
                     cursor = align_to(cursor, 16);
                     code_signature_size(&ctx.args.output, cursor)
@@ -924,7 +927,8 @@ pub fn assign_offsets<E: Arch>(ctx: &mut Context<E>) {
             let chunk = &mut ctx.chunks[idx];
             let p2align = match chunk.kind {
                 ChunkKind::Symtab | ChunkKind::Strtab | ChunkKind::RebaseInfo
-                | ChunkKind::BindInfo | ChunkKind::ExportTrie => 3,
+                | ChunkKind::BindInfo | ChunkKind::ExportTrie
+                | ChunkKind::FunctionStarts => 3,
                 ChunkKind::IndirectSymtab => 2,
                 ChunkKind::CodeSignature => 4,
                 _ => chunk.hdr.p2align,
@@ -1167,6 +1171,41 @@ fn build_bind_info<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
     buf
 }
 
+/// Builds the LC_FUNCTION_STARTS payload: the addresses of all
+/// functions in __TEXT,__text, ULEB128 delta-encoded starting from the
+/// image base. Debuggers and crash reporters use it to attribute
+/// addresses to functions even for stripped binaries.
+fn build_function_starts<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
+    let mut addrs: Vec<u64> = Vec::new();
+    for sym in &ctx.symtab.syms {
+        if !matches!(sym.origin, Origin::Obj(_)) {
+            continue;
+        }
+        let Some(isec) = sym.isec else { continue };
+        let isec = &ctx.isecs[isec];
+        if isec.is_alive && isec.hdr.segname() == "__TEXT" && isec.hdr.sectname() == "__text" {
+            addrs.push(ctx.chunks[isec.osec].hdr.addr + isec.output_offset + sym.value);
+        }
+    }
+    if addrs.is_empty() {
+        return Vec::new();
+    }
+    addrs.sort_unstable();
+    addrs.dedup();
+
+    let mut buf = Vec::new();
+    let mut last = ctx.args.pagezero_size;
+    for addr in addrs {
+        write_uleb(&mut buf, addr - last);
+        last = addr;
+    }
+    buf.push(0);
+    while buf.len() % 8 != 0 {
+        buf.push(0);
+    }
+    buf
+}
+
 /// Resolves the entry point symbol.
 pub fn resolve_entry<E: Arch>(ctx: &mut Context<E>) {
     if ctx.args.output_type != MH_EXECUTE {
@@ -1260,6 +1299,11 @@ pub fn copy_chunks<E: Arch>(ctx: &Context<E>, buf: &mut [u8]) {
                 let data = output_chunks::encode_export_trie(ctx);
                 let off = chunk.hdr.fileoff as usize;
                 buf[off..off + data.len()].copy_from_slice(&data);
+            }
+            ChunkKind::FunctionStarts => {
+                let off = chunk.hdr.fileoff as usize;
+                buf[off..off + ctx.function_starts_data.len()]
+                    .copy_from_slice(&ctx.function_starts_data);
             }
             ChunkKind::IndirectSymtab => {
                 let mut off = chunk.hdr.fileoff as usize;

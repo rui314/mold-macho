@@ -52,6 +52,8 @@ pub struct Context<E: Arch> {
     pub rebase_data: Vec<u8>,
     /// The bind opcode stream for LC_DYLD_INFO, built during layout.
     pub bind_data: Vec<u8>,
+    /// The LC_FUNCTION_STARTS contents, built during layout.
+    pub function_starts_data: Vec<u8>,
     /// The address of the first thread-local data section. Thread
     /// pointers are encoded relative to it.
     pub tls_begin: u64,
@@ -93,6 +95,7 @@ impl<E: Arch> Context<E> {
             objc_methname_offs: Vec::new(),
             rebase_data: Vec::new(),
             bind_data: Vec::new(),
+            function_starts_data: Vec::new(),
             tls_begin: 0,
             entry_addr: 0,
             output_size: 0,

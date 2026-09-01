@@ -62,6 +62,9 @@ pub enum ChunkKind {
     BindInfo,
     /// The export trie in __LINKEDIT: dyld's index of exported symbols.
     ExportTrie,
+    /// LC_FUNCTION_STARTS data in __LINKEDIT: delta-encoded function
+    /// addresses, used by debuggers and crash reporters.
+    FunctionStarts,
     /// The indirect symbol table in __LINKEDIT.
     IndirectSymtab,
     /// The symbol table in __LINKEDIT.
@@ -298,6 +301,18 @@ fn create_dysymtab_cmd<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
     to_vec(&cmd)
 }
 
+fn create_function_starts_cmd<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
+    let chunk =
+        &ctx.chunks[find_chunk(ctx, |k| matches!(k, ChunkKind::FunctionStarts)).unwrap()];
+    let cmd = LinkEditDataCommand {
+        cmd: LC_FUNCTION_STARTS,
+        cmdsize: size_of::<LinkEditDataCommand>() as u32,
+        dataoff: chunk.hdr.fileoff as u32,
+        datasize: chunk.hdr.size as u32,
+    };
+    to_vec(&cmd)
+}
+
 fn create_uuid_cmd<E: Arch>(_ctx: &Context<E>) -> Vec<u8> {
     let cmd = UuidCommand {
         cmd: LC_UUID,
@@ -424,6 +439,10 @@ pub fn create_load_commands<E: Arch>(ctx: &Context<E>) -> Vec<Vec<u8>> {
     vec.push(create_uuid_cmd(ctx));
     vec.push(create_build_version_cmd(ctx));
     vec.push(create_source_version_cmd(ctx));
+
+    if find_chunk(ctx, |k| matches!(k, ChunkKind::FunctionStarts)).is_some() {
+        vec.push(create_function_starts_cmd(ctx));
+    }
 
     for dylib in &ctx.dylibs {
         vec.push(create_load_dylib_cmd(dylib));
