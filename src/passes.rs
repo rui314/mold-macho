@@ -99,11 +99,23 @@ fn find_framework<E: Arch>(ctx: &Context<E>, name: &str) -> Option<PathBuf> {
 }
 
 fn find_library<E: Arch>(ctx: &Context<E>, name: &str) -> Option<PathBuf> {
-    for dir in library_search_dirs(ctx) {
-        for ext in ["tbd", "dylib", "a"] {
-            let path = dir.join(format!("lib{name}.{ext}"));
-            if path.is_file() {
-                return Some(path);
+    // By default each directory is tried for a dylib and then an
+    // archive before moving on (-search_paths_first, ld64's default
+    // since Xcode 4). -search_dylibs_first restores the older ld64
+    // behavior: a dylib anywhere on the path beats an archive
+    // anywhere.
+    let passes: &[&[&str]] = if ctx.args.search_dylibs_first {
+        &[&["tbd", "dylib"], &["a"]]
+    } else {
+        &[&["tbd", "dylib", "a"]]
+    };
+    for exts in passes {
+        for dir in library_search_dirs(ctx) {
+            for ext in *exts {
+                let path = dir.join(format!("lib{name}.{ext}"));
+                if path.is_file() {
+                    return Some(path);
+                }
             }
         }
     }

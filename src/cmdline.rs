@@ -126,6 +126,9 @@ pub struct Args {
     pub add_ast_paths: Vec<String>,
     pub dynamic: bool,
     pub headerpad: u64,
+    /// -search_dylibs_first: search every path for a dylib before
+    /// falling back to archives.
+    pub search_dylibs_first: bool,
     pub pagezero_size: u64,
 }
 
@@ -179,6 +182,7 @@ impl Default for Args {
             add_ast_paths: Vec::new(),
             dynamic: true,
             headerpad: 0x100,
+            search_dylibs_first: false,
             pagezero_size: 0x1_0000_0000,
         }
     }
@@ -431,7 +435,8 @@ pub fn parse_args(diag: &Diagnostics, cmdline: &[String]) -> Args {
             // The default library search behavior already matches
             // -search_paths_first: each path is tried for both a dylib
             // and an archive before moving to the next.
-            "-search_paths_first" => {}
+            "-search_paths_first" => args.search_dylibs_first = false,
+            "-search_dylibs_first" => args.search_dylibs_first = true,
 
             // Reserve enough header padding that install_name_tool can
             // grow install names in place.
