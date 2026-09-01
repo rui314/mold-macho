@@ -27,6 +27,8 @@ pub const MH_PIE: u32 = 0x20_0000;
 pub const MH_HAS_TLV_DESCRIPTORS: u32 = 0x80_0000;
 pub const MH_NO_REEXPORTED_DYLIBS: u32 = 0x10_0000;
 pub const MH_SUBSECTIONS_VIA_SYMBOLS: u32 = 0x2000;
+pub const MH_WEAK_DEFINES: u32 = 0x8000;
+pub const MH_BINDS_TO_WEAK: u32 = 0x1_0000;
 
 // Load command types
 pub const LC_REQ_DYLD: u32 = 0x8000_0000;
@@ -165,6 +167,7 @@ pub const BIND_OPCODE_SET_TYPE_IMM: u8 = 0x50;
 pub const BIND_OPCODE_SET_ADDEND_SLEB: u8 = 0x60;
 pub const BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB: u8 = 0x70;
 pub const BIND_OPCODE_DO_BIND: u8 = 0x90;
+pub const BIND_SYMBOL_FLAGS_WEAK_IMPORT: u8 = 0x1;
 
 // Rebase opcodes, for the LC_DYLD_INFO rebase stream
 pub const REBASE_TYPE_POINTER: u8 = 1;

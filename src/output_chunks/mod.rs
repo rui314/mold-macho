@@ -475,6 +475,13 @@ pub fn copy_mach_header<E: Arch>(ctx: &Context<E>, buf: &mut [u8]) {
         MH_DYLIB => hdr.flags |= MH_NO_REEXPORTED_DYLIBS,
         _ => {}
     }
+    if ctx.symtab.syms.iter().any(|sym| {
+        sym.is_weak_def
+            && sym.is_extern
+            && sym.isec.is_some_and(|isec| ctx.isecs[isec].is_alive)
+    }) {
+        hdr.flags |= MH_WEAK_DEFINES;
+    }
     if ctx
         .chunks
         .iter()

@@ -291,6 +291,9 @@ fn parse_symbol<E: Arch>(
         N_UNDF => {
             let sym = &mut ctx.symtab[id];
             sym.is_used = true;
+            if nlist.n_desc & N_WEAK_REF != 0 {
+                sym.is_weak_ref = true;
+            }
             // A common symbol is a tentative definition: any real
             // definition beats it, and the largest tentative size wins.
             if nlist.is_common() && !sym.is_defined() {

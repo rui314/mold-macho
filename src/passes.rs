@@ -801,11 +801,14 @@ pub fn compute_symtab<E: Arch>(ctx: &mut Context<E>) {
     for &i in &globals {
         let sym = &ctx.symtab[i];
         let n_strx = add_string(&mut data.strtab, sym.name);
-        let (n_type, n_sect, n_desc) = match (sym.origin, sym.isec) {
+        let (n_type, n_sect, mut n_desc) = match (sym.origin, sym.isec) {
             (_, Some(isec)) => (N_SECT | N_EXT, ordinals[ctx.isecs[isec].osec], 0),
             (Origin::Synthetic, None) => (N_SECT | N_EXT, 1, REFERENCED_DYNAMICALLY),
             (_, None) => (N_ABS | N_EXT, 0, 0),
         };
+        if sym.is_weak_def {
+            n_desc |= N_WEAK_DEF;
+        }
         let ent = NList {
             n_strx,
             n_type,
@@ -830,11 +833,15 @@ pub fn compute_symtab<E: Arch>(ctx: &mut Context<E>) {
             unreachable!()
         };
         let n_strx = add_string(&mut data.strtab, sym.name);
+        let mut n_desc = (ctx.dylibs[dylib].dylib_idx as u16) << 8;
+        if sym.is_weak_ref {
+            n_desc |= N_WEAK_REF;
+        }
         let ent = NList {
             n_strx,
             n_type: N_UNDF | N_EXT,
             n_sect: 0,
-            n_desc: (ctx.dylibs[dylib].dylib_idx as u16) << 8,
+            n_desc,
             n_value: 0,
         };
         data.entries.push((ent, None));
@@ -1131,7 +1138,12 @@ fn build_bind_info<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
             buf.push(BIND_OPCODE_SET_DYLIB_ORDINAL_ULEB);
             write_uleb(&mut buf, ordinal as u64);
         }
-        buf.push(BIND_OPCODE_SET_SYMBOL_TRAILING_FLAGS_IMM);
+        let flags = if sym.is_weak_ref {
+            BIND_SYMBOL_FLAGS_WEAK_IMPORT
+        } else {
+            0
+        };
+        buf.push(BIND_OPCODE_SET_SYMBOL_TRAILING_FLAGS_IMM | flags);
         buf.extend_from_slice(sym.name.as_bytes());
         buf.push(0);
         buf.push(BIND_OPCODE_SET_TYPE_IMM | BIND_TYPE_POINTER);

@@ -36,6 +36,9 @@ pub struct Symbol {
     /// True if some relocation refers to this symbol, which makes an
     /// unresolved symbol an error.
     pub is_used: bool,
+    /// True if references to this symbol may go unresolved at load
+    /// time (a weak import).
+    pub is_weak_ref: bool,
     /// True if the symbol must survive dead-stripping.
     pub no_dead_strip: bool,
     /// True for a tentative definition (a common symbol) not yet
@@ -65,6 +68,7 @@ impl Symbol {
             is_weak_def: false,
             is_imported: false,
             is_used: false,
+            is_weak_ref: false,
             no_dead_strip: false,
             is_common: false,
             common_p2align: 0,
