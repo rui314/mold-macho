@@ -28,6 +28,8 @@ pub struct Context<E: Arch> {
     pub stub_syms: Vec<SymbolId>,
     /// Symbols with a __got slot, in slot order.
     pub got_syms: Vec<SymbolId>,
+    /// The rebase opcode stream for LC_DYLD_INFO, built during layout.
+    pub rebase_data: Vec<u8>,
     /// The bind opcode stream for LC_DYLD_INFO, built during layout.
     pub bind_data: Vec<u8>,
     /// The resolved address of the entry point symbol.
@@ -57,6 +59,7 @@ impl<E: Arch> Context<E> {
             symtab_data: SymtabData::default(),
             stub_syms: Vec::new(),
             got_syms: Vec::new(),
+            rebase_data: Vec::new(),
             bind_data: Vec::new(),
             entry_addr: 0,
             output_size: 0,

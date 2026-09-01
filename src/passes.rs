@@ -150,13 +150,7 @@ pub fn scan_relocs<E: Arch>(ctx: &mut Context<E>) {
                 add_stub(ctx, id);
                 add_got(ctx, id);
             }
-            RelocClass::Got => {
-                if !ctx.symtab[id].is_imported {
-                    fatal!(ctx, "not implemented: GOT entry for local symbol {}",
-                           ctx.symtab[id].name);
-                }
-                add_got(ctx, id);
-            }
+            RelocClass::Got => add_got(ctx, id),
             RelocClass::Tlv => {
                 fatal!(ctx, "not implemented: thread-local variables");
             }
@@ -276,6 +270,7 @@ pub fn create_output_chunks<E: Arch>(ctx: &mut Context<E>) {
         ctx.chunks.push(chunk);
     }
 
+    ctx.chunks.push(Chunk::new("__LINKEDIT", "", ChunkKind::RebaseInfo));
     ctx.chunks.push(Chunk::new("__LINKEDIT", "", ChunkKind::BindInfo));
     ctx.chunks.push(Chunk::new("__LINKEDIT", "", ChunkKind::Symtab));
     if !ctx.stub_syms.is_empty() || !ctx.got_syms.is_empty() {
@@ -385,8 +380,8 @@ pub fn compute_symtab<E: Arch>(ctx: &mut Context<E>) {
         let sym = &ctx.symtab[i];
         let n_strx = add_string(&mut data.strtab, sym.name);
         let (n_type, n_sect, n_desc) = match (sym.origin, sym.isec) {
-            (Origin::Synthetic, _) => (N_SECT | N_EXT, 1, REFERENCED_DYNAMICALLY),
             (_, Some(isec)) => (N_SECT | N_EXT, ordinals[ctx.isecs[isec].osec], 0),
+            (Origin::Synthetic, None) => (N_SECT | N_EXT, 1, REFERENCED_DYNAMICALLY),
             (_, None) => (N_ABS | N_EXT, 0, 0),
         };
         let ent = NList {
@@ -460,6 +455,7 @@ pub fn assign_offsets<E: Arch>(ctx: &mut Context<E>) {
         // Everything the bind stream describes (the GOT, data sections)
         // is laid out by the time we reach __LINKEDIT.
         if ctx.segments[seg_idx].name == "__LINKEDIT" {
+            ctx.rebase_data = build_rebase_info(ctx);
             ctx.bind_data = build_bind_info(ctx);
         }
 
@@ -486,6 +482,7 @@ pub fn assign_offsets<E: Arch>(ctx: &mut Context<E>) {
                 ChunkKind::MachHeader => header_size,
                 ChunkKind::Symtab => symtab_size,
                 ChunkKind::Strtab => strtab_size,
+                ChunkKind::RebaseInfo => ctx.rebase_data.len() as u64,
                 ChunkKind::BindInfo => ctx.bind_data.len() as u64,
                 ChunkKind::CodeSignature => {
                     cursor = align_to(cursor, 16);
@@ -495,7 +492,8 @@ pub fn assign_offsets<E: Arch>(ctx: &mut Context<E>) {
             };
             let chunk = &mut ctx.chunks[idx];
             let p2align = match chunk.kind {
-                ChunkKind::Symtab | ChunkKind::Strtab | ChunkKind::BindInfo => 3,
+                ChunkKind::Symtab | ChunkKind::Strtab | ChunkKind::RebaseInfo
+                | ChunkKind::BindInfo => 3,
                 ChunkKind::IndirectSymtab => 2,
                 ChunkKind::CodeSignature => 4,
                 _ => chunk.hdr.p2align,
@@ -542,26 +540,123 @@ pub fn assign_offsets<E: Arch>(ctx: &mut Context<E>) {
     ctx.output_size = fileoff;
 }
 
+/// Returns the load-command index of the segment containing `addr`, and
+/// the offset within it.
+fn segment_and_offset<E: Arch>(ctx: &Context<E>, addr: u64) -> (usize, u64) {
+    for (i, seg) in ctx.segments.iter().enumerate() {
+        if seg.cmd.vmaddr <= addr && addr < seg.cmd.vmaddr + seg.cmd.vmsize && seg.name != "__PAGEZERO"
+        {
+            return (i, addr - seg.cmd.vmaddr);
+        }
+    }
+    unreachable!("no segment contains address {addr:#x}");
+}
+
+/// Builds the rebase opcode stream: it tells dyld which pointers in the
+/// image it must slide when the image is loaded at a non-default address.
+/// Every absolute address the linker writes into a data section gets a
+/// record. Runs during layout, once every segment before __LINKEDIT has
+/// an address.
+fn build_rebase_info<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
+    let mut locs: Vec<u64> = Vec::new();
+
+    // Pointers written for UNSIGNED relocations to local targets.
+    for isec in &ctx.isecs {
+        let base = ctx.chunks[isec.osec].hdr.addr + isec.output_offset;
+        for rel in &isec.relocs {
+            if E::classify_reloc(rel.r_type) != RelocClass::Plain
+                || rel.size != 8
+                || rel.is_pcrel
+                || rel.is_subtracted
+            {
+                continue;
+            }
+            let imported = ctx
+                .reloc_target_sym(isec.obj, rel)
+                .is_some_and(|id| ctx.symtab[id].is_imported);
+            if !imported {
+                locs.push(base + rel.offset as u64);
+            }
+        }
+    }
+
+    // GOT slots that hold local addresses.
+    if let Some(idx) = output_chunks::find_chunk(ctx, |k| matches!(k, ChunkKind::Got)) {
+        let got_addr = ctx.chunks[idx].hdr.addr;
+        for (i, &id) in ctx.got_syms.iter().enumerate() {
+            if !ctx.symtab[id].is_imported {
+                locs.push(got_addr + i as u64 * 8);
+            }
+        }
+    }
+
+    if locs.is_empty() {
+        return Vec::new();
+    }
+    locs.sort_unstable();
+
+    let mut buf = Vec::new();
+    buf.push(REBASE_OPCODE_SET_TYPE_IMM | REBASE_TYPE_POINTER);
+    for loc in locs {
+        let (seg, off) = segment_and_offset(ctx, loc);
+        buf.push(REBASE_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB | seg as u8);
+        write_uleb(&mut buf, off);
+        buf.push(REBASE_OPCODE_DO_REBASE_IMM_TIMES | 1);
+    }
+    buf.push(REBASE_OPCODE_DONE);
+    while buf.len() % 8 != 0 {
+        buf.push(0);
+    }
+    buf
+}
+
 /// Builds the bind opcode stream: it tells dyld which imported symbol to
 /// write into each GOT slot. Runs during layout, once every segment
 /// before __LINKEDIT has an address.
 fn build_bind_info<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
-    let mut buf = Vec::new();
-    let Some(got_idx) = output_chunks::find_chunk(ctx, |k| matches!(k, ChunkKind::Got)) else {
-        return buf;
-    };
-    let got_addr = ctx.chunks[got_idx].hdr.addr;
-    let seg_idx = ctx
-        .segments
-        .iter()
-        .position(|s| s.name == "__DATA_CONST")
-        .unwrap();
-    let seg_vmaddr = ctx.segments[seg_idx].cmd.vmaddr;
+    let mut binds: Vec<(u64, crate::symbol::SymbolId, i64)> = Vec::new();
 
-    for (i, &id) in ctx.got_syms.iter().enumerate() {
+    // GOT slots for imported symbols.
+    if let Some(idx) = output_chunks::find_chunk(ctx, |k| matches!(k, ChunkKind::Got)) {
+        let got_addr = ctx.chunks[idx].hdr.addr;
+        for (i, &id) in ctx.got_syms.iter().enumerate() {
+            if ctx.symtab[id].is_imported {
+                binds.push((got_addr + i as u64 * 8, id, 0));
+            }
+        }
+    }
+
+    // Pointers in data sections initialized with an imported symbol's
+    // address.
+    for isec in &ctx.isecs {
+        let base = ctx.chunks[isec.osec].hdr.addr + isec.output_offset;
+        for rel in &isec.relocs {
+            if E::classify_reloc(rel.r_type) != RelocClass::Plain
+                || rel.size != 8
+                || rel.is_pcrel
+                || rel.is_subtracted
+            {
+                continue;
+            }
+            if let Some(id) = ctx.reloc_target_sym(isec.obj, rel) {
+                if ctx.symtab[id].is_imported {
+                    binds.push((base + rel.offset as u64, id, rel.addend));
+                }
+            }
+        }
+    }
+
+    if binds.is_empty() {
+        return Vec::new();
+    }
+    binds.sort_unstable_by_key(|&(addr, _, _)| addr);
+
+    let mut buf = Vec::new();
+    let mut last_addend = 0i64;
+    for (addr, id, addend) in binds {
         let sym = &ctx.symtab[id];
         let Origin::Dylib(dylib) = sym.origin else {
-            continue;
+            unreachable!()
         };
         let ordinal = ctx.dylibs[dylib].dylib_idx;
         if ordinal < 16 {
@@ -574,16 +669,22 @@ fn build_bind_info<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
         buf.extend_from_slice(sym.name.as_bytes());
         buf.push(0);
         buf.push(BIND_OPCODE_SET_TYPE_IMM | BIND_TYPE_POINTER);
-        buf.push(BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB | seg_idx as u8);
-        write_uleb(&mut buf, got_addr + i as u64 * 8 - seg_vmaddr);
+        // The addend is bind-machine state: it persists across
+        // BIND opcodes, so emit SET_ADDEND_SLEB only on change.
+        if addend != last_addend {
+            buf.push(BIND_OPCODE_SET_ADDEND_SLEB);
+            crate::util::write_sleb(&mut buf, addend);
+            last_addend = addend;
+        }
+        let (seg, off) = segment_and_offset(ctx, addr);
+        buf.push(BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB | seg as u8);
+        write_uleb(&mut buf, off);
         buf.push(BIND_OPCODE_DO_BIND);
     }
 
-    if !buf.is_empty() {
-        buf.push(BIND_OPCODE_DONE);
-        while buf.len() % 8 != 0 {
-            buf.push(0);
-        }
+    buf.push(BIND_OPCODE_DONE);
+    while buf.len() % 8 != 0 {
+        buf.push(0);
     }
     buf
 }
@@ -628,6 +729,10 @@ pub fn copy_chunks<E: Arch>(ctx: &Context<E>, buf: &mut [u8]) {
                         buf[off..off + 8].copy_from_slice(&ctx.sym_addr(id).to_le_bytes());
                     }
                 }
+            }
+            ChunkKind::RebaseInfo => {
+                let off = chunk.hdr.fileoff as usize;
+                buf[off..off + ctx.rebase_data.len()].copy_from_slice(&ctx.rebase_data);
             }
             ChunkKind::BindInfo => {
                 let off = chunk.hdr.fileoff as usize;

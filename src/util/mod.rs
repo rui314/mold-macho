@@ -19,6 +19,18 @@ pub fn sign_extend(val: u64, n: u32) -> i64 {
 }
 
 /// Appends a ULEB128-encoded value.
+pub fn write_sleb(buf: &mut Vec<u8>, mut val: i64) {
+    loop {
+        let byte = (val & 0x7f) as u8;
+        val >>= 7;
+        let done = (val == 0 && byte & 0x40 == 0) || (val == -1 && byte & 0x40 != 0);
+        buf.push(if done { byte } else { byte | 0x80 });
+        if done {
+            return;
+        }
+    }
+}
+
 pub fn write_uleb(buf: &mut Vec<u8>, mut val: u64) {
     loop {
         let byte = (val & 0x7f) as u8;

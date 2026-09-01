@@ -40,6 +40,8 @@ pub enum ChunkKind {
     /// The global offset table: pointers to symbols, bound by dyld for
     /// imported ones.
     Got,
+    /// The rebase opcode stream for LC_DYLD_INFO, in __LINKEDIT.
+    RebaseInfo,
     /// The bind opcode stream for LC_DYLD_INFO, in __LINKEDIT.
     BindInfo,
     /// The indirect symbol table in __LINKEDIT.
@@ -211,6 +213,12 @@ fn create_dyld_info_cmd<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
         cmdsize: size_of::<DyldInfoCommand>() as u32,
         ..Default::default()
     };
+    if let Some(idx) = find_chunk(ctx, |k| matches!(k, ChunkKind::RebaseInfo)) {
+        if ctx.chunks[idx].hdr.size > 0 {
+            cmd.rebase_off = ctx.chunks[idx].hdr.fileoff as u32;
+            cmd.rebase_size = ctx.chunks[idx].hdr.size as u32;
+        }
+    }
     if let Some(idx) = find_chunk(ctx, |k| matches!(k, ChunkKind::BindInfo)) {
         if ctx.chunks[idx].hdr.size > 0 {
             cmd.bind_off = ctx.chunks[idx].hdr.fileoff as u32;
