@@ -616,6 +616,43 @@ pub fn dead_strip<E: Arch>(ctx: &mut Context<E>) {
     });
 }
 
+/// Drops load commands for dylibs no symbol binds to
+/// (-dead_strip_dylibs). Bind records name dylibs by their 1-based
+/// load-command ordinal, so surviving dylibs are renumbered and symbol
+/// origins remapped.
+pub fn dead_strip_dylibs<E: Arch>(ctx: &mut Context<E>) {
+    if !ctx.args.dead_strip_dylibs {
+        return;
+    }
+
+    let mut used = vec![false; ctx.dylibs.len()];
+    for sym in &ctx.symtab.syms {
+        if let Origin::Dylib(idx) = sym.origin {
+            if idx != usize::MAX {
+                used[idx] = true;
+            }
+        }
+    }
+
+    let mut remap = vec![usize::MAX; ctx.dylibs.len()];
+    let old = std::mem::take(&mut ctx.dylibs);
+    for (i, mut dylib) in old.into_iter().enumerate() {
+        if used[i] {
+            remap[i] = ctx.dylibs.len();
+            dylib.dylib_idx = ctx.dylibs.len() as i32 + 1;
+            ctx.dylibs.push(dylib);
+        }
+    }
+
+    for sym in &mut ctx.symtab.syms {
+        if let Origin::Dylib(idx) = sym.origin {
+            if idx != usize::MAX {
+                sym.origin = Origin::Dylib(remap[idx]);
+            }
+        }
+    }
+}
+
 /// Decides which symbols need a stub or a GOT slot, from how relocations
 /// refer to them.
 pub fn scan_relocs<E: Arch>(ctx: &mut Context<E>) {

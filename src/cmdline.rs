@@ -77,6 +77,9 @@ pub struct Args {
     /// -undefined dynamic_lookup: leave unresolved symbols to be looked
     /// up in any loaded image at run time.
     pub undefined_dynamic_lookup: bool,
+    /// -dead_strip_dylibs: drop load commands for dylibs nothing binds
+    /// to.
+    pub dead_strip_dylibs: bool,
     pub dynamic: bool,
     pub headerpad: u64,
     pub pagezero_size: u64,
@@ -116,6 +119,7 @@ impl Default for Args {
             strip_locals: false,
             suppress_warnings: false,
             undefined_dynamic_lookup: false,
+            dead_strip_dylibs: false,
             dynamic: true,
             headerpad: 0x100,
             pagezero_size: 0x1_0000_0000,
@@ -295,6 +299,7 @@ pub fn parse_args(diag: &Diagnostics, cmdline: &[String]) -> Args {
             }
 
             "-dead_strip" => args.dead_strip = true,
+            "-dead_strip_dylibs" => args.dead_strip_dylibs = true,
             "-S" => args.strip_debug = true,
             "-all_load" => args.all_load = true,
             "-u" => args
