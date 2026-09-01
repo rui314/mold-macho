@@ -167,6 +167,8 @@ pub struct Args {
     pub why_live: Vec<String>,
     /// -alias/-alias_list: (existing, new) symbol aliases to define.
     pub aliases: Vec<(String, String)>,
+    /// -sectalign: (segment, section, p2align) overrides.
+    pub sectalign: Vec<(String, String, u8)>,
     pub pagezero_size: u64,
     /// True when -pagezero_size was given explicitly (it is an error
     /// anywhere but a main executable).
@@ -237,6 +239,7 @@ impl Default for Args {
             why_load: false,
             why_live: Vec::new(),
             aliases: Vec::new(),
+            sectalign: Vec::new(),
             pagezero_size: 0x1_0000_0000,
             explicit_pagezero: false,
         }
@@ -506,6 +509,16 @@ pub fn parse_args(diag: &Diagnostics, cmdline: &[String]) -> Args {
             "--print-dependencies" => args.print_dependencies = true,
             "-why_load" | "-whyload" => args.why_load = true,
             "-why_live" => args.why_live.push(next_arg(&mut i).to_string()),
+            "-sectalign" => {
+                let seg = next_arg(&mut i).to_string();
+                let sect = next_arg(&mut i).to_string();
+                let val = next_arg(&mut i);
+                let align = parse_hex(diag, "-sectalign", val);
+                if !align.is_power_of_two() {
+                    fatal!(diag, "-sectalign: alignment not a power of two: {val}");
+                }
+                args.sectalign.push((seg, sect, align.trailing_zeros() as u8));
+            }
             "-alias" => {
                 let existing = next_arg(&mut i).to_string();
                 let new = next_arg(&mut i).to_string();

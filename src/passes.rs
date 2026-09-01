@@ -1829,6 +1829,18 @@ pub fn create_output_chunks<E: Arch>(ctx: &mut Context<E>) {
         ctx.isecs[i].osec = chunk_idx;
     }
 
+    // -sectalign overrides an output section's alignment, e.g. to
+    // page-align a blob that will be mapped or measured separately.
+    // It can only raise the alignment: subsections were placed by
+    // their own requirements, which must still hold.
+    for (seg, sect, p2align) in &ctx.args.sectalign.clone() {
+        for chunk in &mut ctx.chunks {
+            if chunk.hdr.is_sect && chunk.hdr.segname == *seg && chunk.hdr.sectname == *sect {
+                chunk.hdr.p2align = chunk.hdr.p2align.max(*p2align as u32);
+            }
+        }
+    }
+
     // -order_file moves the atoms it names to the front of their
     // output sections, in the file's order; everything else keeps its
     // input order behind them. A stable sort by rank does both.
