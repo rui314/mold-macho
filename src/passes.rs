@@ -1054,12 +1054,7 @@ pub fn scan_relocs<E: Arch>(ctx: &mut Context<E>) {
                 add_got(ctx, id);
             }
             RelocClass::Got => add_got(ctx, id),
-            RelocClass::Tlv => {
-                if ctx.symtab[id].is_imported {
-                    fatal!(ctx, "not implemented: thread-locals imported from a dylib");
-                }
-                add_thread_ptr(ctx, id);
-            }
+            RelocClass::Tlv => add_thread_ptr(ctx, id),
             _ => {}
         }
     }
@@ -2103,6 +2098,17 @@ fn build_bind_info<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
         for (i, &id) in ctx.got_syms.iter().enumerate() {
             if ctx.symtab[id].is_imported {
                 binds.push((got_addr + i as u64 * 8, id, 0));
+            }
+        }
+    }
+
+    // __thread_ptrs slots for thread-locals imported from dylibs: dyld
+    // writes the foreign TLV descriptor's address.
+    if let Some(idx) = output_chunks::find_chunk(ctx, |k| matches!(k, ChunkKind::ThreadPtrs)) {
+        let addr = ctx.chunks[idx].hdr.addr;
+        for (i, &id) in ctx.thread_ptr_syms.iter().enumerate() {
+            if ctx.symtab[id].is_imported {
+                binds.push((addr + i as u64 * 8, id, 0));
             }
         }
     }
