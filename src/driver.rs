@@ -118,6 +118,7 @@ pub fn link<E: Arch>(cmdline: &[String], diag: &Diagnostics) -> Result<i32, Stri
     passes::check_undefined_symbols(&mut ctx);
     passes::print_dependencies(&ctx);
     passes::print_why_load(&ctx);
+    passes::print_trace(&ctx);
     passes::dead_strip_dylibs(&mut ctx);
     ctx.diag.checkpoint();
     if ctx.args.dead_strip {

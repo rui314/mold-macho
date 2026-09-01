@@ -175,6 +175,8 @@ pub struct Args {
     /// -client_name: the name this link presents when checking
     /// subframework restrictions.
     pub client_name: Option<String>,
+    /// -t: print each file that takes part in the link.
+    pub trace: bool,
     pub pagezero_size: u64,
     /// True when -pagezero_size was given explicitly (it is an error
     /// anywhere but a main executable).
@@ -248,6 +250,7 @@ impl Default for Args {
             sectalign: Vec::new(),
             allowable_clients: Vec::new(),
             client_name: None,
+            trace: false,
             pagezero_size: 0x1_0000_0000,
             explicit_pagezero: false,
         }
@@ -521,6 +524,7 @@ pub fn parse_args(diag: &Diagnostics, cmdline: &[String]) -> Args {
                 args.allowable_clients.push(next_arg(&mut i).to_string())
             }
             "-client_name" => args.client_name = Some(next_arg(&mut i).to_string()),
+            "-t" => args.trace = true,
             "-sectalign" => {
                 let seg = next_arg(&mut i).to_string();
                 let sect = next_arg(&mut i).to_string();

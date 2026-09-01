@@ -69,6 +69,8 @@ pub fn find_subsec(
 /// A dynamic library, from a .tbd stub or a dylib binary.
 #[derive(Debug)]
 pub struct DylibFile {
+    /// The path the library was loaded from, for -t.
+    pub path: String,
     pub install_name: String,
     pub current_version: u32,
     pub compatibility_version: u32,
@@ -1270,6 +1272,7 @@ pub fn parse_dylib_binary<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile
     add_dylib(
         ctx,
         DylibFile {
+            path: mf.name.clone(),
             install_name,
             current_version,
             compatibility_version,
@@ -1545,6 +1548,7 @@ pub fn parse_dylib<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile) -> us
     add_dylib(
         ctx,
         DylibFile {
+            path: mf.name.clone(),
             install_name: tbd.install_name,
             current_version: tbd.current_version,
             compatibility_version: encode_version(1, 0, 0),

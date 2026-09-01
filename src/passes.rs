@@ -1185,6 +1185,26 @@ fn print_why_live<E: Arch>(ctx: &Context<E>, pred: &[usize], live: &[bool]) {
     }
 }
 
+/// -t traces the link's inputs: one line per file that contributes,
+/// objects by path (archive members as archive(member)) and dylib
+/// stubs by the path they were found at. In mold's model every input
+/// is parsed eagerly, so rather than logging opens - which would list
+/// archive members the link then discards - the trace reports what
+/// actually took part.
+pub fn print_trace<E: Arch>(ctx: &Context<E>) {
+    if !ctx.args.trace {
+        return;
+    }
+    for obj in &ctx.objs {
+        if obj.is_alive {
+            println!("{}", file_display(obj));
+        }
+    }
+    for dylib in &ctx.dylibs {
+        println!("{}", dylib.path);
+    }
+}
+
 /// -why_load reports what dragged each archive member into the link:
 /// "_symbol forced load of archive.a(member.o)", in ld64's wording.
 /// Members loaded unconditionally (-all_load, -force_load) are
