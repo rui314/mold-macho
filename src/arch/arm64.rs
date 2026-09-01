@@ -1,0 +1,193 @@
+//! The ARM64 (AArch64) target.
+
+use crate::arch::Arch;
+use crate::context::Context;
+use crate::error::Diagnostics;
+use crate::error;
+use crate::fatal;
+use crate::input_sections::{Reloc, RelocTarget};
+use crate::macho::*;
+use crate::util::{bits, sign_extend};
+
+#[derive(Clone, Copy, Default)]
+pub struct Arm64;
+
+fn page(val: u64) -> u64 {
+    val & !0xfff
+}
+
+/// Computes the ADRP immediate for reaching `hi`'s page from `lo`'s page.
+fn page_offset(hi: u64, lo: u64) -> u32 {
+    let val = page(hi).wrapping_sub(page(lo));
+    ((bits(val, 13, 12) << 29) | (bits(val, 32, 14) << 5)) as u32
+}
+
+fn read32(loc: &[u8]) -> u32 {
+    u32::from_le_bytes(loc[..4].try_into().unwrap())
+}
+
+fn write32(loc: &mut [u8], val: u32) {
+    loc[..4].copy_from_slice(&val.to_le_bytes());
+}
+
+fn write64(loc: &mut [u8], val: u64) {
+    loc[..8].copy_from_slice(&val.to_le_bytes());
+}
+
+/// Writes an immediate to an ADD, LDR or STR instruction.
+fn write_add_ldst(loc: &mut [u8], val: u64) {
+    let insn = read32(loc);
+    let mut scale = 0;
+
+    if insn & 0x3b00_0000 == 0x3900_0000 {
+        // LDR/STR accesses an aligned 1, 2, 4, 8 or 16 byte data on memory.
+        // The immediate is scaled by the data size, so we need to know the
+        // data size to write a correct immediate.
+        //
+        // The most significant two bits of the instruction usually
+        // specifies the data size.
+        scale = bits(insn as u64, 31, 30);
+
+        // Vector and byte LDR/STR shares the same scale bits.
+        // We can distinguish them by looking at other bits.
+        if scale == 0 && insn & 0x0480_0000 == 0x0480_0000 {
+            scale = 4;
+        }
+    }
+
+    write32(loc, insn | ((bits(val, 11, scale as u32) as u32) << 10));
+}
+
+impl Arch for Arm64 {
+    const NAME: &'static str = "arm64";
+    const CPUTYPE: u32 = CPU_TYPE_ARM64;
+    const CPUSUBTYPE: u32 = CPU_SUBTYPE_ARM64_ALL;
+    const PAGE_SIZE: u64 = 16384;
+
+    fn read_relocs(
+        diag: &Diagnostics,
+        file_name: &str,
+        sections: &[MachSection],
+        hdr: &MachSection,
+        file_data: &[u8],
+        rels: &[MachRel],
+    ) -> Vec<Reloc> {
+        let mut vec = Vec::with_capacity(rels.len());
+        let mut i = 0;
+
+        while i < rels.len() {
+            let mut addend: i64 = 0;
+
+            // A Mach-O relocation doesn't contain an addend. UNSIGNED
+            // relocs have addends in the relocated field. Addends for
+            // other types of relocations are specified by prepending an
+            // ADDEND reloc.
+            match rels[i].r_type() {
+                ARM64_RELOC_UNSIGNED => {
+                    let off = hdr.offset as usize + rels[i].r_address as usize;
+                    match 1 << rels[i].r_length() {
+                        4 => {
+                            let val = &file_data[off..off + 4];
+                            addend = i32::from_le_bytes(val.try_into().unwrap()) as i64;
+                        }
+                        8 => {
+                            let val = &file_data[off..off + 8];
+                            addend = i64::from_le_bytes(val.try_into().unwrap());
+                        }
+                        _ => fatal!(diag, "{file_name}: bad relocation size"),
+                    }
+                }
+                ARM64_RELOC_ADDEND => {
+                    addend = sign_extend(rels[i].r_symbolnum() as u64, 23);
+                    i += 1;
+                }
+                _ => {}
+            }
+
+            let r = &rels[i];
+            let is_subtracted = i > 0 && rels[i - 1].r_type() == ARM64_RELOC_SUBTRACTOR;
+
+            // A relocation refers to either a symbol or a section.
+            let (target, addend) = if r.is_extern() {
+                (RelocTarget::Sym(r.r_symbolnum() as usize), addend)
+            } else {
+                let addr = if r.is_pcrel() {
+                    (hdr.addr + r.r_address as u64).wrapping_add_signed(addend)
+                } else {
+                    addend as u64
+                };
+                let Some(idx) = sections
+                    .iter()
+                    .position(|sec| sec.addr <= addr && addr < sec.addr + sec.size)
+                else {
+                    fatal!(diag, "{file_name}: bad relocation: {}", r.r_address);
+                };
+                let target = RelocTarget::Section(idx);
+                (target, (addr - sections[idx].addr) as i64)
+            };
+
+            vec.push(Reloc {
+                offset: r.r_address,
+                r_type: r.r_type(),
+                size: 1 << r.r_length(),
+                is_pcrel: r.is_pcrel(),
+                is_subtracted,
+                target,
+                addend,
+            });
+            i += 1;
+        }
+
+        vec
+    }
+
+    fn apply_relocs(ctx: &Context<Self>, rels: &[Reloc], obj: usize, base: u64, buf: &mut [u8]) {
+        let mut i = 0;
+        while i < rels.len() {
+            let r = &rels[i];
+            let loc = &mut buf[r.offset as usize..];
+            let s = ctx.reloc_target_addr(obj, r);
+            let a = r.addend;
+            let p = base + r.offset as u64;
+
+            match r.r_type {
+                ARM64_RELOC_UNSIGNED => {
+                    debug_assert!(r.size == 8);
+                    write64(loc, s.wrapping_add_signed(a));
+                }
+                ARM64_RELOC_SUBTRACTOR => {
+                    // A SUBTRACTOR relocation is always followed by an
+                    // UNSIGNED relocation. They work as a pair to
+                    // materialize a relative address between two locations.
+                    i += 1;
+                    debug_assert!(rels[i].r_type == ARM64_RELOC_UNSIGNED);
+                    let val = ctx
+                        .reloc_target_addr(obj, &rels[i])
+                        .wrapping_add_signed(rels[i].addend)
+                        .wrapping_sub(s);
+                    match r.size {
+                        4 => write32(loc, val as u32),
+                        8 => write64(loc, val),
+                        _ => fatal!(ctx, "bad SUBTRACTOR relocation size"),
+                    }
+                }
+                ARM64_RELOC_BRANCH26 => {
+                    let val = s.wrapping_add_signed(a).wrapping_sub(p) as i64;
+                    if !(-(1 << 27)..1 << 27).contains(&val) {
+                        error!(ctx, "branch target out of range: {val:x}");
+                    }
+                    write32(loc, read32(loc) | bits(val as u64, 27, 2) as u32);
+                }
+                ARM64_RELOC_PAGE21 => {
+                    let val = read32(loc) | page_offset(s.wrapping_add_signed(a), p);
+                    write32(loc, val);
+                }
+                ARM64_RELOC_PAGEOFF12 => {
+                    write_add_ldst(loc, s.wrapping_add_signed(a));
+                }
+                _ => fatal!(ctx, "unsupported relocation type: {}", r.r_type),
+            }
+            i += 1;
+        }
+    }
+}

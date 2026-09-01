@@ -1,0 +1,19 @@
+[package]
+name = "mold-macho"
+version = "0.1.0"
+edition = "2021"
+description = "A high-performance Mach-O linker, a port of mold to macOS"
+license = "MIT"
+
+[lib]
+name = "mold_macho"
+
+# The linker is generic over the target. Each target is instantiated in a
+# crate of its own under targets/, and the executable in cli/ dispatches to
+# them, mirroring mold's ELF port.
+[workspace]
+members = ["cli", "targets/*", "tests"]
+default-members = [".", "cli", "targets/*", "tests"]
+
+[dependencies]
+libc = "0.2"

@@ -1,0 +1,9 @@
+[package]
+name = "mold-macho-tests"
+version = "0.1.0"
+edition = "2021"
+description = "Test support for mold's shell test suite"
+license = "MIT"
+publish = false
+
+[dependencies]

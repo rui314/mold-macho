@@ -1,0 +1,28 @@
+[package]
+name = "mold-macho-cli"
+version = "0.1.0"
+edition = "2021"
+description = "The mold Mach-O linker executable"
+license = "MIT"
+
+[[bin]]
+name = "ld64-mold"
+path = "src/main.rs"
+
+[[test]]
+name = "integration"
+path = "tests/integration.rs"
+harness = false
+
+[dependencies]
+mold-macho = { path = ".." }
+mold-macho-target-arm64 = { path = "../targets/arm64", optional = true }
+
+[dev-dependencies]
+mold-macho-tests = { path = "../tests" }
+
+# One feature per target. All are built by default; a build for one
+# target alone (`--no-default-features --features arm64`) is much faster.
+[features]
+default = ["arm64"]
+arm64 = ["dep:mold-macho-target-arm64"]
