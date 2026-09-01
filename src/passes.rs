@@ -106,7 +106,7 @@ fn find_library<E: Arch>(ctx: &Context<E>, name: &str) -> Option<PathBuf> {
     None
 }
 
-fn read_file<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile) {
+fn read_file<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile, force_load: bool) {
     match get_file_type(mf) {
         FileType::Object => {
             input_files::parse_object(ctx, mf);
@@ -118,15 +118,26 @@ fn read_file<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile) {
             input_files::parse_dylib_binary(ctx, mf);
         }
         FileType::Archive => {
-            // Archive members are loaded lazily: a member is loaded only
-            // once it defines a symbol that is undefined at resolution
-            // time.
+            // Archive members are normally loaded lazily: a member is
+            // linked only once it defines a symbol that is undefined at
+            // resolution time. -all_load and -force_load link every
+            // member; -ObjC also links members with Objective-C
+            // metadata, which register classes by their mere presence.
             let members = input_files::read_archive_members(ctx, mf);
-            ctx.lazy_objs.extend(members);
+            for member in members {
+                if force_load
+                    || ctx.args.all_load
+                    || (ctx.args.load_objc && input_files::has_objc_sections(member))
+                {
+                    input_files::parse_object(ctx, member);
+                } else {
+                    ctx.lazy_objs.push(member);
+                }
+            }
         }
         FileType::Fat => {
             let slice = input_files::get_fat_slice(ctx, mf);
-            read_file(ctx, slice);
+            read_file(ctx, slice, force_load);
         }
         FileType::Empty => {}
         _ => fatal!(ctx, "{}: unknown file type", mf.name),
@@ -139,19 +150,23 @@ pub fn read_input_files<E: Arch>(ctx: &mut Context<E>) {
         match arg {
             InputArg::File(path) => {
                 let mf = MappedFile::must_open(&ctx.diag, Path::new(path));
-                read_file(ctx, mf);
+                read_file(ctx, mf, false);
+            }
+            InputArg::ForceLoad(path) => {
+                let mf = MappedFile::must_open(&ctx.diag, Path::new(path));
+                read_file(ctx, mf, true);
             }
             InputArg::Lib(name) => match find_library(ctx, name) {
                 Some(path) => {
                     let mf = MappedFile::must_open(&ctx.diag, &path);
-                    read_file(ctx, mf);
+                    read_file(ctx, mf, false);
                 }
                 None => error!(ctx, "library not found: -l{name}"),
             },
             InputArg::Framework(name) => match find_framework(ctx, name) {
                 Some(path) => {
                     let mf = MappedFile::must_open(&ctx.diag, &path);
-                    read_file(ctx, mf);
+                    read_file(ctx, mf, false);
                 }
                 None => error!(ctx, "framework not found: {name}"),
             },

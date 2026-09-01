@@ -836,6 +836,38 @@ pub fn read_archive_members<E: Arch>(
     members
 }
 
+/// Returns true if an object contains Objective-C class or category
+/// metadata, which -ObjC forces to be linked from archives.
+pub fn has_objc_sections(mf: &MappedFile) -> bool {
+    let data = mf.data;
+    if data.len() < size_of::<MachHeader>() {
+        return false;
+    }
+    let hdr = MachHeader::read_from(data);
+    if hdr.magic != MH_MAGIC_64 {
+        return false;
+    }
+    let mut off = size_of::<MachHeader>();
+    for _ in 0..hdr.ncmds {
+        let lc = LoadCommand::read_from(&data[off..]);
+        if lc.cmd == LC_SEGMENT_64 {
+            let seg = SegmentCommand::read_from(&data[off..]);
+            for i in 0..seg.nsects as usize {
+                let sect_off = off + size_of::<SegmentCommand>() + i * size_of::<MachSection>();
+                let sect = MachSection::read_from(&data[sect_off..]);
+                if matches!(
+                    sect.sectname(),
+                    "__objc_classlist" | "__objc_catlist" | "__objc_nlclslist" | "__objc_nlcatlist"
+                ) {
+                    return true;
+                }
+            }
+        }
+        off += lc.cmdsize as usize;
+    }
+    false
+}
+
 /// Returns the names of the global symbols an object file defines,
 /// without creating any linker state. Used to decide whether to load an
 /// archive member.

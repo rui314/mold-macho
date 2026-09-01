@@ -17,6 +17,8 @@ pub enum InputArg {
     /// `-framework Foo`: a framework to search for in the framework
     /// paths.
     Framework(String),
+    /// `-force_load path`: an archive all of whose members are linked.
+    ForceLoad(String),
 }
 
 /// Parsed command line arguments.
@@ -38,6 +40,8 @@ pub struct Args {
     pub rpaths: Vec<String>,
     pub adhoc_codesign: bool,
     pub dead_strip: bool,
+    pub all_load: bool,
+    pub load_objc: bool,
     pub dynamic: bool,
     pub headerpad: u64,
     pub pagezero_size: u64,
@@ -61,6 +65,8 @@ impl Default for Args {
             rpaths: Vec::new(),
             adhoc_codesign: true,
             dead_strip: false,
+            all_load: false,
+            load_objc: false,
             dynamic: true,
             headerpad: 0x100,
             pagezero_size: 0x1_0000_0000,
@@ -139,6 +145,12 @@ pub fn parse_args(diag: &Diagnostics, cmdline: &[String]) -> Args {
             }
 
             "-dead_strip" => args.dead_strip = true,
+            "-all_load" => args.all_load = true,
+            "-noall_load" => args.all_load = false,
+            "-ObjC" => args.load_objc = true,
+            "-force_load" => args
+                .inputs
+                .push(InputArg::ForceLoad(next_arg(&mut i).to_string())),
 
             // Ignored options
             "-demangle" | "-no_deduplicate" | "-no_uuid" => {}
