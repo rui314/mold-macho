@@ -490,8 +490,19 @@ fn do_resolve<E: Arch>(ctx: &mut Context<E>, only_alive: bool) {
             if rank >= best[sym_id] {
                 if only_alive && rank >> 32 == 0 && best[sym_id] >> 32 == 0 && rank != best[sym_id]
                 {
-                    // Two live strong definitions.
-                    error!(ctx, "duplicate symbol: {}", ctx.symtab[sym_id].name);
+                    // Two live strong definitions. Name both files,
+                    // newly seen one first, like ld64.
+                    let prev = match ctx.symtab[sym_id].origin {
+                        Origin::Obj(idx) => file_display(&ctx.objs[idx]),
+                        _ => "?".to_string(),
+                    };
+                    error!(
+                        ctx,
+                        "duplicate symbol: {}: {}: {}",
+                        file_display(&ctx.objs[obj_idx]),
+                        prev,
+                        ctx.symtab[sym_id].name
+                    );
                 }
                 continue;
             }
@@ -906,6 +917,30 @@ pub fn create_objc_msgsend_stubs<E: Arch>(ctx: &mut Context<E>) {
 /// `-undefined dynamic_lookup` they become flat-namespace imports that
 /// dyld resolves against any loaded image at run time.
 pub fn check_undefined_symbols<E: Arch>(ctx: &mut Context<E>) {
+    // Errors name a file that wants the symbol; the map from symbol to
+    // referencing object is built only once an error is certain.
+    let mut referencers: Option<std::collections::HashMap<usize, usize>> = None;
+    let mut who_wants = |ctx: &Context<E>, id: usize| -> String {
+        let map = referencers.get_or_insert_with(|| {
+            let mut map = std::collections::HashMap::new();
+            for (obj_idx, obj) in ctx.objs.iter().enumerate() {
+                if !obj.is_alive {
+                    continue;
+                }
+                for (nlist, &sym_id) in obj.nlists.iter().zip(&obj.syms) {
+                    if !nlist.is_stab() && nlist.n_type() == N_UNDF && !nlist.is_common() {
+                        map.entry(sym_id).or_insert(obj_idx);
+                    }
+                }
+            }
+            map
+        });
+        match map.get(&id) {
+            Some(&obj_idx) => file_display(&ctx.objs[obj_idx]),
+            None => "<synthesized>".to_string(),
+        }
+    };
+
     for i in 0..ctx.symtab.syms.len() {
         let sym = &ctx.symtab[i];
         if sym.is_used && !sym.is_defined() {
@@ -920,10 +955,18 @@ pub fn check_undefined_symbols<E: Arch>(ctx: &mut Context<E>) {
                 sym.is_imported = true;
                 sym.is_extern = true;
             } else {
-                error!(ctx, "undefined symbol: {}", sym.name);
+                let file = who_wants(ctx, i);
+                error!(ctx, "undefined symbol: {}: {}", file, ctx.symtab[i].name);
             }
         }
     }
+}
+
+/// A file name for diagnostics: the object's path. Archive members
+/// already carry their "archive(member)" form as their mapped-file
+/// name.
+fn file_display(obj: &crate::input_files::ObjectFile) -> String {
+    obj.mf.name.clone()
 }
 
 /// Removes subsections that are not reachable from the roots: the entry

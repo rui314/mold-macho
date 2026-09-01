@@ -1,14 +1,14 @@
-#!/usr/bin/env bash
-. $(dirname $0)/common.inc
+#!/bin/bash
+source "$(dirname "$0")"/common.inc
 
-cat <<EOF2 | $CC -o $t/a.o -c -xc -
-int foo() { return 1; }
-EOF2
+cat <<EOF | $CC -o $t/a.o -c -xc -
+void hello() {}
+EOF
 
-cat <<EOF2 | $CC -o $t/b.o -c -xc -
-int foo() { return 2; }
-int main() { return 0; }
-EOF2
+cat <<EOF | $CC -o $t/b.o -c -xc -
+void hello() {}
+int main() {}
+EOF
 
-! $CC --ld-path=$mold -o $t/exe $t/a.o $t/b.o 2> $t/log
-grep -q 'duplicate symbol: _foo' $t/log
+! $CC --ld-path=$mold -o $t/exe $t/a.o $t/b.o 2> $t/log || false
+grep -q 'duplicate symbol: .*/b.o: .*/a.o: _hello' $t/log
