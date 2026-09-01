@@ -543,7 +543,11 @@ pub fn copy_mach_header<E: Arch>(ctx: &Context<E>, buf: &mut [u8]) {
         filetype: ctx.args.output_type,
         ncmds: cmds.len() as u32,
         sizeofcmds: cmds.iter().map(Vec::len).sum::<usize>() as u32,
-        flags: MH_NOUNDEFS | MH_DYLDLINK | MH_TWOLEVEL,
+        flags: if ctx.args.flat_namespace {
+            MH_NOUNDEFS | MH_DYLDLINK
+        } else {
+            MH_NOUNDEFS | MH_DYLDLINK | MH_TWOLEVEL
+        },
         reserved: 0,
     };
 

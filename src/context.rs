@@ -144,6 +144,17 @@ impl<E: Arch> Context<E> {
         }
     }
 
+    /// Returns the bind ordinal for a symbol imported from `dylib`:
+    /// the dylib's load-command ordinal under two-level namespace, or
+    /// the flat-lookup sentinel with -flat_namespace / dynamic lookup.
+    pub fn bind_ordinal(&self, dylib: usize) -> i32 {
+        if self.args.flat_namespace || dylib == usize::MAX {
+            crate::macho::BIND_SPECIAL_DYLIB_FLAT_LOOKUP
+        } else {
+            self.dylibs[dylib].dylib_idx
+        }
+    }
+
     /// Returns the next input-order priority value.
     pub fn next_priority(&mut self) -> u32 {
         self.priority_counter += 1;

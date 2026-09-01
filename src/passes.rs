@@ -1873,11 +1873,7 @@ pub fn compute_symtab<E: Arch>(ctx: &mut Context<E>) {
         };
         let n_strx = add_string(&mut data.strtab, sym.name);
         // A flat-namespace import records the DYNAMIC_LOOKUP ordinal.
-        let ordinal = if dylib == usize::MAX {
-            (BIND_SPECIAL_DYLIB_FLAT_LOOKUP as u8) as u16
-        } else {
-            ctx.dylibs[dylib].dylib_idx as u16
-        };
+        let ordinal = (ctx.bind_ordinal(dylib) as u8) as u16;
         let mut n_desc = ordinal << 8;
         if sym.is_weak_ref {
             n_desc |= N_WEAK_REF;
@@ -2195,17 +2191,14 @@ fn build_bind_info<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
         let Origin::Dylib(dylib) = sym.origin else {
             unreachable!()
         };
-        if dylib == usize::MAX {
-            let imm = (BIND_SPECIAL_DYLIB_FLAT_LOOKUP & 0xf) as u8;
-            buf.push(BIND_OPCODE_SET_DYLIB_SPECIAL_IMM | imm);
+        let ordinal = ctx.bind_ordinal(dylib);
+        if ordinal < 0 {
+            buf.push(BIND_OPCODE_SET_DYLIB_SPECIAL_IMM | (ordinal & 0xf) as u8);
+        } else if ordinal < 16 {
+            buf.push(BIND_OPCODE_SET_DYLIB_ORDINAL_IMM | ordinal as u8);
         } else {
-            let ordinal = ctx.dylibs[dylib].dylib_idx;
-            if ordinal < 16 {
-                buf.push(BIND_OPCODE_SET_DYLIB_ORDINAL_IMM | ordinal as u8);
-            } else {
-                buf.push(BIND_OPCODE_SET_DYLIB_ORDINAL_ULEB);
-                write_uleb(&mut buf, ordinal as u64);
-            }
+            buf.push(BIND_OPCODE_SET_DYLIB_ORDINAL_ULEB);
+            write_uleb(&mut buf, ordinal as u64);
         }
         let flags = if sym.is_weak_ref {
             BIND_SYMBOL_FLAGS_WEAK_IMPORT
@@ -2425,11 +2418,7 @@ fn build_chained_fixups<E: Arch>(ctx: &mut Context<E>) {
         let Origin::Dylib(dylib) = s.origin else {
             unreachable!()
         };
-        let ordinal = if dylib == usize::MAX {
-            BIND_SPECIAL_DYLIB_FLAT_LOOKUP as u8
-        } else {
-            ctx.dylibs[dylib].dylib_idx as u32 as u8
-        };
+        let ordinal = ctx.bind_ordinal(dylib) as u8;
         let weak = s.is_weak_ref as u32;
         match import_format {
             DYLD_CHAINED_IMPORT => {
