@@ -198,29 +198,35 @@ pub fn resolve_archive_members<E: Arch>(ctx: &mut Context<E>) {
     }
     ctx.args.forced_undefined = forced;
 
+    // Index every lazy member's defined symbols once; for a name defined
+    // by several members, the first in command line order wins.
+    let lazy_objs = std::mem::take(&mut ctx.lazy_objs);
+    let mut index: std::collections::HashMap<&'static str, usize> =
+        std::collections::HashMap::new();
+    for (i, mf) in lazy_objs.iter().enumerate() {
+        for name in input_files::defined_symbol_names(mf) {
+            index.entry(name).or_insert(i);
+        }
+    }
+
+    let mut loaded = vec![false; lazy_objs.len()];
     loop {
-        let undefined: std::collections::HashSet<&str> = ctx
+        let needed: Vec<usize> = ctx
             .symtab
             .syms
             .iter()
             .filter(|sym| sym.is_used && !sym.is_defined() && !sym.is_common)
-            .map(|sym| sym.name)
+            .filter_map(|sym| index.get(sym.name).copied())
+            .filter(|&i| !loaded[i])
             .collect();
-        if undefined.is_empty() {
-            return;
+        if needed.is_empty() {
+            break;
         }
-
-        let needed = ctx.lazy_objs.iter().position(|mf| {
-            input_files::defined_symbol_names(mf)
-                .iter()
-                .any(|name| undefined.contains(name))
-        });
-        match needed {
-            Some(idx) => {
-                let mf = ctx.lazy_objs.remove(idx);
-                input_files::parse_object(ctx, mf);
+        for i in needed {
+            if !loaded[i] {
+                loaded[i] = true;
+                input_files::parse_object(ctx, lazy_objs[i]);
             }
-            None => return,
         }
     }
 }
