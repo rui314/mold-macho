@@ -2,18 +2,26 @@
 
 use crate::arch::Arch;
 use crate::context::Context;
-use crate::error;
 use crate::fatal;
 use crate::input_sections::InputSection;
 use crate::macho::*;
 use crate::mapped_file::MappedFile;
-use crate::symbol::{Origin, SymbolId};
+use crate::symbol::SymbolId;
 use crate::tapi;
 
 /// A relocatable object file.
 #[derive(Debug)]
 pub struct ObjectFile {
     pub mf: &'static MappedFile,
+    /// False for an archive member no live code needs (yet). Dead
+    /// files' subsections never reach the output.
+    pub is_alive: bool,
+    /// Position in input order, for resolution tie-breaking: the
+    /// earlier file wins.
+    pub priority: u32,
+    /// LC_LINKER_OPTION auto-link requests, acted on only if the file
+    /// is live.
+    pub linker_options: Vec<Vec<String>>,
     /// Section headers in ordinal order (all segments' sections
     /// concatenated in load command order).
     pub sect_hdrs: Vec<MachSection>,
@@ -60,6 +68,8 @@ pub struct DylibFile {
     pub compatibility_version: u32,
     /// The 1-based ordinal used to refer to this dylib in bind records.
     pub dylib_idx: i32,
+    /// Position in input order, for resolution tie-breaking.
+    pub priority: u32,
     /// True if loaded with LC_LOAD_WEAK_DYLIB: dyld tolerates the
     /// library missing at load time.
     pub is_weak: bool,
@@ -74,7 +84,7 @@ fn is_discarded_section(hdr: &MachSection) -> bool {
     hdr.flags & S_ATTR_DEBUG != 0 || hdr.segname() == "__DWARF" || hdr.segname() == "__LD"
 }
 
-pub fn parse_object<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile) -> usize {
+pub fn parse_object<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile, alive: bool) -> usize {
     let data = mf.data;
     let hdr = MachHeader::read_from(data);
 
@@ -90,6 +100,7 @@ pub fn parse_object<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile) -> u
     let obj_idx = ctx.objs.len();
     let mut sect_hdrs = Vec::new();
     let mut symtab_cmd = None;
+    let mut linker_options = Vec::new();
 
     // Read load commands
     let mut off = size_of::<MachHeader>();
@@ -117,7 +128,7 @@ pub fn parse_object<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile) -> u
                     strs.push(String::from_utf8_lossy(&rest[..len]).into_owned());
                     p += len + 1;
                 }
-                ctx.pending_linker_options.push(strs);
+                linker_options.push(strs);
             }
             _ => {}
         }
@@ -222,18 +233,6 @@ pub fn parse_object<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile) -> u
                 let lo = sect.offset as u64 + (start - sect.addr);
                 &data[lo as usize..(lo + (end - start)) as usize]
             };
-            // Merge a literal element with an identical existing one.
-            let mut replacement = None;
-            if is_literal(sect) && sect.section_type() != S_LITERAL_POINTERS {
-                let key = (sect.section_type(), contents);
-                match ctx.literals.get(&key) {
-                    Some(&winner) => replacement = Some(winner),
-                    None => {
-                        ctx.literals.insert(key, ctx.isecs.len());
-                    }
-                }
-            }
-
             ctx.isecs.push(InputSection {
                 obj: obj_idx,
                 hdr: *sect,
@@ -244,13 +243,8 @@ pub fn parse_object<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile) -> u
                 osec: usize::MAX,
                 output_offset: 0,
                 is_alive: true,
-                replacement,
+                replacement: None,
             });
-            if let Some(winner) = replacement {
-                let p2align = sect.p2align;
-                let winner = &mut ctx.isecs[winner];
-                winner.hdr.p2align = winner.hdr.p2align.max(p2align);
-            }
             by_ordinal[i].push(ctx.isecs.len() - 1);
             subsecs.push(ctx.isecs.len() - 1);
         }
@@ -291,9 +285,7 @@ pub fn parse_object<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile) -> u
     // Parse symbols
     let mut syms = Vec::with_capacity(nlists.len());
     for nlist in &nlists {
-        syms.push(parse_symbol(
-            ctx, obj_idx, &by_ordinal, strtab, nlist, &mf.name,
-        ));
+        syms.push(parse_symbol(ctx, strtab, nlist));
     }
 
     let unwind_start = ctx.unwind_records.len();
@@ -332,8 +324,12 @@ pub fn parse_object<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile) -> u
         .iter()
         .any(|s| s.segname() == "__DWARF" && s.sectname() == "__debug_info");
 
+    let priority = ctx.next_priority();
     ctx.objs.push(ObjectFile {
         mf,
+        is_alive: alive,
+        priority,
+        linker_options,
         sect_hdrs,
         subsecs,
         objc_image_info,
@@ -359,55 +355,46 @@ pub fn ensure_lto_plugin<E: Arch>(ctx: &mut Context<E>) -> crate::lto::Plugin {
 /// Registers a bitcode input: a placeholder object that claims the
 /// module's symbols so resolution works, compiled for real by LTO once
 /// all inputs are known.
-pub fn parse_bitcode<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile) -> usize {
+pub fn parse_bitcode<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile, alive: bool) -> usize {
     let plugin = ensure_lto_plugin(ctx);
     let (module, lsyms) = crate::lto::parse_module(&ctx.diag, &plugin, mf.data, &mf.name);
 
     let obj_idx = ctx.objs.len();
-    let mut syms = Vec::with_capacity(lsyms.len());
+    let mut syms = Vec::new();
+    let mut nlists = Vec::new();
 
+    // Symbols are expressed as synthesized nlists so that the regular
+    // resolution pass handles bitcode like any object.
     for ls in lsyms {
+        if !ls.is_extern && ls.is_defined {
+            continue;
+        }
         let name: &'static str = String::leak(ls.name);
-        if !ls.is_defined {
-            let id = ctx.symtab.intern(name);
-            ctx.symtab[id].is_used = true;
-            syms.push(id);
-            continue;
-        }
-        if !ls.is_extern {
-            syms.push(ctx.symtab.add_local(name));
-            continue;
-        }
-
         let id = ctx.symtab.intern(name);
-        let sym = &ctx.symtab[id];
-        match sym.origin {
-            Origin::Obj(_) if !sym.is_weak_def && !ls.is_weak_def => {
-                error!(ctx, "duplicate symbol: {name}");
+        let mut nlist = NList::default();
+        if ls.is_defined {
+            nlist.n_type = N_ABS | N_EXT | if ls.is_private_extern { N_PEXT } else { 0 };
+            if ls.is_weak_def {
+                nlist.n_desc |= N_WEAK_DEF;
             }
-            Origin::Obj(_) if ls.is_weak_def => {}
-            _ => {
-                let sym = &mut ctx.symtab[id];
-                sym.origin = Origin::Obj(obj_idx);
-                sym.isec = None;
-                sym.value = 0;
-                sym.is_extern = true;
-                sym.is_weak_def = ls.is_weak_def;
-                sym.is_private_extern = ls.is_private_extern;
-                sym.is_imported = false;
-                sym.is_common = false;
-            }
+        } else {
+            nlist.n_type = N_UNDF | N_EXT;
         }
+        nlists.push(nlist);
         syms.push(id);
     }
 
+    let priority = ctx.next_priority();
     ctx.objs.push(ObjectFile {
         mf,
+        is_alive: alive,
+        priority,
+        linker_options: Vec::new(),
         sect_hdrs: Vec::new(),
         subsecs: Vec::new(),
         objc_image_info: None,
         has_debug_info: false,
-        nlists: Vec::new(),
+        nlists,
         syms,
         lto_module: Some(module),
     });
@@ -424,89 +411,19 @@ fn symbol_name(strtab: &'static [u8], nlist: &NList) -> &'static str {
 
 fn parse_symbol<E: Arch>(
     ctx: &mut Context<E>,
-    obj_idx: usize,
-    by_ordinal: &[Vec<usize>],
     strtab: &'static [u8],
     nlist: &NList,
-    file_name: &str,
 ) -> SymbolId {
     let name = symbol_name(strtab, nlist);
 
     if nlist.is_stab() {
         return ctx.symtab.add_local(name);
     }
-
-    let id = if nlist.is_extern() {
+    if nlist.is_extern() {
         ctx.symtab.intern(name)
     } else {
         ctx.symtab.add_local(name)
-    };
-
-    match nlist.n_type() {
-        N_UNDF => {
-            let sym = &mut ctx.symtab[id];
-            sym.is_used = true;
-            if nlist.n_desc & N_WEAK_REF != 0 {
-                sym.is_weak_ref = true;
-            }
-            // A common symbol is a tentative definition: any real
-            // definition beats it, and the largest tentative size wins.
-            if nlist.is_common() && !sym.is_defined() {
-                sym.is_common = true;
-                sym.value = sym.value.max(nlist.n_value);
-                sym.common_p2align = sym.common_p2align.max(((nlist.n_desc >> 8) & 0xf) as u8);
-            }
-        }
-        N_ABS => {
-            let sym = &mut ctx.symtab[id];
-            if let Origin::Obj(_) = sym.origin {
-                error!(ctx, "duplicate symbol: {name}");
-            } else {
-                let sym = &mut ctx.symtab[id];
-                sym.origin = Origin::Obj(obj_idx);
-                sym.isec = None;
-                sym.value = nlist.n_value;
-                sym.is_extern = nlist.is_extern();
-            }
-        }
-        N_SECT => {
-            let Some(subsecs) = by_ordinal.get(nlist.n_sect as usize - 1) else {
-                fatal!(ctx, "{file_name}: invalid section index for {name}");
-            };
-            // A symbol in a discarded section (e.g. a debug section
-            // label) is not defined.
-            let Some((isec, value)) = find_subsec(&ctx.isecs, subsecs, nlist.n_value)
-            else {
-                return id;
-            };
-
-            let is_weak = nlist.n_desc & N_WEAK_DEF != 0;
-            let sym = &ctx.symtab[id];
-            match sym.origin {
-                Origin::Obj(_) if !sym.is_weak_def && !is_weak => {
-                    error!(ctx, "duplicate symbol: {name}");
-                }
-                Origin::Obj(_) if is_weak => {
-                    // Keep the existing definition.
-                }
-                _ => {
-                    let sym = &mut ctx.symtab[id];
-                    sym.origin = Origin::Obj(obj_idx);
-                    sym.isec = Some(isec);
-                    sym.value = value;
-                    sym.is_extern = nlist.is_extern();
-                    sym.is_weak_def = is_weak;
-                    sym.is_imported = false;
-                    sym.is_common = false;
-                    sym.no_dead_strip =
-                        nlist.n_desc & (N_NO_DEAD_STRIP | REFERENCED_DYNAMICALLY) != 0;
-                    sym.is_private_extern = nlist.n_type & N_PEXT != 0;
-                }
-            }
-        }
-        _ => fatal!(ctx, "{file_name}: unsupported symbol type for {name}"),
     }
-    id
 }
 
 /// A record from a __compact_unwind section, describing how to unwind
@@ -597,22 +514,20 @@ fn parse_compact_unwind<E: Arch>(
         let value = read_u64(r.r_address as u64);
 
         match r.r_address as usize % ENTRY_SIZE {
-            // The function the record covers
+            // The function the record covers. For an extern reference
+            // the target is this object's own definition, located by
+            // its nlist value.
             0 => {
-                if r.is_extern() {
-                    let sym = &ctx.symtab[syms[r.r_symbolnum() as usize]];
-                    let Some(isec) = sym.isec else {
-                        fatal!(ctx, "{file_name}: __compact_unwind: bad function reference");
-                    };
-                    records[idx].isec = isec;
-                    records[idx].input_offset = (sym.value + value) as u32;
+                let addr = if r.is_extern() {
+                    nlists[r.r_symbolnum() as usize].n_value + value
                 } else {
-                    let Some((isec, off)) = find_subsec(value) else {
-                        fatal!(ctx, "{file_name}: __compact_unwind: bad function reference");
-                    };
-                    records[idx].isec = isec;
-                    records[idx].input_offset = off;
-                }
+                    value
+                };
+                let Some((isec, off)) = find_subsec(addr) else {
+                    fatal!(ctx, "{file_name}: __compact_unwind: bad function reference");
+                };
+                records[idx].isec = isec;
+                records[idx].input_offset = off;
             }
             // The personality function
             16 => {
@@ -633,18 +548,15 @@ fn parse_compact_unwind<E: Arch>(
             }
             // The language-specific data area
             24 => {
-                if r.is_extern() {
-                    let sym = &ctx.symtab[syms[r.r_symbolnum() as usize]];
-                    let Some(isec) = sym.isec else {
-                        fatal!(ctx, "{file_name}: __compact_unwind: bad LSDA reference");
-                    };
-                    records[idx].lsda = Some((isec, (sym.value + value) as u32));
+                let addr = if r.is_extern() {
+                    nlists[r.r_symbolnum() as usize].n_value + value
                 } else {
-                    let Some(lsda) = find_subsec(value) else {
-                        fatal!(ctx, "{file_name}: __compact_unwind: bad LSDA reference");
-                    };
-                    records[idx].lsda = Some(lsda);
-                }
+                    value
+                };
+                let Some(lsda) = find_subsec(addr) else {
+                    fatal!(ctx, "{file_name}: __compact_unwind: bad LSDA reference");
+                };
+                records[idx].lsda = Some(lsda);
             }
             _ => fatal!(ctx, "{file_name}: __compact_unwind: unsupported relocation"),
         }
@@ -1134,6 +1046,7 @@ pub fn parse_dylib_binary<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile
     }
 
     let idx = ctx.dylibs.len();
+    let priority = ctx.next_priority();
     add_dylib(
         ctx,
         DylibFile {
@@ -1141,6 +1054,7 @@ pub fn parse_dylib_binary<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile
             current_version,
             compatibility_version,
             dylib_idx: idx as i32 + 1,
+            priority,
             is_weak: false,
             exports,
         },
@@ -1200,6 +1114,7 @@ pub fn parse_dylib<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile) -> us
         queue.extend(dep_tbd.external_reexports);
     }
 
+    let priority = ctx.next_priority();
     add_dylib(
         ctx,
         DylibFile {
@@ -1207,6 +1122,7 @@ pub fn parse_dylib<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile) -> us
             current_version: tbd.current_version,
             compatibility_version: encode_version(1, 0, 0),
             dylib_idx: idx as i32 + 1,
+            priority,
             is_weak: false,
             exports,
         },

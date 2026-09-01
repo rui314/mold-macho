@@ -22,9 +22,8 @@ pub struct Context<E: Arch> {
     pub symtab: SymbolTable,
     /// All input sections, in one arena.
     pub isecs: Vec<InputSection>,
-    /// Archive members not yet loaded; a member is loaded when it
-    /// defines a symbol that is still undefined.
-    pub lazy_objs: Vec<&'static crate::mapped_file::MappedFile>,
+    /// Input-order counter for resolution tie-breaking.
+    pub priority_counter: u32,
     /// Files already loaded, so a library named twice (command line
     /// plus auto-link) is read once.
     pub visited_files: std::collections::HashSet<String>,
@@ -33,10 +32,8 @@ pub struct Context<E: Arch> {
     /// Bitcode modules registered for LTO: the pseudo object index and
     /// the lto_module handle.
     pub lto_modules: Vec<(usize, usize)>,
-    /// Auto-link options (LC_LINKER_OPTION) collected from objects and
-    /// not yet acted on, e.g. ["-lswiftCore"] or
-    /// ["-framework", "Foundation"].
-    pub pending_linker_options: Vec<Vec<String>>,
+    /// Auto-link options already acted on.
+    pub processed_linker_options: std::collections::HashSet<Vec<String>>,
     /// Unwind records from all objects' __compact_unwind sections.
     pub unwind_records: Vec<crate::input_files::UnwindRecord>,
     /// DWARF CIEs and FDEs from all objects' __eh_frame sections.
@@ -108,11 +105,11 @@ impl<E: Arch> Context<E> {
             dylibs: Vec::new(),
             symtab: SymbolTable::default(),
             isecs: Vec::new(),
-            lazy_objs: Vec::new(),
+            priority_counter: 0,
             lto_plugin: None,
             lto_modules: Vec::new(),
             visited_files: std::collections::HashSet::new(),
-            pending_linker_options: Vec::new(),
+            processed_linker_options: std::collections::HashSet::new(),
             unwind_records: Vec::new(),
             cies: Vec::new(),
             fdes: Vec::new(),
@@ -141,6 +138,12 @@ impl<E: Arch> Context<E> {
             output_size: 0,
             _marker: PhantomData,
         }
+    }
+
+    /// Returns the next input-order priority value.
+    pub fn next_priority(&mut self) -> u32 {
+        self.priority_counter += 1;
+        self.priority_counter
     }
 
     /// Returns true if the output uses chained fixups rather than

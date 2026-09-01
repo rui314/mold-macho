@@ -762,6 +762,7 @@ pub fn encode_export_trie<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
 /// output is written, with every referenced address final.
 pub fn encode_unwind_info<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
     let mut records = ctx.unwind_records.clone();
+    records.retain(|rec| ctx.isecs[rec.isec].is_alive);
     if records.is_empty() {
         return Vec::new();
     }

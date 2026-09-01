@@ -20,7 +20,9 @@ pub fn print_map<E: Arch>(ctx: &Context<E>) {
     let _ = writeln!(out, "# Arch: {}", E::NAME);
     let _ = writeln!(out, "# Object files:");
     for (i, obj) in ctx.objs.iter().enumerate() {
-        let _ = writeln!(out, "[{i:3}] {}", obj.mf.name);
+        if obj.is_alive {
+            let _ = writeln!(out, "[{i:3}] {}", obj.mf.name);
+        }
     }
 
     let _ = writeln!(out, "# Sections:");

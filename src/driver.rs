@@ -82,28 +82,30 @@ pub fn link<E: Arch>(cmdline: &[String], diag: &Diagnostics) -> Result<i32, Stri
     let mut ctx: Context<E> = Context::new(args, Diagnostics::new(false));
     ctx.diag.set_suppress_warnings(ctx.args.suppress_warnings);
 
-    // Read input files and resolve symbols
+    // Read every input eagerly, then resolve; loading auto-linked
+    // libraries or the LTO output adds inputs, so resolution repeats
+    // until the input set is stable.
     passes::read_input_files(&mut ctx);
     ctx.diag.checkpoint();
+    loop {
+        passes::resolve_symbols(&mut ctx);
+        if !passes::load_autolink_deps(&mut ctx) {
+            break;
+        }
+    }
+    if passes::run_lto(&mut ctx) {
+        loop {
+            passes::resolve_symbols(&mut ctx);
+            if !passes::load_autolink_deps(&mut ctx) {
+                break;
+            }
+        }
+    }
+    passes::sweep_dead_files(&mut ctx);
+    passes::merge_literals(&mut ctx);
     passes::create_synthetic_symbols(&mut ctx);
-    loop {
-        passes::resolve_archive_members(&mut ctx);
-        if !passes::load_autolink_deps(&mut ctx) {
-            break;
-        }
-    }
-    // LTO output can reference symbols that archives provide, so
-    // resolution runs again afterwards.
-    passes::run_lto(&mut ctx);
-    loop {
-        passes::resolve_archive_members(&mut ctx);
-        if !passes::load_autolink_deps(&mut ctx) {
-            break;
-        }
-    }
     passes::convert_common_symbols(&mut ctx);
     passes::create_objc_msgsend_stubs(&mut ctx);
-    passes::resolve_dylib_symbols(&mut ctx);
     passes::check_undefined_symbols(&mut ctx);
     passes::dead_strip_dylibs(&mut ctx);
     ctx.diag.checkpoint();

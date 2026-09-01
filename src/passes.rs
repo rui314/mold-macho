@@ -114,7 +114,7 @@ fn read_file<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile, force_load:
     }
     match get_file_type(mf) {
         FileType::Object => {
-            input_files::parse_object(ctx, mf);
+            input_files::parse_object(ctx, mf, true);
         }
         FileType::Tapi => {
             let idx = input_files::parse_dylib(ctx, mf);
@@ -129,20 +129,24 @@ fn read_file<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile, force_load:
             }
         }
         FileType::Archive => {
-            // Archive members are normally loaded lazily: a member is
-            // linked only once it defines a symbol that is undefined at
-            // resolution time. -all_load and -force_load link every
-            // member; -ObjC also links members with Objective-C
-            // metadata, which register classes by their mere presence.
+            // Every member is parsed eagerly; whether it is *live* -
+            // whether its content reaches the output - is decided by
+            // symbol resolution and the liveness walk. -all_load and
+            // -force_load make every member live up front; -ObjC does
+            // so for members with Objective-C metadata, which register
+            // classes by their mere presence.
             let members = input_files::read_archive_members(ctx, mf);
             for member in members {
-                if force_load
+                let alive = force_load
                     || ctx.args.all_load
-                    || (ctx.args.load_objc && input_files::has_objc_sections(member))
-                {
-                    input_files::parse_object(ctx, member);
-                } else {
-                    ctx.lazy_objs.push(member);
+                    || (ctx.args.load_objc && input_files::has_objc_sections(member));
+                match get_file_type(member) {
+                    FileType::LlvmBitcode => {
+                        input_files::parse_bitcode(ctx, member, alive);
+                    }
+                    _ => {
+                        input_files::parse_object(ctx, member, alive);
+                    }
                 }
             }
         }
@@ -151,7 +155,7 @@ fn read_file<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile, force_load:
             read_file(ctx, slice, force_load, weak);
         }
         FileType::LlvmBitcode => {
-            input_files::parse_bitcode(ctx, mf);
+            input_files::parse_bitcode(ctx, mf, true);
         }
         FileType::Empty => {}
         _ => fatal!(ctx, "{}: unknown file type", mf.name),
@@ -193,114 +197,313 @@ pub fn read_input_files<E: Arch>(ctx: &mut Context<E>) {
     ctx.args.inputs = inputs;
 }
 
-/// Acts on auto-link options (LC_LINKER_OPTION) collected from object
-/// files: each names a library or framework the object needs, as if it
-/// had been on the command line. Swift objects rely on this entirely;
-/// their link lines name no libraries at all. Loading a library can
-/// surface more objects with more options, so the caller iterates.
+/// Acts on auto-link options (LC_LINKER_OPTION) of live objects: each
+/// names a library or framework the object needs, as if it had been on
+/// the command line. Swift objects rely on this entirely. Returns true
+/// if new inputs were loaded, in which case resolution must run again.
 pub fn load_autolink_deps<E: Arch>(ctx: &mut Context<E>) -> bool {
-    let mut progress = false;
-    loop {
-        let pending = std::mem::take(&mut ctx.pending_linker_options);
-        if pending.is_empty() {
-            return progress;
+    let mut pending: Vec<Vec<String>> = Vec::new();
+    for obj in &ctx.objs {
+        if !obj.is_alive {
+            continue;
         }
-        for opt in pending {
-            let strs: Vec<&str> = opt.iter().map(String::as_str).collect();
-            match strs.as_slice() {
-                [flag] if flag.starts_with("-l") => {
-                    let name = &flag[2..];
-                    match find_library(ctx, name) {
-                        Some(path) => {
-                            if let Some(mf) = MappedFile::open(&ctx.diag, &path) {
-                                read_file(ctx, mf, false, false);
-                                progress = true;
-                            }
-                        }
-                        None => crate::warn!(ctx, "auto-linked library not found: -l{name}"),
-                    }
-                }
-                ["-framework", name] => match find_framework(ctx, name) {
+        for opt in &obj.linker_options {
+            if !ctx.processed_linker_options.contains(opt) {
+                pending.push(opt.clone());
+            }
+        }
+    }
+
+    let before = (ctx.objs.len(), ctx.dylibs.len());
+    for opt in pending {
+        ctx.processed_linker_options.insert(opt.clone());
+        let strs: Vec<&str> = opt.iter().map(String::as_str).collect();
+        match strs.as_slice() {
+            [flag] if flag.starts_with("-l") => {
+                let name = &flag[2..];
+                match find_library(ctx, name) {
                     Some(path) => {
                         if let Some(mf) = MappedFile::open(&ctx.diag, &path) {
                             read_file(ctx, mf, false, false);
-                            progress = true;
                         }
                     }
-                    None => crate::warn!(ctx, "auto-linked framework not found: {name}"),
-                },
-                _ => crate::warn!(ctx, "unknown auto-link option: {:?}", opt),
+                    None => crate::warn!(ctx, "auto-linked library not found: -l{name}"),
+                }
+            }
+            ["-framework", name] => match find_framework(ctx, name) {
+                Some(path) => {
+                    if let Some(mf) = MappedFile::open(&ctx.diag, &path) {
+                        read_file(ctx, mf, false, false);
+                    }
+                }
+                None => crate::warn!(ctx, "auto-linked framework not found: {name}"),
+            },
+            _ => crate::warn!(ctx, "unknown auto-link option: {:?}", opt),
+        }
+    }
+    (ctx.objs.len(), ctx.dylibs.len()) != before
+}
+
+/// Resolves all symbols, following mold's model: every input including
+/// each archive member has been parsed already, and resolution ranks
+/// competing definitions (strong > weak > lazy archive member or dylib
+/// > common), breaking ties by input order. A liveness walk then marks
+/// the archive members whose definitions are actually referenced, and
+/// a second round restricted to live files settles the final owners.
+pub fn resolve_symbols<E: Arch>(ctx: &mut Context<E>) {
+    clear_claims(ctx);
+    do_resolve(ctx, false);
+    mark_live_objects(ctx);
+    clear_claims(ctx);
+    do_resolve(ctx, true);
+    claim_locals(ctx);
+}
+
+/// Non-external symbols are private to their object and never compete:
+/// each gets its definition directly. Relocations reference them by
+/// symbol index just like externals, so they need locations too.
+fn claim_locals<E: Arch>(ctx: &mut Context<E>) {
+    for obj_idx in 0..ctx.objs.len() {
+        for i in 0..ctx.objs[obj_idx].nlists.len() {
+            let nlist = ctx.objs[obj_idx].nlists[i];
+            if nlist.is_stab() || nlist.is_extern() {
+                continue;
+            }
+            let sym_id = ctx.objs[obj_idx].syms[i];
+            match nlist.n_type() {
+                N_ABS => {
+                    let sym = &mut ctx.symtab[sym_id];
+                    sym.origin = Origin::Obj(obj_idx);
+                    sym.isec = None;
+                    sym.value = nlist.n_value;
+                }
+                N_SECT => {
+                    if let Some((isec, off)) = crate::input_files::find_subsec(
+                        &ctx.isecs,
+                        &ctx.objs[obj_idx].subsecs,
+                        nlist.n_value,
+                    ) {
+                        let sym = &mut ctx.symtab[sym_id];
+                        sym.origin = Origin::Obj(obj_idx);
+                        sym.isec = Some(isec);
+                        sym.value = off;
+                        sym.no_dead_strip =
+                            nlist.n_desc & (N_NO_DEAD_STRIP | REFERENCED_DYNAMICALLY) != 0;
+                    }
+                }
+                _ => {}
             }
         }
     }
 }
 
-/// Loads archive members that define symbols still undefined, until no
-/// member is needed anymore. A loaded member may itself use symbols that
-/// another member defines, so this iterates to a fixed point.
-pub fn resolve_archive_members<E: Arch>(ctx: &mut Context<E>) {
-    // -u symbols count as undefined references from the start.
-    let forced = std::mem::take(&mut ctx.args.forced_undefined);
-    for name in &forced {
-        let name: &'static str = String::leak(name.clone());
-        let id = ctx.symtab.intern(name);
-        ctx.symtab[id].is_used = true;
+fn clear_claims<E: Arch>(ctx: &mut Context<E>) {
+    for sym in &mut ctx.symtab.syms {
+        if matches!(sym.origin, Origin::Obj(_) | Origin::Dylib(_)) || sym.is_common {
+            sym.origin = Origin::Undef;
+            sym.isec = None;
+            sym.value = 0;
+            sym.is_weak_def = false;
+            sym.is_private_extern = false;
+            sym.is_imported = false;
+            sym.is_common = false;
+            sym.common_p2align = 0;
+            sym.no_dead_strip = false;
+        }
     }
-    ctx.args.forced_undefined = forced;
+}
 
-    // Index every lazy member's defined symbols once; for a name defined
-    // by several members, the first in command line order wins.
-    let lazy_objs = std::mem::take(&mut ctx.lazy_objs);
-    let mut index: std::collections::HashMap<&'static str, usize> =
-        std::collections::HashMap::new();
-    for (i, mf) in lazy_objs.iter().enumerate() {
-        match get_file_type(mf) {
-            FileType::Object => {
-                for name in input_files::defined_symbol_names(mf) {
-                    index.entry(name).or_insert(i);
+fn do_resolve<E: Arch>(ctx: &mut Context<E>, only_alive: bool) {
+    // The best claim seen per symbol: (rank class << 32) | priority,
+    // lower is better.
+    let mut best = vec![u64::MAX; ctx.symtab.syms.len()];
+
+    // Which symbols the files considered this round actually reference.
+    // References from dead archive members must not count: they would
+    // otherwise demand definitions nothing live needs.
+    let mut used = vec![false; ctx.symtab.syms.len()];
+    for obj in &ctx.objs {
+        if only_alive && !obj.is_alive {
+            continue;
+        }
+        for (nlist, &sym_id) in obj.nlists.iter().zip(&obj.syms) {
+            if !nlist.is_stab() && nlist.is_extern() && nlist.n_type() == N_UNDF {
+                used[sym_id] = true;
+                if nlist.n_desc & N_WEAK_REF != 0 {
+                    ctx.symtab[sym_id].is_weak_ref = true;
                 }
             }
-            FileType::LlvmBitcode => {
-                let plugin = input_files::ensure_lto_plugin(ctx);
-                let (module, syms) =
-                    crate::lto::parse_module(&ctx.diag, &plugin, mf.data, &mf.name);
-                for ls in syms {
-                    if ls.is_defined && ls.is_extern {
-                        let name: &'static str = String::leak(ls.name);
-                        index.entry(name).or_insert(i);
+        }
+    }
+    for name in &ctx.args.forced_undefined {
+        if let Some(id) = ctx.symtab.get(name) {
+            used[id] = true;
+        }
+    }
+    if let Some(id) = ctx.symtab.get(&ctx.args.entry) {
+        used[id] = true;
+    }
+
+    for obj_idx in 0..ctx.objs.len() {
+        let alive = ctx.objs[obj_idx].is_alive;
+        if only_alive && !alive {
+            continue;
+        }
+        let priority = ctx.objs[obj_idx].priority as u64;
+
+        for i in 0..ctx.objs[obj_idx].nlists.len() {
+            let nlist = ctx.objs[obj_idx].nlists[i];
+            let sym_id = ctx.objs[obj_idx].syms[i];
+            if nlist.is_stab() || !nlist.is_extern() {
+                continue;
+            }
+
+            let is_weak = nlist.n_desc & N_WEAK_DEF != 0;
+            let class: u64 = match nlist.n_type() {
+                N_SECT | N_ABS if alive && !is_weak => 0,
+                N_SECT | N_ABS if alive => 1,
+                N_SECT | N_ABS => 2,
+                N_UNDF if nlist.is_common() && alive => 3,
+                _ => continue,
+            };
+            let rank = (class << 32) | priority;
+
+            // Common symbols merge: the largest size and strictest
+            // alignment win regardless of input order.
+            if class == 3 {
+                let sym = &mut ctx.symtab[sym_id];
+                if best[sym_id] >> 32 == 3 {
+                    sym.value = sym.value.max(nlist.n_value);
+                    sym.common_p2align =
+                        sym.common_p2align.max(((nlist.n_desc >> 8) & 0xf) as u8);
+                    best[sym_id] = best[sym_id].min(rank);
+                    continue;
+                }
+            }
+
+            if rank >= best[sym_id] {
+                if only_alive && rank >> 32 == 0 && best[sym_id] >> 32 == 0 && rank != best[sym_id]
+                {
+                    // Two live strong definitions.
+                    error!(ctx, "duplicate symbol: {}", ctx.symtab[sym_id].name);
+                }
+                continue;
+            }
+            best[sym_id] = rank;
+
+            let sym = &mut ctx.symtab[sym_id];
+            sym.is_extern = true;
+            sym.is_imported = false;
+            sym.is_common = false;
+            sym.is_weak_def = is_weak;
+            sym.is_private_extern = nlist.n_type & N_PEXT != 0;
+            sym.no_dead_strip =
+                nlist.n_desc & (N_NO_DEAD_STRIP | REFERENCED_DYNAMICALLY) != 0;
+
+            match nlist.n_type() {
+                N_ABS => {
+                    sym.origin = Origin::Obj(obj_idx);
+                    sym.isec = None;
+                    sym.value = nlist.n_value;
+                }
+                N_SECT => {
+                    sym.origin = Origin::Obj(obj_idx);
+                    match crate::input_files::find_subsec(
+                        &ctx.isecs,
+                        &ctx.objs[obj_idx].subsecs,
+                        nlist.n_value,
+                    ) {
+                        Some((isec, off)) => {
+                            let sym = &mut ctx.symtab[sym_id];
+                            sym.isec = Some(isec);
+                            sym.value = off;
+                        }
+                        None => {
+                            // A symbol in a discarded (debug) section.
+                            let sym = &mut ctx.symtab[sym_id];
+                            sym.origin = Origin::Undef;
+                            best[sym_id] = u64::MAX;
+                        }
                     }
                 }
-                // SAFETY: the module was created above and is not used
-                // again.
-                unsafe { (plugin.module_dispose)(module as *mut _) };
+                N_UNDF => {
+                    // A common symbol takes a tentative claim.
+                    let sym = &mut ctx.symtab[sym_id];
+                    sym.origin = Origin::Undef;
+                    sym.is_common = true;
+                    sym.value = nlist.n_value;
+                    sym.common_p2align = ((nlist.n_desc >> 8) & 0xf) as u8;
+                }
+                _ => unreachable!(),
             }
-            _ => {}
         }
     }
 
-    let mut loaded = vec![false; lazy_objs.len()];
-    loop {
-        let needed: Vec<usize> = ctx
-            .symtab
-            .syms
-            .iter()
-            .filter(|sym| sym.is_used && !sym.is_defined() && !sym.is_common)
-            .filter_map(|sym| index.get(sym.name).copied())
-            .filter(|&i| !loaded[i])
-            .collect();
-        if needed.is_empty() {
-            break;
+    // Dylib exports claim unresolved (or lazily-claimed) symbols; an
+    // earlier dylib beats a later archive member and vice versa.
+    for i in 0..ctx.symtab.syms.len() {
+        let sym = &ctx.symtab[i];
+        if !used[i] || sym.is_common {
+            continue;
         }
-        for i in needed {
-            if !loaded[i] {
-                loaded[i] = true;
-                match get_file_type(lazy_objs[i]) {
-                    FileType::LlvmBitcode => {
-                        input_files::parse_bitcode(ctx, lazy_objs[i]);
-                    }
-                    _ => {
-                        input_files::parse_object(ctx, lazy_objs[i]);
-                    }
+        if best[i] >> 32 < 2 {
+            continue;
+        }
+        let name = sym.name;
+        for dylib_idx in 0..ctx.dylibs.len() {
+            let dylib = &ctx.dylibs[dylib_idx];
+            let rank = (2u64 << 32) | dylib.priority as u64;
+            if rank < best[i] && dylib.exports.contains(name) {
+                best[i] = rank;
+                let sym = &mut ctx.symtab[i];
+                sym.origin = Origin::Dylib(dylib_idx);
+                sym.is_imported = true;
+                sym.is_extern = true;
+                sym.isec = None;
+                sym.is_common = false;
+                break;
+            }
+        }
+    }
+
+    // Record the final usage set for downstream passes.
+    for (i, &u) in used.iter().enumerate() {
+        ctx.symtab.syms[i].is_used = u;
+    }
+}
+
+/// Marks archive members whose definitions live code references,
+/// walking owner links to a fixed point.
+fn mark_live_objects<E: Arch>(ctx: &mut Context<E>) {
+    let mut queue: Vec<usize> = (0..ctx.objs.len())
+        .filter(|&i| ctx.objs[i].is_alive)
+        .collect();
+
+    // The entry point and -u symbols are roots too.
+    let mut root_syms: Vec<&str> = vec![ctx.args.entry.as_str()];
+    root_syms.extend(ctx.args.forced_undefined.iter().map(String::as_str));
+    for name in root_syms {
+        if let Some(id) = ctx.symtab.get(name) {
+            if let Origin::Obj(owner) = ctx.symtab[id].origin {
+                if !ctx.objs[owner].is_alive {
+                    ctx.objs[owner].is_alive = true;
+                    queue.push(owner);
+                }
+            }
+        }
+    }
+
+    while let Some(obj_idx) = queue.pop() {
+        for i in 0..ctx.objs[obj_idx].nlists.len() {
+            let nlist = ctx.objs[obj_idx].nlists[i];
+            if nlist.is_stab() || !nlist.is_extern() || nlist.n_type() != N_UNDF {
+                continue;
+            }
+            let sym_id = ctx.objs[obj_idx].syms[i];
+            if let Origin::Obj(owner) = ctx.symtab[sym_id].origin {
+                if !ctx.objs[owner].is_alive {
+                    ctx.objs[owner].is_alive = true;
+                    queue.push(owner);
                 }
             }
         }
@@ -309,9 +512,9 @@ pub fn resolve_archive_members<E: Arch>(ctx: &mut Context<E>) {
 
 /// Compiles all registered bitcode modules into one Mach-O object and
 /// replaces the placeholder objects' symbol claims with the real ones.
-pub fn run_lto<E: Arch>(ctx: &mut Context<E>) {
+pub fn run_lto<E: Arch>(ctx: &mut Context<E>) -> bool {
     if ctx.lto_modules.is_empty() {
-        return;
+        return false;
     }
     let plugin = ctx.lto_plugin.unwrap();
 
@@ -357,8 +560,9 @@ pub fn run_lto<E: Arch>(ctx: &mut Context<E>) {
         std::slice::from_raw_parts(ptr as *const u8, size).to_vec()
     };
 
-    // Release the placeholders' symbol claims; the compiled object
-    // provides the real definitions.
+    // Retire the placeholders: the compiled object provides the real
+    // definitions, so they must neither claim nor reference anything in
+    // the next resolution round.
     let modules = std::mem::take(&mut ctx.lto_modules);
     for &(obj_idx, _) in &modules {
         let ids = ctx.objs[obj_idx].syms.clone();
@@ -371,6 +575,10 @@ pub fn run_lto<E: Arch>(ctx: &mut Context<E>) {
                 sym.is_weak_def = false;
             }
         }
+        let obj = &mut ctx.objs[obj_idx];
+        obj.is_alive = false;
+        obj.nlists.clear();
+        obj.syms.clear();
     }
 
     let mf = Box::leak(Box::new(crate::mapped_file::MappedFile {
@@ -378,7 +586,8 @@ pub fn run_lto<E: Arch>(ctx: &mut Context<E>) {
         data: Vec::leak(data),
         parent: None,
     }));
-    input_files::parse_object(ctx, mf);
+    input_files::parse_object(ctx, mf, true);
+    true
 }
 
 /// Converts surviving tentative definitions (common symbols) into real
@@ -421,20 +630,68 @@ pub fn convert_common_symbols<E: Arch>(ctx: &mut Context<E>) {
     }
 }
 
-/// Resolves symbols that no object file defines against the dylibs, in
-/// command line order.
-pub fn resolve_dylib_symbols<E: Arch>(ctx: &mut Context<E>) {
-    for i in 0..ctx.symtab.syms.len() {
-        let sym = &ctx.symtab[i];
-        if sym.is_defined() || !sym.is_used {
+/// Hides the subsections of archive members that resolution left
+/// dead, so nothing of theirs reaches the output.
+pub fn sweep_dead_files<E: Arch>(ctx: &mut Context<E>) {
+    for isec in &mut ctx.isecs {
+        if isec.obj != usize::MAX && !ctx.objs[isec.obj].is_alive {
+            isec.is_alive = false;
+        }
+    }
+
+    // Unwind records and FDEs of dead files go too, remapping the
+    // record-to-FDE links around the removals.
+    let mut fde_map = vec![usize::MAX; ctx.fdes.len()];
+    let mut kept_fdes = Vec::new();
+    let fdes = std::mem::take(&mut ctx.fdes);
+    for (i, fde) in fdes.into_iter().enumerate() {
+        if ctx.isecs[fde.isec].is_alive {
+            fde_map[i] = kept_fdes.len();
+            kept_fdes.push(fde);
+        }
+    }
+    ctx.fdes = kept_fdes;
+    let isecs = &ctx.isecs;
+    let map = &fde_map;
+    ctx.unwind_records.retain_mut(|rec| {
+        if !isecs[rec.isec].is_alive {
+            return false;
+        }
+        if let Some(fde) = &mut rec.fde {
+            *fde = map[*fde];
+        }
+        true
+    });
+}
+
+/// Merges identical literal elements across all live inputs: the first
+/// live copy wins and the rest redirect to it.
+pub fn merge_literals<E: Arch>(ctx: &mut Context<E>) {
+    let mut map: std::collections::HashMap<(u32, &'static [u8]), usize> =
+        std::collections::HashMap::new();
+    for i in 0..ctx.isecs.len() {
+        let isec = &ctx.isecs[i];
+        if !isec.is_alive || isec.replacement.is_some() {
             continue;
         }
-        let name = sym.name;
-        if let Some(dylib) = ctx.dylibs.iter().position(|d| d.exports.contains(name)) {
-            let sym = &mut ctx.symtab[i];
-            sym.origin = Origin::Dylib(dylib);
-            sym.is_imported = true;
-            sym.is_extern = true;
+        let ty = isec.hdr.section_type();
+        if !matches!(
+            ty,
+            S_CSTRING_LITERALS | S_4BYTE_LITERALS | S_8BYTE_LITERALS | S_16BYTE_LITERALS
+        ) {
+            continue;
+        }
+        match map.entry((ty, isec.data)) {
+            std::collections::hash_map::Entry::Occupied(e) => {
+                let winner = *e.get();
+                let p2align = ctx.isecs[i].hdr.p2align;
+                ctx.isecs[i].replacement = Some(winner);
+                let w = &mut ctx.isecs[winner];
+                w.hdr.p2align = w.hdr.p2align.max(p2align);
+            }
+            std::collections::hash_map::Entry::Vacant(e) => {
+                e.insert(i);
+            }
         }
     }
 }
@@ -465,6 +722,21 @@ pub fn create_objc_msgsend_stubs<E: Arch>(ctx: &mut Context<E>) {
         let id = ctx.symtab.intern("_objc_msgSend");
         ctx.symtab[id].is_used = true;
         ctx.objc_msgsend_sym = Some(id);
+
+        // The stub machinery itself references _objc_msgSend; resolve
+        // it now, since regular resolution has already run.
+        if !ctx.symtab[id].is_defined() {
+            if let Some(dylib) = ctx
+                .dylibs
+                .iter()
+                .position(|d| d.exports.contains("_objc_msgSend"))
+            {
+                let sym = &mut ctx.symtab[id];
+                sym.origin = Origin::Dylib(dylib);
+                sym.is_imported = true;
+                sym.is_extern = true;
+            }
+        }
 
         // Build the __objc_methname contents: one NUL-terminated string
         // per selector.
@@ -512,8 +784,12 @@ pub fn dead_strip<E: Arch>(ctx: &mut Context<E>) {
         }
     };
 
-    // Section-level roots
+    // Section-level roots. Sections of dead archive members are not
+    // part of the link at all and must not be resurrected here.
     for (id, isec) in ctx.isecs.iter().enumerate() {
+        if !isec.is_alive {
+            continue;
+        }
         let keep_type = matches!(
             isec.hdr.section_type(),
             S_MOD_INIT_FUNC_POINTERS | S_INIT_FUNC_OFFSETS | S_THREAD_LOCAL_VARIABLES
@@ -588,7 +864,7 @@ pub fn dead_strip<E: Arch>(ctx: &mut Context<E>) {
     }
 
     for (id, isec) in ctx.isecs.iter_mut().enumerate() {
-        isec.is_alive = live[id];
+        isec.is_alive = live[id] && isec.is_alive;
     }
 
     // Drop unwind records and FDEs of dead functions, remapping the
@@ -1075,7 +1351,12 @@ pub fn create_output_chunks<E: Arch>(ctx: &mut Context<E>) {
     // must agree, the Swift language version is the newest, and the
     // category-class-properties bit holds only if every Objective-C
     // object has it.
-    let infos: Vec<u32> = ctx.objs.iter().filter_map(|o| o.objc_image_info).collect();
+    let infos: Vec<u32> = ctx
+        .objs
+        .iter()
+        .filter(|o| o.is_alive)
+        .filter_map(|o| o.objc_image_info)
+        .collect();
     if !infos.is_empty() {
         let mut swift_version = 0;
         for &flags in &infos {
@@ -1232,7 +1513,7 @@ pub fn compute_symtab<E: Arch>(ctx: &mut Context<E>) {
             .unwrap_or_default();
 
         for (obj_idx, obj) in ctx.objs.iter().enumerate() {
-            if !obj.has_debug_info {
+            if !obj.has_debug_info || !obj.is_alive {
                 continue;
             }
 
@@ -1332,6 +1613,9 @@ pub fn compute_symtab<E: Arch>(ctx: &mut Context<E>) {
     for obj in &ctx.objs {
         if ctx.args.strip_locals {
             break;
+        }
+        if !obj.is_alive {
+            continue;
         }
         for (nlist, &sym_id) in obj.nlists.iter().zip(&obj.syms) {
             let sym = &ctx.symtab[sym_id];
