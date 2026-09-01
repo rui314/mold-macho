@@ -165,6 +165,8 @@ pub struct Args {
     /// -why_live: for each matching symbol, print the reference chain
     /// that kept it alive through -dead_strip ("*" wildcards allowed).
     pub why_live: Vec<String>,
+    /// -alias/-alias_list: (existing, new) symbol aliases to define.
+    pub aliases: Vec<(String, String)>,
     pub pagezero_size: u64,
     /// True when -pagezero_size was given explicitly (it is an error
     /// anywhere but a main executable).
@@ -234,6 +236,7 @@ impl Default for Args {
             print_dependencies: false,
             why_load: false,
             why_live: Vec::new(),
+            aliases: Vec::new(),
             pagezero_size: 0x1_0000_0000,
             explicit_pagezero: false,
         }
@@ -503,6 +506,30 @@ pub fn parse_args(diag: &Diagnostics, cmdline: &[String]) -> Args {
             "--print-dependencies" => args.print_dependencies = true,
             "-why_load" | "-whyload" => args.why_load = true,
             "-why_live" => args.why_live.push(next_arg(&mut i).to_string()),
+            "-alias" => {
+                let existing = next_arg(&mut i).to_string();
+                let new = next_arg(&mut i).to_string();
+                args.aliases.push((existing, new));
+            }
+            "-alias_list" => {
+                let path = next_arg(&mut i);
+                let Ok(text) = std::fs::read_to_string(path) else {
+                    fatal!(diag, "cannot read -alias_list: {path}");
+                };
+                for line in text.lines() {
+                    let line = line.split('#').next().unwrap_or("").trim();
+                    if line.is_empty() {
+                        continue;
+                    }
+                    let mut it = line.split_whitespace();
+                    match (it.next(), it.next()) {
+                        (Some(existing), Some(new)) => {
+                            args.aliases.push((existing.to_string(), new.to_string()))
+                        }
+                        _ => fatal!(diag, "malformed -alias_list line: {line}"),
+                    }
+                }
+            }
             "-executable_path" => {
                 args.executable_path = Some(next_arg(&mut i).to_string())
             }

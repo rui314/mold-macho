@@ -1519,6 +1519,36 @@ pub fn create_synthetic_symbols<E: Arch>(ctx: &mut Context<E>) {
         sym.is_extern = false;
     }
 
+    // -alias gives an existing definition a second name: the new
+    // symbol shares the original's subsection and offset, so it lands
+    // at the same address and is exported alongside it. Apple uses
+    // aliases to publish compatibility names (e.g. libSystem's dozens
+    // of $VARIANT names) without touching the source.
+    let aliases = std::mem::take(&mut ctx.args.aliases);
+    for (existing, new) in &aliases {
+        let Some(src) = ctx.symtab.get(existing) else {
+            error!(ctx, "-alias: undefined base symbol: {existing}");
+            continue;
+        };
+        if !ctx.symtab[src].is_defined() {
+            error!(ctx, "-alias: undefined base symbol: {existing}");
+            continue;
+        }
+        let dst = ctx.symtab.intern(String::leak(new.clone()));
+        if !ctx.symtab[dst].is_defined() {
+            let (origin, isec, value) = {
+                let s = &ctx.symtab[src];
+                (s.origin, s.isec, s.value)
+            };
+            let sym = &mut ctx.symtab[dst];
+            sym.origin = origin;
+            sym.isec = isec;
+            sym.value = value;
+            sym.is_extern = true;
+        }
+    }
+    ctx.args.aliases = aliases;
+
     // ld64's layout-boundary symbols: an undefined reference to
     // section$start$__SEG$__sect (or $end$, or segment$start$__SEG /
     // segment$end$__SEG) resolves to the boundary's final address, and
