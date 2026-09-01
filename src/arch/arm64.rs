@@ -67,6 +67,8 @@ impl Arch for Arm64 {
     const STUB_SIZE: u64 = 12;
     const UNWIND_MODE_DWARF: u32 = UNWIND_ARM64_MODE_DWARF;
     const OBJC_STUB_SIZE: u64 = 32;
+    const BRANCH_RANGE: u64 = 1 << 28;
+    const THUNK_SIZE: u64 = 12;
     const RELOC_UNSIGNED: u8 = ARM64_RELOC_UNSIGNED;
     const RELOC_SUBTRACTOR: u8 = ARM64_RELOC_SUBTRACTOR;
     const RELOC_GOTPC: u8 = ARM64_RELOC_POINTER_TO_GOT;
@@ -118,6 +120,19 @@ impl Arch for Arm64 {
             write32(&mut ent[20..], 0xd420_0020);
             write32(&mut ent[24..], 0xd420_0020);
             write32(&mut ent[28..], 0xd420_0020);
+        }
+    }
+
+    fn write_thunk(ctx: &Context<Self>, addr: u64, syms: &[crate::symbol::SymbolId], buf: &mut [u8]) {
+        for (i, &sym) in syms.iter().enumerate() {
+            let ent = &mut buf[i * 12..];
+            let ent_addr = addr + i as u64 * 12;
+            let target = ctx.sym_addr(sym);
+
+            // adrp x16, target@PAGE; add x16, x16, target@PAGEOFF; br x16
+            write32(&mut ent[0..], 0x9000_0010 | page_offset(target, ent_addr));
+            write32(&mut ent[4..], 0x9100_0210 | (bits(target, 11, 0) as u32) << 10);
+            write32(&mut ent[8..], 0xd61f_0200);
         }
     }
 
@@ -191,6 +206,7 @@ impl Arch for Arm64 {
                 is_subtracted,
                 target,
                 addend,
+                thunk_off: u64::MAX,
             });
             i += 1;
         }
@@ -198,7 +214,14 @@ impl Arch for Arm64 {
         vec
     }
 
-    fn apply_relocs(ctx: &Context<Self>, rels: &[Reloc], obj: usize, base: u64, buf: &mut [u8]) {
+    fn apply_relocs(
+        ctx: &Context<Self>,
+        rels: &[Reloc],
+        isec_id: usize,
+        base: u64,
+        buf: &mut [u8],
+    ) {
+        let obj = ctx.isecs[isec_id].obj;
         let mut i = 0;
         while i < rels.len() {
             let r = &rels[i];
@@ -242,9 +265,18 @@ impl Arch for Arm64 {
                     }
                 }
                 ARM64_RELOC_BRANCH26 => {
-                    let val = s.wrapping_add_signed(a).wrapping_sub(p) as i64;
+                    let mut val = s.wrapping_add_signed(a).wrapping_sub(p) as i64;
                     if !(-(1 << 27)..1 << 27).contains(&val) {
-                        error!(ctx, "branch target out of range: {val:x}");
+                        // Out of reach: branch through the thunk entry
+                        // assigned during layout.
+                        if r.thunk_off == u64::MAX {
+                            error!(ctx, "branch target out of range: {val:x}");
+                        } else {
+                            let isec = &ctx.isecs[isec_id];
+                            let thunk_addr =
+                                ctx.chunks[isec.osec].hdr.addr + r.thunk_off;
+                            val = thunk_addr.wrapping_sub(p) as i64;
+                        }
                     }
                     write32(loc, read32(loc) | bits(val as u64, 27, 2) as u32);
                 }

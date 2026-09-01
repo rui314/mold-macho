@@ -29,12 +29,25 @@ pub struct ChunkHeader {
     pub is_sect: bool,
 }
 
+/// A range-extension thunk: a block of jump entries placed inside an
+/// output section so that branches whose targets are further than the
+/// instruction's reach can hop through it.
+#[derive(Debug)]
+pub struct Thunk {
+    /// Offset of the thunk within the output section.
+    pub offset: u64,
+    pub syms: Vec<SymbolId>,
+}
+
 #[derive(Debug)]
 pub enum ChunkKind {
     /// The mach header, load commands and header padding.
     MachHeader,
     /// A section of the output image, concatenating input sections.
-    Output { isecs: Vec<InputSectionId> },
+    Output {
+        isecs: Vec<InputSectionId>,
+        thunks: Vec<Thunk>,
+    },
     /// Jump stubs for calls to imported functions.
     Stubs,
     /// The global offset table: pointers to symbols, bound by dyld for

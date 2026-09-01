@@ -39,6 +39,10 @@ impl Arch for X86_64 {
     const STUB_SIZE: u64 = 6;
     const UNWIND_MODE_DWARF: u32 = UNWIND_X86_64_MODE_DWARF;
     const OBJC_STUB_SIZE: u64 = 16;
+    // A 32-bit pcrel branch covers 4 GiB; x86-64 outputs never need
+    // thunks.
+    const BRANCH_RANGE: u64 = 1 << 32;
+    const THUNK_SIZE: u64 = 0;
     const RELOC_UNSIGNED: u8 = X86_64_RELOC_UNSIGNED;
     const RELOC_SUBTRACTOR: u8 = X86_64_RELOC_SUBTRACTOR;
     const RELOC_GOTPC: u8 = X86_64_RELOC_GOT;
@@ -85,6 +89,15 @@ impl Arch for X86_64 {
             write32(&mut ent[3..], sel_addr.wrapping_sub(ent_addr + 7) as u32);
             write32(&mut ent[9..], msgsend_got.wrapping_sub(ent_addr + 13) as u32);
         }
+    }
+
+    fn write_thunk(
+        _ctx: &Context<Self>,
+        _addr: u64,
+        _syms: &[crate::symbol::SymbolId],
+        _buf: &mut [u8],
+    ) {
+        unreachable!("x86-64 branches never need thunks");
     }
 
     fn read_relocs(
@@ -135,12 +148,20 @@ impl Arch for X86_64 {
                 is_subtracted,
                 target,
                 addend,
+                thunk_off: u64::MAX,
             });
         }
         vec
     }
 
-    fn apply_relocs(ctx: &Context<Self>, rels: &[Reloc], obj: usize, base: u64, buf: &mut [u8]) {
+    fn apply_relocs(
+        ctx: &Context<Self>,
+        rels: &[Reloc],
+        isec_id: usize,
+        base: u64,
+        buf: &mut [u8],
+    ) {
+        let obj = ctx.isecs[isec_id].obj;
         let mut i = 0;
         while i < rels.len() {
             let r = &rels[i];

@@ -754,7 +754,139 @@ pub fn create_synthetic_symbols<E: Arch>(ctx: &mut Context<E>) {
     }
 }
 
-/// Well-known section names are ordered the way ld64 orders them; unknown
+/// Lays out the subsections of one big executable output section with
+/// range-extension thunks interleaved, following mold's design: a
+/// thunk is placed after each batch of code, and a batch never grows
+/// so large that its thunk would be out of reach of the batch's own
+/// branches - the layout cursor and the scan cursor stay within one
+/// branch reach (minus margin) of each other, so placing a thunk can
+/// never invalidate an earlier decision. Each relocation that might be
+/// out of range records its thunk entry; relocation application then
+/// uses the entry only when the direct branch really cannot reach.
+fn create_range_extension_thunks<E: Arch>(
+    ctx: &mut Context<E>,
+    isecs: &[usize],
+) -> Vec<output_chunks::Thunk> {
+    const BATCH: u64 = 10 * 1024 * 1024;
+    const MAX_THUNK: u64 = 1024 * 1024;
+    let budget = E::BRANCH_RANGE / 2 - MAX_THUNK - BATCH;
+
+    let mut thunks: Vec<output_chunks::Thunk> = Vec::new();
+    let mut off: u64 = 0;
+    let mut i = 0;
+
+    // Distinguish placed subsections from ones still ahead.
+    for &id in isecs {
+        ctx.isecs[id].output_offset = u64::MAX;
+    }
+
+    while i < isecs.len() {
+        let batch_start_off = off;
+        let batch_start = i;
+
+        // A single subsection larger than the budget can't have a thunk
+        // after it within reach; its thunk goes in front instead, where
+        // at least branches from its first reach's worth of code can
+        // use it.
+        let first_size = ctx.isecs[isecs[i]].size;
+        if first_size > budget {
+            let monster = isecs[i];
+            // Scan the monster's relocations against a thunk placed here.
+            let thunk_off = align_to(off, 16);
+            let n = scan_relocs_into_thunk::<E>(ctx, &[monster], thunk_off, &mut thunks);
+            off = thunk_off + n * E::THUNK_SIZE;
+            let isec = &mut ctx.isecs[monster];
+            off = align_to(off, 1 << isec.hdr.p2align);
+            isec.output_offset = off;
+            off += isec.size;
+            i += 1;
+            continue;
+        }
+
+        // Place a batch: bounded by BATCH bytes, and by the thunk after
+        // it staying within reach of the batch start.
+        while i < isecs.len() {
+            let isec = &ctx.isecs[isecs[i]];
+            let aligned = align_to(off, 1 << isec.hdr.p2align);
+            if i != batch_start
+                && (aligned + isec.size - batch_start_off > budget
+                    || aligned - batch_start_off >= BATCH)
+            {
+                break;
+            }
+            let isec = &mut ctx.isecs[isecs[i]];
+            isec.output_offset = aligned;
+            off = aligned + isec.size;
+            i += 1;
+        }
+
+        let thunk_off = align_to(off, 16);
+        let batch: Vec<usize> = isecs[batch_start..i].to_vec();
+        let n = scan_relocs_into_thunk::<E>(ctx, &batch, thunk_off, &mut thunks);
+        if n > 0 {
+            off = thunk_off + n * E::THUNK_SIZE;
+        }
+    }
+    thunks
+}
+
+/// Scans `batch`'s branch relocations and, if any target may be out of
+/// reach, appends a thunk at `thunk_off` with one entry per such
+/// target. Returns the number of entries.
+fn scan_relocs_into_thunk<E: Arch>(
+    ctx: &mut Context<E>,
+    batch: &[usize],
+    thunk_off: u64,
+    thunks: &mut Vec<output_chunks::Thunk>,
+) -> u64 {
+    let mut entry_of: std::collections::HashMap<crate::symbol::SymbolId, u64> =
+        std::collections::HashMap::new();
+    let mut nsyms = 0u64;
+
+    for &isec_id in batch {
+        for r in 0..ctx.isecs[isec_id].relocs.len() {
+            let rel = ctx.isecs[isec_id].relocs[r];
+            if E::classify_reloc(rel.r_type) != RelocClass::Branch {
+                continue;
+            }
+            let Some(sym_id) = ctx.reloc_target_sym(ctx.isecs[isec_id].obj, &rel) else {
+                continue;
+            };
+
+            let sym = &ctx.symtab[sym_id];
+            if let (Origin::Obj(_), Some(target)) = (sym.origin, sym.isec) {
+                let t = &ctx.isecs[ctx.resolve_isec(target)];
+                if t.output_offset != u64::MAX {
+                    let target_off = t.output_offset + sym.value;
+                    if thunk_off.saturating_sub(target_off) < E::BRANCH_RANGE / 2 - 1024 * 1024
+                    {
+                        continue;
+                    }
+                }
+            }
+
+            let entry = *entry_of.entry(sym_id).or_insert_with(|| {
+                let e = thunk_off + nsyms * E::THUNK_SIZE;
+                nsyms += 1;
+                e
+            });
+            ctx.isecs[isec_id].relocs[r].thunk_off = entry;
+        }
+    }
+
+    if nsyms > 0 {
+        let mut syms: Vec<(u64, crate::symbol::SymbolId)> =
+            entry_of.into_iter().map(|(s, e)| (e, s)).collect();
+        syms.sort_unstable();
+        thunks.push(output_chunks::Thunk {
+            offset: thunk_off,
+            syms: syms.into_iter().map(|(_, s)| s).collect(),
+        });
+    }
+    nsyms
+}
+
+/// Well-known section names are ordered the way ld64 orders them/// Well-known section names are ordered the way ld64 orders them; unknown
 /// sections come after, in input order.
 fn output_section_rank(segname: &str, sectname: &str) -> u32 {
     match (segname, sectname) {
@@ -800,7 +932,14 @@ pub fn create_output_chunks<E: Arch>(ctx: &mut Context<E>) {
                     "__DATA" => "__DATA",
                     other => String::leak(other.to_string()),
                 };
-                let mut chunk = Chunk::new(segname, &sectname, ChunkKind::Output { isecs: vec![] });
+                let mut chunk = Chunk::new(
+                    segname,
+                    &sectname,
+                    ChunkKind::Output {
+                        isecs: vec![],
+                        thunks: vec![],
+                    },
+                );
                 chunk.hdr.flags = ctx.isecs[i].hdr.flags & !S_ATTR_DEBUG;
                 ctx.chunks.push(chunk);
                 ctx.chunks.len() - 1
@@ -815,26 +954,52 @@ pub fn create_output_chunks<E: Arch>(ctx: &mut Context<E>) {
             chunk.hdr.p2align = chunk.hdr.p2align.max(3);
         }
         chunk.hdr.flags |= ctx.isecs[i].hdr.flags & !SECTION_TYPE & !S_ATTR_DEBUG;
-        let ChunkKind::Output { isecs } = &mut chunk.kind else {
+        let ChunkKind::Output { isecs, .. } = &mut chunk.kind else {
             unreachable!()
         };
         isecs.push(i);
         ctx.isecs[i].osec = chunk_idx;
     }
 
-    // Compute each input section's offset within its output section.
-    for chunk in &mut ctx.chunks {
-        let ChunkKind::Output { isecs } = &chunk.kind else {
+    // Compute each input section's offset within its output section,
+    // inserting range-extension thunks into large executable sections.
+    for chunk_idx in 0..ctx.chunks.len() {
+        let ChunkKind::Output { isecs, .. } = &ctx.chunks[chunk_idx].kind else {
             continue;
         };
-        let mut off = 0;
-        for &id in isecs {
-            let isec = &mut ctx.isecs[id];
-            off = align_to(off, 1 << isec.hdr.p2align);
-            isec.output_offset = off;
-            off += isec.size;
-        }
-        chunk.hdr.size = off;
+        let isecs = isecs.clone();
+
+        let total: u64 = isecs.iter().map(|&id| ctx.isecs[id].size + 16).sum();
+        let is_exec = ctx.chunks[chunk_idx].hdr.flags
+            & (S_ATTR_PURE_INSTRUCTIONS | S_ATTR_SOME_INSTRUCTIONS)
+            != 0;
+        let thunks = if is_exec && total > E::BRANCH_RANGE / 2 {
+            create_range_extension_thunks::<E>(ctx, &isecs)
+        } else {
+            let mut off = 0;
+            for &id in &isecs {
+                let isec = &mut ctx.isecs[id];
+                off = align_to(off, 1 << isec.hdr.p2align);
+                isec.output_offset = off;
+                off += isec.size;
+            }
+            Vec::new()
+        };
+
+        let end = match thunks.last() {
+            Some(t) => t.offset + t.syms.len() as u64 * E::THUNK_SIZE,
+            None => 0,
+        };
+        let chunk = &mut ctx.chunks[chunk_idx];
+        let data_end = isecs
+            .last()
+            .map(|&id| ctx.isecs[id].output_offset + ctx.isecs[id].size)
+            .unwrap_or(0);
+        chunk.hdr.size = end.max(data_end);
+        let ChunkKind::Output { thunks: t, .. } = &mut chunk.kind else {
+            unreachable!()
+        };
+        *t = thunks;
     }
 
     if !ctx.stub_syms.is_empty() {
@@ -1960,7 +2125,12 @@ pub fn resolve_entry<E: Arch>(ctx: &mut Context<E>) {
 /// The slice covers exactly [fileoff, fileoff + size).
 fn copy_chunk<E: Arch>(ctx: &Context<E>, chunk: &Chunk, buf: &mut [u8]) {
     match &chunk.kind {
-        ChunkKind::Output { isecs } => {
+        ChunkKind::Output { isecs, thunks } => {
+            for thunk in thunks {
+                let off = thunk.offset as usize;
+                let end = off + thunk.syms.len() * E::THUNK_SIZE as usize;
+                E::write_thunk(ctx, chunk.hdr.addr + thunk.offset, &thunk.syms, &mut buf[off..end]);
+            }
             for &id in isecs {
                 let isec = &ctx.isecs[id];
                 if isec.data.is_empty() {
@@ -1970,7 +2140,7 @@ fn copy_chunk<E: Arch>(ctx: &Context<E>, chunk: &Chunk, buf: &mut [u8]) {
                 let end = off + isec.data.len();
                 buf[off..end].copy_from_slice(isec.data);
                 let base = chunk.hdr.addr + isec.output_offset;
-                E::apply_relocs(ctx, &isec.relocs, isec.obj, base, &mut buf[off..end]);
+                E::apply_relocs(ctx, &isec.relocs, id, base, &mut buf[off..end]);
             }
         }
         ChunkKind::Stubs => E::write_stubs(ctx, chunk.hdr.addr, buf),

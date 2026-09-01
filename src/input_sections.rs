@@ -30,6 +30,10 @@ pub struct Reloc {
     pub is_subtracted: bool,
     pub target: RelocTarget,
     pub addend: i64,
+    /// For a branch that may be out of range: the offset of a
+    /// range-extension thunk entry within the output section, assigned
+    /// during layout. u64::MAX when the branch needs no thunk.
+    pub thunk_off: u64,
 }
 
 /// A subsection of an input object file's section.

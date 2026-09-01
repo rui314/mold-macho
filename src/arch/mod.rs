@@ -39,6 +39,10 @@ pub trait Arch: Copy + Default + Send + Sync + 'static {
     const UNWIND_MODE_DWARF: u32;
     /// The size of one __objc_stubs entry.
     const OBJC_STUB_SIZE: u64;
+    /// The span a branch instruction can cover (both directions
+    /// together), and the size of one range-extension thunk entry.
+    const BRANCH_RANGE: u64;
+    const THUNK_SIZE: u64;
     /// The relocation types for a plain absolute word, a subtraction
     /// pair, and a GOT-relative pointer.
     const RELOC_UNSIGNED: u8;
@@ -58,6 +62,10 @@ pub trait Arch: Copy + Default + Send + Sync + 'static {
     /// slot and tail-calls _objc_msgSend through the GOT.
     fn write_objc_stubs(ctx: &Context<Self>, addr: u64, buf: &mut [u8]);
 
+    /// Writes one range-extension thunk's entries. `addr` is the
+    /// thunk's address and `buf` its bytes.
+    fn write_thunk(ctx: &Context<Self>, addr: u64, syms: &[crate::symbol::SymbolId], buf: &mut [u8]);
+
     /// Converts raw relocation records of one input section into
     /// [`Reloc`]s. Mach-O encodes addends target-dependently: some are
     /// embedded in the relocated field, some are separate records.
@@ -71,9 +79,9 @@ pub trait Arch: Copy + Default + Send + Sync + 'static {
     ) -> Vec<Reloc>;
 
     /// Applies the relocations of one input section to `buf`, its bytes
-    /// in the output. `obj` is the object the section came from and
-    /// `base` the output address of the section.
-    fn apply_relocs(ctx: &Context<Self>, rels: &[Reloc], obj: usize, base: u64, buf: &mut [u8]);
+    /// in the output. `isec` is the subsection's arena index and `base`
+    /// its output address.
+    fn apply_relocs(ctx: &Context<Self>, rels: &[Reloc], isec: usize, base: u64, buf: &mut [u8]);
 }
 
 /// Returns the target name for a Mach-O CPU type, if we know it.

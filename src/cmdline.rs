@@ -181,7 +181,7 @@ fn parse_hex(diag: &Diagnostics, opt: &str, val: &str) -> u64 {
 
 /// Expands @file response-file arguments, splitting the file's contents
 /// on whitespace with simple quote handling.
-pub fn expand_response_files(diag: &Diagnostics, argv: &[String]) -> Vec<String> {
+pub fn expand_response_files(_diag: &Diagnostics, argv: &[String]) -> Vec<String> {
     let mut out = Vec::with_capacity(argv.len());
     for arg in argv {
         if let Some(path) = arg.strip_prefix('@') {
