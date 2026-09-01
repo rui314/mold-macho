@@ -451,9 +451,20 @@ pub fn parse_args(diag: &Diagnostics, cmdline: &[String]) -> Args {
 
             "-no_uuid" => args.uuid = false,
 
+            // The old pre-LC_BUILD_VERSION way of stating the
+            // deployment target, still emitted by clang for older
+            // -mmacosx-version-min targets. It fixes the platform to
+            // macOS; the SDK version stays unset, as ld64 records when
+            // it isn't told.
+            "-macos_version_min" | "-macosx_version_min" => {
+                args.platform = PLATFORM_MACOS;
+                args.platform_minos = parse_version(diag, next_arg(&mut i));
+            }
+
             // Ignored options. ld64 takes -O<n> as a linker
-            // optimization level hint.
-            "-demangle" | "-O0" | "-O1" | "-O2" | "-O3" => {}
+            // optimization level hint. This linker's output is always
+            // deterministic, so -reproducible has nothing to switch on.
+            "-demangle" | "-reproducible" | "-O0" | "-O1" | "-O2" | "-O3" => {}
 
             "-lto_library" => args.lto_library = Some(next_arg(&mut i).to_string()),
 
