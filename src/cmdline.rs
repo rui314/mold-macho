@@ -122,6 +122,7 @@ pub fn parse_args(diag: &Diagnostics, cmdline: &[String]) -> Args {
                 .push(InputArg::Framework(next_arg(&mut i).to_string())),
             "-F" => args.framework_paths.push(next_arg(&mut i).to_string()),
             "-dylib" => args.output_type = MH_DYLIB,
+            "-bundle" => args.output_type = MH_BUNDLE,
             "-rpath" => args.rpaths.push(next_arg(&mut i).to_string()),
             "-install_name" | "-dylib_install_name" => {
                 args.install_name = Some(next_arg(&mut i).to_string())
