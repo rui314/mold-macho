@@ -129,6 +129,9 @@ pub struct Args {
     /// -search_dylibs_first: search every path for a dylib before
     /// falling back to archives.
     pub search_dylibs_first: bool,
+    /// -umbrella: declare this dylib a subframework of the named
+    /// umbrella framework (LC_SUB_FRAMEWORK).
+    pub umbrella: Option<String>,
     pub pagezero_size: u64,
 }
 
@@ -183,6 +186,7 @@ impl Default for Args {
             dynamic: true,
             headerpad: 0x100,
             search_dylibs_first: false,
+            umbrella: None,
             pagezero_size: 0x1_0000_0000,
         }
     }
@@ -437,6 +441,7 @@ pub fn parse_args(diag: &Diagnostics, cmdline: &[String]) -> Args {
             // and an archive before moving to the next.
             "-search_paths_first" => args.search_dylibs_first = false,
             "-search_dylibs_first" => args.search_dylibs_first = true,
+            "-umbrella" => args.umbrella = Some(next_arg(&mut i).to_string()),
 
             // Reserve enough header padding that install_name_tool can
             // grow install names in place.

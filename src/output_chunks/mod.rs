@@ -422,9 +422,12 @@ fn create_id_dylib_cmd<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
     buf
 }
 
-fn create_rpath_cmd(path: &str) -> Vec<u8> {
+// LC_RPATH and LC_SUB_FRAMEWORK share the layout of every
+// single-string load command: a cmd/cmdsize header plus the offset of
+// an inline NUL-terminated string, padded to an 8-byte multiple.
+fn create_string_cmd(kind: u32, path: &str) -> Vec<u8> {
     let cmd = DylinkerCommand {
-        cmd: LC_RPATH,
+        cmd: kind,
         cmdsize: 0,
         nameoff: size_of::<DylinkerCommand>() as u32,
     };
@@ -508,7 +511,7 @@ pub fn create_load_commands<E: Arch>(ctx: &Context<E>) -> Vec<Vec<u8>> {
     }
 
     for rpath in &ctx.args.rpaths {
-        vec.push(create_rpath_cmd(rpath));
+        vec.push(create_string_cmd(LC_RPATH, rpath));
     }
 
     match ctx.args.output_type {
@@ -516,7 +519,12 @@ pub fn create_load_commands<E: Arch>(ctx: &Context<E>) -> Vec<Vec<u8>> {
             vec.push(create_dylinker_cmd());
             vec.push(create_main_cmd(ctx));
         }
-        MH_DYLIB => vec.push(create_id_dylib_cmd(ctx)),
+        MH_DYLIB => {
+            vec.push(create_id_dylib_cmd(ctx));
+            if let Some(name) = &ctx.args.umbrella {
+                vec.push(create_string_cmd(LC_SUB_FRAMEWORK, name));
+            }
+        }
         _ => {}
     }
 
