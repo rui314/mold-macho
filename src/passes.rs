@@ -1050,6 +1050,41 @@ pub fn check_undefined_symbols<E: Arch>(ctx: &mut Context<E>) {
     }
 }
 
+/// --print-dependencies prints, for every undefined symbol of every
+/// object, which file's definition satisfied it - a line per edge:
+/// "referencer<TAB>provider<TAB>u<TAB>symbol". Xcode's newer ld
+/// grew this for build-graph auditing; it makes questions like "why
+/// is this archive member in my binary" one grep.
+pub fn print_dependencies<E: Arch>(ctx: &Context<E>) {
+    if !ctx.args.print_dependencies {
+        return;
+    }
+    for obj in &ctx.objs {
+        if !obj.is_alive {
+            continue;
+        }
+        for (nlist, &sym_id) in obj.nlists.iter().zip(&obj.syms) {
+            if nlist.is_stab() || nlist.n_type() != N_UNDF || nlist.is_common() {
+                continue;
+            }
+            let sym = &ctx.symtab[sym_id];
+            let provider = match sym.origin {
+                Origin::Obj(idx) => {
+                    if !ctx.objs[idx].is_alive || std::ptr::eq(&ctx.objs[idx], obj) {
+                        continue;
+                    }
+                    file_display(&ctx.objs[idx])
+                }
+                Origin::Dylib(idx) if idx != usize::MAX => {
+                    ctx.dylibs[idx].install_name.clone()
+                }
+                _ => continue,
+            };
+            println!("{}\t{}\tu\t{}", file_display(obj), provider, sym.name);
+        }
+    }
+}
+
 /// A file name for diagnostics: the object's path. Archive members
 /// already carry their "archive(member)" form as their mapped-file
 /// name.

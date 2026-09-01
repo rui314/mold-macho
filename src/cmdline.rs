@@ -156,6 +156,9 @@ pub struct Args {
     /// -object_path_lto: keep the LTO-compiled object at this path for
     /// the debugger.
     pub object_path_lto: Option<String>,
+    /// --print-dependencies: report which file satisfied each
+    /// undefined symbol.
+    pub print_dependencies: bool,
     pub pagezero_size: u64,
     /// True when -pagezero_size was given explicitly (it is an error
     /// anywhere but a main executable).
@@ -222,6 +225,7 @@ impl Default for Args {
             order_files: Vec::new(),
             executable_path: None,
             object_path_lto: None,
+            print_dependencies: false,
             pagezero_size: 0x1_0000_0000,
             explicit_pagezero: false,
         }
@@ -488,6 +492,7 @@ pub fn parse_args(diag: &Diagnostics, cmdline: &[String]) -> Args {
             "-mark_dead_strippable_dylib" => args.mark_dead_strippable_dylib = true,
             "-export_dynamic" => args.export_dynamic = true,
             "-order_file" => args.order_files.push(next_arg(&mut i).to_string()),
+            "--print-dependencies" => args.print_dependencies = true,
             "-executable_path" => {
                 args.executable_path = Some(next_arg(&mut i).to_string())
             }
