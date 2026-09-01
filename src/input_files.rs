@@ -90,6 +90,11 @@ pub struct DylibFile {
     /// MH_APP_EXTENSION_SAFE: built with -application_extension, so
     /// app-extension clients may link it.
     pub is_app_extension_safe: bool,
+    /// LC_SUB_FRAMEWORK: this dylib belongs to the named umbrella and
+    /// may only be linked by it or by an allowed client.
+    pub sub_framework: Option<String>,
+    /// LC_SUB_CLIENT: clients allowed to link this subframework.
+    pub sub_clients: Vec<String>,
     pub exports: std::collections::HashSet<String>,
     /// The subset of exports that are thread-local variables.
     pub tlv_exports: std::collections::HashSet<String>,
@@ -1143,6 +1148,8 @@ pub fn parse_dylib_binary<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile
     let mut dysymtab_cmd = None;
     let mut reexports: Vec<String> = Vec::new();
     let mut rpaths: Vec<String> = Vec::new();
+    let mut sub_framework: Option<String> = None;
+    let mut sub_clients: Vec<String> = Vec::new();
 
     let mut off = size_of::<MachHeader>();
     for _ in 0..hdr.ncmds {
@@ -1173,6 +1180,17 @@ pub fn parse_dylib_binary<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile
                     rpath = format!("{}/{rest}", dir_of(&mf.name));
                 }
                 rpaths.push(rpath);
+            }
+            LC_SUB_FRAMEWORK | LC_SUB_CLIENT => {
+                let cmd = DylinkerCommand::read_from(&data[off..]);
+                let name = &data[off + cmd.nameoff as usize..off + cmd.cmdsize as usize];
+                let len = name.iter().position(|&b| b == 0).unwrap_or(name.len());
+                let name = String::from_utf8_lossy(&name[..len]).into_owned();
+                if lc.cmd == LC_SUB_FRAMEWORK {
+                    sub_framework = Some(name);
+                } else {
+                    sub_clients.push(name);
+                }
             }
             _ => {}
         }
@@ -1262,6 +1280,8 @@ pub fn parse_dylib_binary<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile
             is_needed: false,
             is_dead_strippable: hdr.flags & MH_DEAD_STRIPPABLE_DYLIB != 0,
             is_app_extension_safe: hdr.flags & MH_APP_EXTENSION_SAFE != 0,
+            sub_framework,
+            sub_clients,
             exports,
             tlv_exports,
         },
@@ -1535,6 +1555,8 @@ pub fn parse_dylib<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile) -> us
             is_needed: false,
             is_dead_strippable: false,
             is_app_extension_safe: !tbd.not_app_extension_safe,
+            sub_framework: None,
+            sub_clients: Vec::new(),
             exports,
             tlv_exports,
         },
@@ -1555,6 +1577,30 @@ fn add_dylib<E: Arch>(ctx: &mut Context<E>, dylib: DylibFile) -> usize {
             "linking against a dylib which is not safe for use in application extensions: {}",
             dylib.install_name
         );
+    }
+
+    // A subframework may only be linked by its umbrella or by a client
+    // it names. The client's identity is -client_name, or the output's
+    // leaf name with any "lib" prefix and extension shed - the same
+    // derivation ld64 uses.
+    if let Some(umbrella) = &dylib.sub_framework {
+        let client = match &ctx.args.client_name {
+            Some(name) => name.clone(),
+            None => {
+                let leaf = ctx.args.output.rsplit('/').next().unwrap_or("");
+                let stem = leaf.split('.').next().unwrap_or(leaf);
+                stem.strip_prefix("lib").unwrap_or(stem).to_string()
+            }
+        };
+        let ours = ctx.args.umbrella.as_deref() == Some(umbrella.as_str());
+        if !ours && client != *umbrella && !dylib.sub_clients.contains(&client) {
+            crate::error!(
+                ctx,
+                "cannot link directly with {}: not an allowed client of umbrella framework {}",
+                dylib.install_name,
+                umbrella
+            );
+        }
     }
     if let Some(idx) = ctx
         .dylibs

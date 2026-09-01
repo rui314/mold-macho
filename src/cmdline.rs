@@ -169,6 +169,12 @@ pub struct Args {
     pub aliases: Vec<(String, String)>,
     /// -sectalign: (segment, section, p2align) overrides.
     pub sectalign: Vec<(String, String, u8)>,
+    /// -allowable_client: clients that may link this subframework
+    /// (LC_SUB_CLIENT).
+    pub allowable_clients: Vec<String>,
+    /// -client_name: the name this link presents when checking
+    /// subframework restrictions.
+    pub client_name: Option<String>,
     pub pagezero_size: u64,
     /// True when -pagezero_size was given explicitly (it is an error
     /// anywhere but a main executable).
@@ -240,6 +246,8 @@ impl Default for Args {
             why_live: Vec::new(),
             aliases: Vec::new(),
             sectalign: Vec::new(),
+            allowable_clients: Vec::new(),
+            client_name: None,
             pagezero_size: 0x1_0000_0000,
             explicit_pagezero: false,
         }
@@ -509,6 +517,10 @@ pub fn parse_args(diag: &Diagnostics, cmdline: &[String]) -> Args {
             "--print-dependencies" => args.print_dependencies = true,
             "-why_load" | "-whyload" => args.why_load = true,
             "-why_live" => args.why_live.push(next_arg(&mut i).to_string()),
+            "-allowable_client" => {
+                args.allowable_clients.push(next_arg(&mut i).to_string())
+            }
+            "-client_name" => args.client_name = Some(next_arg(&mut i).to_string()),
             "-sectalign" => {
                 let seg = next_arg(&mut i).to_string();
                 let sect = next_arg(&mut i).to_string();

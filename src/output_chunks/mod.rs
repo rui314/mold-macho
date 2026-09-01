@@ -548,6 +548,9 @@ pub fn create_load_commands<E: Arch>(ctx: &Context<E>) -> Vec<Vec<u8>> {
             if let Some(name) = &ctx.args.umbrella {
                 vec.push(create_string_cmd(LC_SUB_FRAMEWORK, name));
             }
+            for client in &ctx.args.allowable_clients {
+                vec.push(create_string_cmd(LC_SUB_CLIENT, client));
+            }
         }
         _ => {}
     }
