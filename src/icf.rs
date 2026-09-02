@@ -372,7 +372,7 @@ pub fn icf_sections<E: Arch>(ctx: &mut Context<E>) {
         h.update(&isec.size.to_ne_bytes());
         h.update(&isec.data.len().to_ne_bytes());
         h.update(isec.data);
-        for rel in &isec.relocs {
+        for rel in ctx.isec_relocs(id) {
             h.update(&rel.offset.to_ne_bytes());
             h.update(&rel.r_type.to_ne_bytes());
             h.update(&[rel.size, rel.is_pcrel as u8, rel.is_subtracted as u8]);
@@ -432,11 +432,11 @@ pub fn icf_sections<E: Arch>(ctx: &mut Context<E>) {
     let counts: Vec<u32> = candidates
         .par_iter()
         .map(|&id| {
-            let isec = &ctx.isecs[id];
-            isec.relocs
+            let obj = ctx.isecs[id].obj;
+            ctx.isec_relocs(id)
                 .iter()
                 .filter(|rel| {
-                    matches!(edge_of(ctx, isec.obj, rel.target, rel.addend).0, Edge::Candidate(_))
+                    matches!(edge_of(ctx, obj, rel.target, rel.addend).0, Edge::Candidate(_))
                 })
                 .count() as u32
         })
@@ -456,7 +456,7 @@ pub fn icf_sections<E: Arch>(ctx: &mut Context<E>) {
         candidates.par_iter().enumerate().for_each(|(vertex, &id)| {
             let isec = &ctx.isecs[id];
             let mut i = edge_indices[vertex] as usize;
-            for rel in &isec.relocs {
+            for rel in ctx.isec_relocs(id) {
                 if let Edge::Candidate(c) = edge_of(ctx, isec.obj, rel.target, rel.addend).0 {
                     // SAFETY: this vertex alone owns its prefix-sum range.
                     unsafe { *out.0.add(i) = c as u32 };
@@ -529,10 +529,11 @@ pub fn icf_sections<E: Arch>(ctx: &mut Context<E>) {
     {
         let equal = |a: usize, b: usize| -> bool {
             let (x, y) = (&ctx.isecs[a], &ctx.isecs[b]);
+            let (xr, yr) = (ctx.isec_relocs(a), ctx.isec_relocs(b));
             x.data == y.data
                 && x.hdr.flags == y.hdr.flags
-                && x.relocs.len() == y.relocs.len()
-                && x.relocs.iter().zip(&y.relocs).all(|(r, s)| {
+                && xr.len() == yr.len()
+                && xr.iter().zip(yr).all(|(r, s)| {
                     r.offset == s.offset
                         && r.r_type == s.r_type
                         && r.size == s.size

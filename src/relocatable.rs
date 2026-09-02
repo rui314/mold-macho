@@ -340,7 +340,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
         let mut rels: Vec<MachRel> = Vec::new();
         for &id in isecs {
             let isec = &ctx.isecs[id];
-            for rel in &isec.relocs {
+            for rel in crate::input_files::isec_relocs_of(&ctx.objs, isec) {
                 let r_address = (isec.output_offset + rel.offset as u64) as u32;
                 let length = rel.size.trailing_zeros();
 
@@ -586,7 +586,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
             let dst = base + isec.output_offset as usize;
             buf[dst..dst + isec.data.len()].copy_from_slice(isec.data);
 
-            for rel in &isec.relocs {
+            for rel in crate::input_files::isec_relocs_of(&ctx.objs, isec) {
                 let RelocTarget::Section(target) = rel.target else {
                     continue;
                 };

@@ -985,7 +985,8 @@ pub fn convert_common_symbols<E: Arch>(ctx: &mut Context<E>) {
             input_addr: 0,
             size,
             data: &[],
-            relocs: Vec::new(),
+            rel_offset: 0,
+            nrels: 0,
             osec: usize::MAX,
             output_offset: 0,
             addr: 0,
@@ -1021,7 +1022,7 @@ pub fn convert_init_offsets<E: Arch>(ctx: &mut Context<E>) {
         {
             continue;
         }
-        let mut relocs = ctx.isecs[i].relocs.clone();
+        let mut relocs = ctx.isec_relocs(i).to_vec();
         relocs.sort_by_key(|r| r.offset);
         for rel in relocs {
             let obj = ctx.isecs[i].obj;
@@ -1513,7 +1514,7 @@ pub fn scan_relocations<E: Arch>(ctx: &mut Context<E>) {
         .par_iter()
         .filter(|isec| isec.is_alive)
         .flat_map_iter(|isec| {
-            isec.relocs.iter().filter_map(move |rel| {
+            crate::input_files::isec_relocs_of(&ctx_ref.objs, isec).iter().filter_map(move |rel| {
                 let id = ctx_ref.reloc_target_sym(isec.obj, rel)?;
                 let mut class = E::classify_reloc(rel.r_type);
                 // A relaxable GOT load of a local symbol needs no
@@ -3008,7 +3009,7 @@ fn build_rebase_info<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
             continue;
         }
         let base = ctx.chunks[isec.osec].hdr.addr + isec.output_offset;
-        for rel in &isec.relocs {
+        for rel in crate::input_files::isec_relocs_of(&ctx.objs, isec) {
             if E::classify_reloc(rel.r_type) != RelocClass::Plain
                 || rel.size != 8
                 || rel.is_pcrel
@@ -3142,7 +3143,7 @@ fn build_bind_info<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
             continue;
         }
         let base = ctx.chunks[isec.osec].hdr.addr + isec.output_offset;
-        for rel in &isec.relocs {
+        for rel in crate::input_files::isec_relocs_of(&ctx.objs, isec) {
             if E::classify_reloc(rel.r_type) != RelocClass::Plain
                 || rel.size != 8
                 || rel.is_pcrel
@@ -3226,7 +3227,7 @@ fn collect_fixups<E: Arch>(ctx: &Context<E>) -> Vec<(u64, Option<crate::symbol::
         .filter(|isec| isec.is_alive && isec.replacement.is_none())
         .flat_map_iter(|isec| {
             let base = ctx.chunks[isec.osec].hdr.addr + isec.output_offset;
-            isec.relocs.iter().filter_map(move |rel| {
+            crate::input_files::isec_relocs_of(&ctx.objs, isec).iter().filter_map(move |rel| {
                 if E::classify_reloc(rel.r_type) != RelocClass::Plain
                     || rel.size != 8
                     || rel.is_pcrel
@@ -3710,7 +3711,7 @@ fn copy_chunk<E: Arch>(ctx: &Context<E>, chunk: &Chunk, buf: &mut [u8]) {
                 };
                 slice.copy_from_slice(isec.data);
                 let base = chunk.hdr.addr + isec.output_offset;
-                E::apply_relocs(ctx, &isec.relocs, id, base, slice);
+                E::apply_relocs(ctx, ctx.isec_relocs(id), id, base, slice);
             });
         }
         ChunkKind::Stubs => E::write_stubs(ctx, chunk.hdr.addr, buf),

@@ -113,7 +113,7 @@ pub fn dead_strip<E: Arch>(ctx: &mut Context<E>) {
     // spanning tree (who marked whom) is not, so -why_live keeps the
     // serial walk to report stable chains.
     let edges_of = |id: usize, out: &mut Vec<usize>| {
-        for rel in &ctx.isecs[id].relocs {
+        for rel in ctx.isec_relocs(id) {
             match rel.target {
                 RelocTarget::Sym(idx) => {
                     let sym = &ctx.symtab[ctx.objs[ctx.isecs[id].obj].syms[idx]];
@@ -174,7 +174,7 @@ pub fn dead_strip<E: Arch>(ctx: &mut Context<E>) {
             next: &mut Vec<usize>,
         ) {
             let mut targets = Vec::new();
-            for rel in &gc.ctx.isecs[id].relocs {
+            for rel in gc.ctx.isec_relocs(id) {
                 match rel.target {
                     RelocTarget::Sym(idx) => {
                         let sym =

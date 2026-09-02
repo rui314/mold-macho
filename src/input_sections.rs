@@ -53,8 +53,12 @@ pub struct InputSection {
     pub size: u64,
     /// The subsection contents; empty for zero-fill sections.
     pub data: &'static [u8],
-    /// Relocations, with offsets relative to this subsection.
-    pub relocs: Vec<Reloc>,
+    /// This subsection's relocations: a range in the owning object's
+    /// `relocs` arena, offsets relative to the subsection. sold keeps
+    /// rel_offset/nrels per subsection the same way, rather than a Vec
+    /// per subsection - a debug link has millions of relocations.
+    pub rel_offset: u32,
+    pub nrels: u32,
     /// The output section chunk this section is appended to.
     pub osec: usize,
     /// Offset from the start of the output section.

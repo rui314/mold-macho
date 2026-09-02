@@ -123,12 +123,19 @@ fn scan_relocs_into_thunk<E: Arch>(
     let mut nsyms = 0u64;
 
     for &isec_id in batch {
-        for r in 0..ctx.isecs[isec_id].relocs.len() {
-            let rel = ctx.isecs[isec_id].relocs[r];
+        let obj = ctx.isecs[isec_id].obj;
+        let osec = ctx.isecs[isec_id].osec;
+        let ro = ctx.isecs[isec_id].rel_offset as usize;
+        let nr = ctx.isecs[isec_id].nrels as usize;
+        if obj == usize::MAX {
+            continue;
+        }
+        for r in 0..nr {
+            let rel = ctx.objs[obj].relocs[ro + r];
             if E::classify_reloc(rel.r_type) != RelocClass::Branch {
                 continue;
             }
-            let Some(sym_id) = ctx.reloc_target_sym(ctx.isecs[isec_id].obj, &rel) else {
+            let Some(sym_id) = ctx.reloc_target_sym(obj, &rel) else {
                 continue;
             };
 
@@ -137,7 +144,7 @@ fn scan_relocs_into_thunk<E: Arch>(
                 let t = &ctx.isecs[ctx.resolve_isec(target)];
                 // A target in another output section has no offset in
                 // this section's space; reserve an entry.
-                if t.osec != ctx.isecs[isec_id].osec {
+                if t.osec != osec {
                     // conservative: fall through to the entry below
                 } else if t.output_offset != u64::MAX {
                     let target_off = t.output_offset + sym.value;
@@ -157,7 +164,7 @@ fn scan_relocs_into_thunk<E: Arch>(
                 nsyms += 1;
                 e
             });
-            ctx.isecs[isec_id].relocs[r].thunk_off = entry;
+            ctx.objs[obj].relocs[ro + r].thunk_off = entry;
         }
     }
 

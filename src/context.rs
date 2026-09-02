@@ -212,6 +212,17 @@ impl<E: Arch> Context<E> {
         id
     }
 
+    /// A subsection's relocations, sliced from its object's reloc arena
+    /// (subsections keep only a rel_offset/nrels range, sold-style).
+    pub fn isec_relocs(&self, id: InputSectionId) -> &[crate::input_sections::Reloc] {
+        let isec = &self.isecs[id];
+        if isec.obj == usize::MAX {
+            return &[];
+        }
+        let off = isec.rel_offset as usize;
+        &self.objs[isec.obj].relocs[off..off + isec.nrels as usize]
+    }
+
     /// Returns the output address of an input section. Layout stores
     /// every subsection's final address the moment its output section
     /// is placed (literal-merge losers borrow their survivor's), so

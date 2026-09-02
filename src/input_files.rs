@@ -28,6 +28,9 @@ pub struct ObjectFile {
     /// Section headers in ordinal order (all segments' sections
     /// concatenated in load command order).
     pub sect_hdrs: Vec<MachSection>,
+    /// This object's relocations, grouped by subsection; each
+    /// subsection references a contiguous range (rel_offset/nrels).
+    pub relocs: Vec<crate::input_sections::Reloc>,
     /// All of this object's subsections, sorted by input address.
     pub subsecs: Vec<usize>,
     /// The flags word of the object's __objc_imageinfo, if it has one.
@@ -47,6 +50,20 @@ pub struct ObjectFile {
     /// LC_LINKER_OPTIMIZATION_HINT entries: (kind, instruction
     /// addresses in the object's address space).
     pub loh: Vec<(u8, Vec<u64>)>,
+}
+
+/// A subsection's relocations, sliced from its object's reloc arena.
+/// A free function (not a Context method) so callers already holding a
+/// borrow of `ctx.isecs` can pass `&ctx.objs` alongside an `&isec`.
+pub fn isec_relocs_of<'a>(
+    objs: &'a [ObjectFile],
+    isec: &InputSection,
+) -> &'a [crate::input_sections::Reloc] {
+    if isec.obj == usize::MAX {
+        return &[];
+    }
+    let off = isec.rel_offset as usize;
+    &objs[isec.obj].relocs[off..off + isec.nrels as usize]
 }
 
 /// Finds the subsection containing `addr` among `subsecs` (sorted by
@@ -130,6 +147,7 @@ pub struct StagedObject {
     pub sect_hdrs: Vec<MachSection>,
     pub linker_options: Vec<Vec<String>>,
     pub isecs: Vec<InputSection>,
+    pub relocs: Vec<crate::input_sections::Reloc>,
     pub subsecs: Vec<usize>,
     pub nlists: Vec<NList>,
     pub sym_names: Vec<&'static str>,
@@ -347,7 +365,8 @@ pub fn stage_object<E: Arch>(
                 input_addr: start,
                 size: end - start,
                 data: contents,
-                relocs: Vec::new(),
+                rel_offset: 0,
+                nrels: 0,
                 osec: usize::MAX,
                 output_offset: 0,
                 addr: 0,
@@ -367,9 +386,11 @@ pub fn stage_object<E: Arch>(
     // subsections, rebasing location offsets and section-relative
     // targets to subsections. Sorted by offset, the relocations of
     // one subsection are contiguous, so a single merge walk over the
-    // subsections hands each its run - sold assigns rel_offset/nrels
-    // ranges with the same walk - instead of binary-searching the
-    // subsection list once per relocation.
+    // subsections hands each its run. The relocs go into one per-object
+    // arena and each subsection keeps a range into it (rel_offset/
+    // nrels) - sold's layout - so a debug link's millions of relocs
+    // are one allocation, not a Vec per subsection.
+    let mut obj_relocs: Vec<crate::input_sections::Reloc> = Vec::new();
     for (i, sect) in sect_hdrs.iter().enumerate() {
         if by_ordinal[i].is_empty() || sect.nreloc == 0 {
             continue;
@@ -393,12 +414,15 @@ pub fn stage_object<E: Arch>(
         for &sub in &by_ordinal[i] {
             let sub_off = (isecs[sub].input_addr - sect.addr) as u32;
             let end = sub_off + isecs[sub].size as u32;
-            let start = pos;
+            let start = obj_relocs.len();
             while pos < rels.len() && rels[pos].offset < end {
-                rels[pos].offset -= sub_off;
+                let mut rel = rels[pos];
+                rel.offset -= sub_off;
+                obj_relocs.push(rel);
                 pos += 1;
             }
-            isecs[sub].relocs = rels[start..pos].to_vec();
+            isecs[sub].rel_offset = start as u32;
+            isecs[sub].nrels = (obj_relocs.len() - start) as u32;
         }
         if pos < rels.len() {
             fatal!(diag, "{}: relocation outside its section", mf.name);
@@ -462,6 +486,7 @@ pub fn stage_object<E: Arch>(
         sect_hdrs,
         linker_options,
         isecs,
+        relocs: obj_relocs,
         subsecs,
         nlists,
         sym_names,
@@ -561,11 +586,14 @@ pub fn integrate_objects<E: Arch>(
 
             for isec in &mut st.isecs {
                 isec.obj = obj_idx;
-                for rel in &mut isec.relocs {
-                    if let crate::input_sections::RelocTarget::Section(local) = rel.target {
-                        rel.target =
-                            crate::input_sections::RelocTarget::Section(base.isec + local);
-                    }
+            }
+            // Section relocation targets are object-local subsection
+            // indices; rebase them to global once over the object's
+            // reloc arena (rel_offset/nrels stay object-local).
+            for rel in &mut st.relocs {
+                if let crate::input_sections::RelocTarget::Section(local) = rel.target {
+                    rel.target =
+                        crate::input_sections::RelocTarget::Section(base.isec + local);
                 }
             }
             for sub in &mut st.subsecs {
@@ -695,6 +723,7 @@ pub fn integrate_objects<E: Arch>(
             linker_options: st.linker_options,
             hidden: st.hidden,
             sect_hdrs: st.sect_hdrs,
+            relocs: st.relocs,
             subsecs: st.subsecs,
             objc_image_info: st.objc_image_info,
             has_debug_info: st.has_debug_info,
@@ -719,12 +748,13 @@ pub fn integrate_object_with<E: Arch>(
 
     for mut isec in staged.isecs {
         isec.obj = obj_idx;
-        for rel in &mut isec.relocs {
-            if let crate::input_sections::RelocTarget::Section(local) = rel.target {
-                rel.target = crate::input_sections::RelocTarget::Section(isec_base + local);
-            }
-        }
         ctx.isecs.push(isec);
+    }
+    let mut obj_relocs = staged.relocs;
+    for rel in &mut obj_relocs {
+        if let crate::input_sections::RelocTarget::Section(local) = rel.target {
+            rel.target = crate::input_sections::RelocTarget::Section(isec_base + local);
+        }
     }
 
     let mut syms = Vec::with_capacity(staged.nlists.len());
@@ -785,6 +815,7 @@ pub fn integrate_object_with<E: Arch>(
         linker_options: staged.linker_options,
         hidden: staged.hidden,
         sect_hdrs: staged.sect_hdrs,
+        relocs: obj_relocs,
         subsecs: staged.subsecs.into_iter().map(|i| i + isec_base).collect(),
         objc_image_info: staged.objc_image_info,
         has_debug_info: staged.has_debug_info,
@@ -856,6 +887,7 @@ pub fn parse_bitcode<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile, ali
         linker_options: Vec::new(),
         hidden: false,
         sect_hdrs: Vec::new(),
+        relocs: Vec::new(),
         subsecs: Vec::new(),
         objc_image_info: None,
         has_debug_info: false,
