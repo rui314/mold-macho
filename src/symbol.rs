@@ -155,6 +155,29 @@ impl std::hash::Hasher for PassThroughHasher {
 type ShardMap =
     hashbrown::HashMap<Key, SymbolId, std::hash::BuildHasherDefault<PassThroughHasher>>;
 
+/// A hash map over borrowed names with caller-supplied xxh3 hashes -
+/// the symbol table's key discipline, reusable wherever names are
+/// deduplicated (the output string table).
+#[derive(Default)]
+pub struct PrehashedMap<V>(
+    hashbrown::HashMap<Key, V, std::hash::BuildHasherDefault<PassThroughHasher>>,
+);
+
+impl<V> PrehashedMap<V> {
+    pub fn get(&self, name: &str, hash: u64) -> Option<&V> {
+        // SAFETY: the key is only compared during this call.
+        let probe = Key {
+            hash,
+            key: unsafe { std::mem::transmute::<&str, &'static str>(name) },
+        };
+        self.0.get(&probe)
+    }
+
+    pub fn insert(&mut self, name: &'static str, hash: u64, value: V) {
+        self.0.insert(Key { hash, key: name }, value);
+    }
+}
+
 impl Default for SymbolTable {
     fn default() -> SymbolTable {
         SymbolTable {

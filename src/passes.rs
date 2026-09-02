@@ -1945,23 +1945,26 @@ pub fn create_output_symtab<E: Arch>(ctx: &mut Context<E>) {
     // matters most for debug stabs, whose N_FUN/N_GSYM entries repeat
     // the very names the regular symbol table carries: without
     // deduplication a Rust binary's string table doubles (mangled
-    // names average well over 100 bytes).
-    let mut string_offsets: std::collections::HashMap<Box<str>, u32> =
-        std::collections::HashMap::new();
-    let mut add_string = |strtab: &mut Vec<u8>, s: &str| -> u32 {
-        if let Some(&off) = string_offsets.get(s) {
+    // names average well over 100 bytes). The map follows the symbol
+    // table's key discipline - borrowed names, precomputed xxh3,
+    // pass-through hashing - so deduplication allocates nothing and
+    // hashes each name once.
+    let mut string_offsets = crate::symbol::PrehashedMap::<u32>::default();
+    let mut add_string = |strtab: &mut Vec<u8>, s: &'static str| -> u32 {
+        let hash = crate::symbol::hash_key(s);
+        if let Some(&off) = string_offsets.get(s, hash) {
             return off;
         }
         let off = strtab.len() as u32;
         strtab.extend_from_slice(s.as_bytes());
         strtab.push(0);
-        string_offsets.insert(s.into(), off);
+        string_offsets.insert(s, hash, off);
         off
     };
 
     // Swift AST paths for the debugger (-add_ast_path), as N_AST stabs.
     for path in &ctx.args.add_ast_paths {
-        let n_strx = add_string(&mut data.strtab, path);
+        let n_strx = add_string(&mut data.strtab, String::leak(path.clone()));
         data.entries.push((
             NList {
                 n_strx,
@@ -2015,7 +2018,10 @@ pub fn create_output_symtab<E: Arch>(ctx: &mut Context<E>) {
             }
             data.entries.push((
                 NList {
-                    n_strx: add_string(&mut data.strtab, &oso_name),
+                    n_strx: add_string(
+                        &mut data.strtab,
+                        String::leak(std::mem::take(&mut oso_name)),
+                    ),
                     n_type: N_OSO,
                     n_sect: E::CPUSUBTYPE as u8,
                     n_desc: 1,
