@@ -22,6 +22,9 @@ pub struct Context<E: Arch> {
     pub symtab: SymbolTable,
     /// All input sections, in one arena.
     pub isecs: Vec<InputSection>,
+    /// Per-symbol synthetic-slot indices (SymbolId-indexed), grown
+    /// lazily; mold-rust's SymbolAux side table.
+    pub sym_aux: Vec<crate::symbol::SymAux>,
     /// Input-order counter for resolution tie-breaking.
     pub priority_counter: u32,
     /// Files already loaded, so a library named twice (command line
@@ -132,6 +135,7 @@ impl<E: Arch> Context<E> {
             dylibs: Vec::new(),
             symtab: SymbolTable::default(),
             isecs: Vec::new(),
+            sym_aux: Vec::new(),
             priority_counter: 0,
             lto_plugin: None,
             lto_modules: Vec::new(),
@@ -212,6 +216,23 @@ impl<E: Arch> Context<E> {
         id
     }
 
+    /// A symbol's synthetic-slot indices, from the side table. Returns
+    /// the all-absent default for symbols with no slots (the table is
+    /// grown lazily by the first setter).
+    pub fn sym_aux(&self, id: SymbolId) -> crate::symbol::SymAux {
+        self.sym_aux.get(id).copied().unwrap_or_default()
+    }
+
+    /// Mutable access to a symbol's slot indices, growing the side table
+    /// to cover it. Called only from the serial slot-assignment passes.
+    pub fn sym_aux_mut(&mut self, id: SymbolId) -> &mut crate::symbol::SymAux {
+        if self.sym_aux.len() <= id {
+            self.sym_aux
+                .resize(self.symtab.syms.len().max(id + 1), Default::default());
+        }
+        &mut self.sym_aux[id]
+    }
+
     /// A subsection's relocations, sliced from its object's reloc arena
     /// (subsections keep only a rel_offset/nrels range, sold-style).
     pub fn isec_relocs(&self, id: InputSectionId) -> &[crate::input_sections::Reloc] {
@@ -242,9 +263,9 @@ impl<E: Arch> Context<E> {
             Origin::Obj(_) | Origin::Synthetic => {
                 if let Some(isec) = sym.isec {
                     self.isec_addr(isec) + sym.value
-                } else if sym.objc_stub_idx != crate::symbol::NO_IDX {
+                } else if self.sym_aux(id).objc_stub_idx != crate::symbol::NO_IDX {
                     self.chunks[self.objc_stubs_chunk].hdr.addr
-                        + sym.objc_stub_idx as u64 * E::OBJC_STUB_SIZE
+                        + self.sym_aux(id).objc_stub_idx as u64 * E::OBJC_STUB_SIZE
                 } else {
                     sym.value
                 }
@@ -253,7 +274,7 @@ impl<E: Arch> Context<E> {
             // references to dylib symbols are filled in by dyld; the
             // relocation scan has already validated them.
             Origin::Dylib(_) => {
-                if sym.stub_idx != crate::symbol::NO_IDX {
+                if self.sym_aux(id).stub_idx != crate::symbol::NO_IDX {
                     self.sym_stub_addr(id)
                 } else {
                     0
@@ -265,18 +286,18 @@ impl<E: Arch> Context<E> {
     /// Returns the address of a symbol's __stubs entry.
     pub fn sym_stub_addr(&self, id: SymbolId) -> u64 {
         self.chunks[self.stubs_chunk].hdr.addr
-            + self.symtab[id].stub_idx as u64 * E::STUB_SIZE
+            + self.sym_aux(id).stub_idx as u64 * E::STUB_SIZE
     }
 
     /// Returns the address of a symbol's __got slot.
     pub fn sym_got_addr(&self, id: SymbolId) -> u64 {
-        self.chunks[self.got_chunk].hdr.addr + self.symtab[id].got_idx as u64 * 8
+        self.chunks[self.got_chunk].hdr.addr + self.sym_aux(id).got_idx as u64 * 8
     }
 
     /// Returns the address of a symbol's __thread_ptrs slot.
     pub fn sym_tlv_ptr_addr(&self, id: SymbolId) -> u64 {
         self.chunks[self.thread_ptrs_chunk].hdr.addr
-            + self.symtab[id].tlv_idx as u64 * 8
+            + self.sym_aux(id).tlv_idx as u64 * 8
     }
 
     /// Returns the symbol a relocation refers to, if it refers to one.

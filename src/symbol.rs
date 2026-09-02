@@ -48,23 +48,34 @@ pub struct Symbol {
     /// converted to a real one; `value` holds its size.
     pub is_common: bool,
     pub common_p2align: u8,
-    /// Synthetic-slot indices, `NO_IDX` when the symbol has no such
-    /// slot. Plain `u32`s rather than `Option<u32>` (which would be 8
-    /// bytes each) to keep Symbol small - it is loaded in every scan.
-    /// The symbol's entry in __stubs, if branches to it need one.
-    pub stub_idx: u32,
-    /// The symbol's entry in __got, if it is address-taken through the
-    /// GOT.
-    pub got_idx: u32,
-    /// The symbol's slot in __thread_ptrs, for thread-local variables.
-    pub tlv_idx: u32,
-    /// The symbol's entry in __objc_stubs, for linker-synthesized
-    /// _objc_msgSend$selector stubs.
-    pub objc_stub_idx: u32,
 }
 
 /// Sentinel for a synthetic-slot index a symbol does not have.
 pub const NO_IDX: u32 = u32::MAX;
+
+/// A symbol's synthetic-slot indices (__stubs, __got, __thread_ptrs,
+/// __objc_stubs), each `NO_IDX` when absent. Only the few symbols that
+/// take a slot ever have one, so these live in a side table indexed by
+/// SymbolId - mold-rust's SymbolAux - keeping Symbol itself small, as
+/// it is loaded in every symbol scan.
+#[derive(Clone, Copy)]
+pub struct SymAux {
+    pub stub_idx: u32,
+    pub got_idx: u32,
+    pub tlv_idx: u32,
+    pub objc_stub_idx: u32,
+}
+
+impl Default for SymAux {
+    fn default() -> SymAux {
+        SymAux {
+            stub_idx: NO_IDX,
+            got_idx: NO_IDX,
+            tlv_idx: NO_IDX,
+            objc_stub_idx: NO_IDX,
+        }
+    }
+}
 
 impl Symbol {
     pub(crate) fn new(name: &'static str) -> Symbol {
@@ -82,10 +93,6 @@ impl Symbol {
             no_dead_strip: false,
             is_common: false,
             common_p2align: 0,
-            stub_idx: NO_IDX,
-            got_idx: NO_IDX,
-            tlv_idx: NO_IDX,
-            objc_stub_idx: NO_IDX,
         }
     }
 
