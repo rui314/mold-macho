@@ -118,53 +118,73 @@ fn scan_relocs_into_thunk<E: Arch>(
     forward_reachable: bool,
     thunks: &mut Vec<output_chunks::Thunk>,
 ) -> u64 {
+    // Scan the batch's branch relocations in parallel to find the ones
+    // whose target may be out of reach - mold-rust scans each batch's
+    // members with par_iter here too, and the reachability test is a
+    // pure read of state layout has already fixed. Each subsection
+    // emits, in relocation order, the (object, arena index, target)
+    // triples of its out-of-reach branches; the serial pass below then
+    // assigns thunk entries in exactly the batch-then-reloc order the
+    // old serial scan used, so the thunk is byte-identical.
+    use rayon::prelude::*;
+    let ctx_ref: &Context<E> = ctx;
+    let per_isec: Vec<Vec<(usize, usize, crate::symbol::SymbolId)>> = batch
+        .par_iter()
+        .map(|&isec_id| {
+            let mut out = Vec::new();
+            let obj = ctx_ref.isecs[isec_id].obj;
+            if obj == usize::MAX {
+                return out;
+            }
+            let osec = ctx_ref.isecs[isec_id].osec;
+            let ro = ctx_ref.isecs[isec_id].rel_offset as usize;
+            let nr = ctx_ref.isecs[isec_id].nrels as usize;
+            for r in 0..nr {
+                let rel = ctx_ref.objs[obj].relocs[ro + r];
+                if E::classify_reloc(rel.r_type) != RelocClass::Branch {
+                    continue;
+                }
+                let Some(sym_id) = ctx_ref.reloc_target_sym(obj, &rel) else {
+                    continue;
+                };
+
+                let sym = &ctx_ref.symtab[sym_id];
+                if let (Origin::Obj(_), Some(target)) = (sym.origin, sym.isec) {
+                    let t = &ctx_ref.isecs[ctx_ref.resolve_isec(target as usize)];
+                    // A target in another output section has no offset
+                    // in this section's space; reserve an entry.
+                    if t.osec != osec {
+                        // conservative: fall through to the entry below
+                    } else if t.output_offset != u64::MAX {
+                        let target_off = t.output_offset + sym.value;
+                        if thunk_off.saturating_sub(target_off)
+                            < E::BRANCH_RANGE / 2 - 1024 * 1024
+                        {
+                            continue;
+                        }
+                    } else if forward_reachable {
+                        // Still unplaced, but the whole section fits
+                        // within forward reach of this batch.
+                        continue;
+                    }
+                }
+                out.push((obj, ro + r, sym_id));
+            }
+            out
+        })
+        .collect();
+
     let mut entry_of: std::collections::HashMap<crate::symbol::SymbolId, u64> =
         std::collections::HashMap::new();
     let mut nsyms = 0u64;
-
-    for &isec_id in batch {
-        let obj = ctx.isecs[isec_id].obj;
-        let osec = ctx.isecs[isec_id].osec;
-        let ro = ctx.isecs[isec_id].rel_offset as usize;
-        let nr = ctx.isecs[isec_id].nrels as usize;
-        if obj == usize::MAX {
-            continue;
-        }
-        for r in 0..nr {
-            let rel = ctx.objs[obj].relocs[ro + r];
-            if E::classify_reloc(rel.r_type) != RelocClass::Branch {
-                continue;
-            }
-            let Some(sym_id) = ctx.reloc_target_sym(obj, &rel) else {
-                continue;
-            };
-
-            let sym = &ctx.symtab[sym_id];
-            if let (Origin::Obj(_), Some(target)) = (sym.origin, sym.isec) {
-                let t = &ctx.isecs[ctx.resolve_isec(target as usize)];
-                // A target in another output section has no offset in
-                // this section's space; reserve an entry.
-                if t.osec != osec {
-                    // conservative: fall through to the entry below
-                } else if t.output_offset != u64::MAX {
-                    let target_off = t.output_offset + sym.value;
-                    if thunk_off.saturating_sub(target_off) < E::BRANCH_RANGE / 2 - 1024 * 1024
-                    {
-                        continue;
-                    }
-                } else if forward_reachable {
-                    // Still unplaced, but the whole section fits
-                    // within forward reach of this batch.
-                    continue;
-                }
-            }
-
+    for isec_out in &per_isec {
+        for &(obj, ridx, sym_id) in isec_out {
             let entry = *entry_of.entry(sym_id).or_insert_with(|| {
                 let e = thunk_off + nsyms * E::THUNK_SIZE;
                 nsyms += 1;
                 e
             });
-            ctx.objs[obj].relocs[ro + r].thunk_off = entry as u32;
+            ctx.objs[obj].relocs[ridx].thunk_off = entry as u32;
         }
     }
 
