@@ -466,6 +466,149 @@ pub fn integrate_object<E: Arch>(ctx: &mut Context<E>, staged: StagedObject) -> 
 
 /// Like integrate_object, with the global symbols' ids already interned
 /// by a bulk pass (in nlist order, one entry per extern non-stab nlist).
+/// Integrates a whole staging batch at once, mold-style: every
+/// object's arena positions (subsection, CIE, FDE and local-symbol
+/// bases) come from prefix sums over the batch, so the rebasing of
+/// indices - the actual work - runs on all cores, and the serial
+/// remainder is moving the rebased vectors into the global arenas.
+/// Produces exactly the layout the one-at-a-time path would.
+pub fn integrate_objects<E: Arch>(
+    ctx: &mut Context<E>,
+    mut staged: Vec<StagedObject>,
+    ids: Vec<crate::symbol::SymbolId>,
+    counts: Vec<usize>,
+) {
+    use rayon::prelude::*;
+
+    let obj_base = ctx.objs.len();
+    let mut isec_base = ctx.isecs.len();
+    let mut cie_base = ctx.cies.len();
+    let mut fde_base = ctx.fdes.len();
+    let mut locals_base = ctx.symtab.syms.len();
+    let mut id_base = 0usize;
+
+    struct Bases {
+        isec: usize,
+        cie: usize,
+        fde: usize,
+        locals: usize,
+        ids: usize,
+    }
+    let mut bases = Vec::with_capacity(staged.len());
+    for (st, &nids) in staged.iter().zip(&counts) {
+        let n_locals = st
+            .nlists
+            .iter()
+            .filter(|n| n.is_stab() || !n.is_extern())
+            .count();
+        bases.push(Bases {
+            isec: isec_base,
+            cie: cie_base,
+            fde: fde_base,
+            locals: locals_base,
+            ids: id_base,
+        });
+        isec_base += st.isecs.len();
+        cie_base += st.cies.len();
+        fde_base += st.fdes.len();
+        locals_base += n_locals;
+        id_base += nids;
+    }
+
+    // The rebasing, in parallel; each object also reports its local
+    // symbol names in order for the serial arena extension below.
+    let syms_of: Vec<Vec<crate::symbol::SymbolId>> = staged
+        .par_iter_mut()
+        .enumerate()
+        .map(|(i, st)| {
+            let base = &bases[i];
+            let obj_idx = obj_base + i;
+
+            let mut syms = Vec::with_capacity(st.nlists.len());
+            let mut next_local = base.locals;
+            let mut next_id = base.ids;
+            for nlist in &st.nlists {
+                if nlist.is_stab() || !nlist.is_extern() {
+                    syms.push(next_local);
+                    next_local += 1;
+                } else {
+                    syms.push(ids[next_id]);
+                    next_id += 1;
+                }
+            }
+
+            for isec in &mut st.isecs {
+                isec.obj = obj_idx;
+                for rel in &mut isec.relocs {
+                    if let crate::input_sections::RelocTarget::Section(local) = rel.target {
+                        rel.target =
+                            crate::input_sections::RelocTarget::Section(base.isec + local);
+                    }
+                }
+            }
+            for sub in &mut st.subsecs {
+                *sub += base.isec;
+            }
+            for rec in &mut st.unwind {
+                rec.isec += base.isec;
+                if let Some((lsda, _)) = &mut rec.lsda {
+                    *lsda += base.isec;
+                }
+                if let Some(fde) = &mut rec.fde {
+                    *fde += base.fde;
+                }
+                if let Some(p) = &mut rec.personality {
+                    *p = syms[*p];
+                }
+            }
+            for cie in &mut st.cies {
+                cie.obj = obj_idx;
+                if let Some(p) = &mut cie.personality {
+                    *p = syms[*p];
+                }
+            }
+            for fde in &mut st.fdes {
+                fde.obj = obj_idx;
+                fde.isec += base.isec;
+                fde.cie += base.cie;
+                if let Some((lsda, _)) = &mut fde.lsda {
+                    *lsda += base.isec;
+                }
+            }
+            syms
+        })
+        .collect();
+
+    // Serial arena extension: pure moves and Symbol construction.
+    for (st, syms) in staged.into_iter().zip(syms_of) {
+        for (nlist, name) in st.nlists.iter().zip(&st.sym_names) {
+            if nlist.is_stab() || !nlist.is_extern() {
+                ctx.symtab.add_local(name);
+            }
+        }
+        ctx.isecs.extend(st.isecs);
+        ctx.unwind_records.extend(st.unwind);
+        ctx.cies.extend(st.cies);
+        ctx.fdes.extend(st.fdes);
+        ctx.objs.push(ObjectFile {
+            mf: st.mf,
+            is_alive: st.alive,
+            priority: st.priority,
+            linker_options: st.linker_options,
+            hidden: st.hidden,
+            sect_hdrs: st.sect_hdrs,
+            subsecs: st.subsecs,
+            objc_image_info: st.objc_image_info,
+            has_debug_info: st.has_debug_info,
+            nlists: st.nlists,
+            syms,
+            lto_module: None,
+            dice: st.dice,
+            loh: st.loh,
+        });
+    }
+}
+
 pub fn integrate_object_with<E: Arch>(
     ctx: &mut Context<E>,
     staged: StagedObject,

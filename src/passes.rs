@@ -260,12 +260,9 @@ fn load_pending<E: Arch>(ctx: &mut Context<E>, pending: Vec<PendingObject>) {
         }
         counts.push(batch.len() - before);
     }
-    let mut ids = t!("gather", ctx.symtab.gather(&batch)).into_iter();
+    let ids = t!("gather", ctx.symtab.gather(&batch));
 
-    t!("integrate", for (st, count) in staged.into_iter().zip(counts) {
-        let pre: Vec<crate::symbol::SymbolId> = ids.by_ref().take(count).collect();
-        input_files::integrate_object_with(ctx, st, Some(pre));
-    });
+    t!("integrate", input_files::integrate_objects(ctx, staged, ids, counts));
 }
 
 pub fn read_input_files<E: Arch>(ctx: &mut Context<E>) {
