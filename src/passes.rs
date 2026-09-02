@@ -232,19 +232,22 @@ fn load_pending<E: Arch>(ctx: &mut Context<E>, pending: Vec<PendingObject>) {
 
     // Intern every staged object's global names in one parallel batch
     // (mold's sharded symbol table), so the serial integration loop
-    // below does no hashing.
-    let mut batch: Vec<&'static str> = Vec::new();
+    // below does no hashing. Names carry the xxh3 hashes staging
+    // computed alongside them, so nothing here touches their bytes.
+    let mut batch: Vec<(&'static str, u64)> = Vec::new();
     let mut counts: Vec<usize> = Vec::with_capacity(staged.len());
     for st in &staged {
         let before = batch.len();
-        for (nlist, name) in st.nlists.iter().zip(&st.sym_names) {
+        for ((name, &hash), nlist) in
+            st.sym_names.iter().zip(&st.sym_hashes).zip(&st.nlists)
+        {
             if !nlist.is_stab() && nlist.is_extern() {
-                batch.push(name);
+                batch.push((name, hash));
             }
         }
         counts.push(batch.len() - before);
     }
-    let mut ids = ctx.symtab.intern_batch(&batch).into_iter();
+    let mut ids = ctx.symtab.gather(&batch).into_iter();
 
     for (st, count) in staged.into_iter().zip(counts) {
         let pre: Vec<crate::symbol::SymbolId> = ids.by_ref().take(count).collect();

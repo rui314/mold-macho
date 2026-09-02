@@ -16,6 +16,8 @@ members = ["cli", "targets/*", "tests"]
 default-members = [".", "cli", "targets/*", "tests"]
 
 [dependencies]
+hashbrown = "0.17"
 libc = "0.2"
 memmap2 = "0.9"
 rayon = "1.12.0"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }

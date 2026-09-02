@@ -1,6 +1,5 @@
 //! Symbols and the global symbol table.
 
-use std::collections::HashMap;
 
 use crate::input_sections::InputSectionId;
 
@@ -94,31 +93,72 @@ impl Symbol {
 /// slots of their own.
 ///
 /// The name map is sharded by a hash of the name, following mold's
-/// symbol table: one-off lookups route to a single shard, and
-/// intern_batch resolves a whole link's worth of names with the
-/// shards processed in parallel.
+/// symbol table: keys carry their xxh3 hash, computed in parallel
+/// while files are staged, the maps hash by passing that value
+/// through, and gather resolves a whole link's worth of names
+/// with the shards processed in parallel.
 #[derive(Debug)]
 pub struct SymbolTable {
-    shards: Vec<HashMap<&'static str, SymbolId>>,
+    shards: Vec<ShardMap>,
     pub syms: Vec<Symbol>,
 }
 
-const NUM_SHARDS: usize = 64;
+pub const NUM_SHARDS: usize = 64;
 
-/// The sharding hash: FNV-1a, cheap and stable. Each shard's HashMap
-/// hashes again internally; this only has to spread names evenly.
-fn shard_of(name: &str) -> usize {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for &b in name.as_bytes() {
-        h = (h ^ b as u64).wrapping_mul(0x100_0000_01b3);
-    }
-    (h % NUM_SHARDS as u64) as usize
+/// The hash of a symbol table key, which the sharded table and its
+/// callers share. Computed once per name, at staging time when
+/// possible.
+pub fn hash_key(key: &str) -> u64 {
+    xxhash_rust::xxh3::xxh3_64(key.as_bytes())
 }
+
+fn shard_of(hash: u64) -> usize {
+    (hash % NUM_SHARDS as u64) as usize
+}
+
+/// A map key that hashes by its precomputed hash and compares by the
+/// name, as in mold-rust.
+#[derive(Clone, Copy, Debug)]
+struct Key {
+    hash: u64,
+    key: &'static str,
+}
+
+impl PartialEq for Key {
+    fn eq(&self, other: &Key) -> bool {
+        self.hash == other.hash && self.key == other.key
+    }
+}
+impl Eq for Key {}
+
+impl std::hash::Hash for Key {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        state.write_u64(self.hash);
+    }
+}
+
+#[derive(Default)]
+struct PassThroughHasher(u64);
+
+impl std::hash::Hasher for PassThroughHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, _: &[u8]) {
+        unreachable!("keys hash by their precomputed hash")
+    }
+    fn write_u64(&mut self, hash: u64) {
+        self.0 = hash;
+    }
+}
+
+type ShardMap =
+    hashbrown::HashMap<Key, SymbolId, std::hash::BuildHasherDefault<PassThroughHasher>>;
 
 impl Default for SymbolTable {
     fn default() -> SymbolTable {
         SymbolTable {
-            shards: (0..NUM_SHARDS).map(|_| HashMap::new()).collect(),
+            shards: (0..NUM_SHARDS).map(|_| ShardMap::default()).collect(),
             syms: Vec::new(),
         }
     }
@@ -127,15 +167,26 @@ impl Default for SymbolTable {
 impl SymbolTable {
     /// Returns the symbol for a global name, creating it if needed.
     pub fn intern(&mut self, name: &'static str) -> SymbolId {
-        *self.shards[shard_of(name)].entry(name).or_insert_with(|| {
-            self.syms.push(Symbol::new(name));
-            self.syms.len() - 1
-        })
+        let hash = hash_key(name);
+        *self.shards[shard_of(hash)]
+            .entry(Key { hash, key: name })
+            .or_insert_with(|| {
+                self.syms.push(Symbol::new(name));
+                self.syms.len() - 1
+            })
     }
 
     /// Returns the symbol for a global name if it exists.
     pub fn get(&self, name: &str) -> Option<SymbolId> {
-        self.shards[shard_of(name)].get(name).copied()
+        let hash = hash_key(name);
+        // SAFETY-free trick from mold: lookups build a key borrowing
+        // the probe name; only inserts require 'static.
+        let probe = Key {
+            hash,
+            // The key is only compared during this call.
+            key: unsafe { std::mem::transmute::<&str, &'static str>(name) },
+        };
+        self.shards[shard_of(hash)].get(&probe).copied()
     }
 
     /// Creates an anonymous slot for a file-local symbol.
@@ -144,19 +195,18 @@ impl SymbolTable {
         self.syms.len() - 1
     }
 
-    /// Interns every name in `batch` at once, returning ids aligned
-    /// with it. Names are binned by shard, the shards resolve their
-    /// bins in parallel (an existing id, or a shard-local new index),
-    /// new symbols take contiguous id ranges per shard - a prefix sum
-    /// over the shards' new counts - and one serial scatter writes the
-    /// results. Ids depend only on input order and the sharding hash,
-    /// so output remains deterministic.
-    pub fn intern_batch(&mut self, batch: &[&'static str]) -> Vec<SymbolId> {
+    /// Interns every (name, precomputed-hash) pair at once, returning
+    /// ids aligned with the batch. Names are binned by shard without
+    /// touching their bytes, the shards resolve their bins in
+    /// parallel, new symbols take contiguous id ranges per shard, and
+    /// one serial scatter hands the ids back. Ids depend only on
+    /// input order and the hash, so links stay deterministic.
+    pub fn gather(&mut self, batch: &[(&'static str, u64)]) -> Vec<SymbolId> {
         use rayon::prelude::*;
 
         let mut bins: Vec<Vec<u32>> = vec![Vec::new(); NUM_SHARDS];
-        for (i, name) in batch.iter().enumerate() {
-            bins[shard_of(name)].push(i as u32);
+        for (i, &(_, hash)) in batch.iter().enumerate() {
+            bins[shard_of(hash)].push(i as u32);
         }
 
         enum Resolved {
@@ -169,20 +219,23 @@ impl SymbolTable {
             .zip(bins)
             .map(|(shard, bin)| {
                 let mut news: Vec<&'static str> = Vec::new();
-                let mut newmap: HashMap<&'static str, u32> = HashMap::new();
+                // Names first seen in this batch, with their
+                // shard-local index; final ids are assigned once the
+                // shards' ranges are known.
+                let mut newmap: ShardMap = ShardMap::default();
                 let mut out = Vec::with_capacity(bin.len());
                 for i in bin {
-                    let name = batch[i as usize];
-                    match shard.get(name) {
-                        Some(&id) => out.push((i, Resolved::Old(id))),
-                        None => {
-                            let idx = *newmap.entry(name).or_insert_with(|| {
-                                news.push(name);
-                                news.len() as u32 - 1
-                            });
-                            out.push((i, Resolved::New(idx)));
-                        }
+                    let (name, hash) = batch[i as usize];
+                    let key = Key { hash, key: name };
+                    if let Some(&id) = shard.get(&key) {
+                        out.push((i, Resolved::Old(id)));
+                        continue;
                     }
+                    let idx = *newmap.entry(key).or_insert_with(|| {
+                        news.push(name);
+                        news.len() - 1
+                    });
+                    out.push((i, Resolved::New(idx as u32)));
                 }
                 (out, news)
             })
@@ -200,13 +253,18 @@ impl SymbolTable {
                 self.syms.push(Symbol::new(name));
             }
         }
+        // Insert the new names with their final ids.
         self.shards
             .par_iter_mut()
             .zip(&results)
             .zip(&bases)
             .for_each(|((shard, (_, news)), &b)| {
                 for (k, name) in news.iter().enumerate() {
-                    shard.insert(name, b + k);
+                    let key = Key {
+                        hash: hash_key(name),
+                        key: name,
+                    };
+                    shard.insert(key, b + k);
                 }
             });
 

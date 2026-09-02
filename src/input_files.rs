@@ -133,6 +133,9 @@ pub struct StagedObject {
     pub subsecs: Vec<usize>,
     pub nlists: Vec<NList>,
     pub sym_names: Vec<&'static str>,
+    /// xxh3 of each extern non-stab name (0 otherwise), computed here
+    /// so the serial intern path never hashes.
+    pub sym_hashes: Vec<u64>,
     pub unwind: Vec<UnwindRecord>,
     pub cies: Vec<Cie>,
     pub fdes: Vec<Fde>,
@@ -421,6 +424,18 @@ pub fn stage_object<E: Arch>(
         .iter()
         .any(|s| s.segname() == "__DWARF" && s.sectname() == "__debug_info");
 
+    let sym_hashes: Vec<u64> = nlists
+        .iter()
+        .zip(&sym_names)
+        .map(|(nlist, name)| {
+            if !nlist.is_stab() && nlist.is_extern() {
+                crate::symbol::hash_key(name)
+            } else {
+                0
+            }
+        })
+        .collect();
+
     StagedObject {
         mf,
         alive,
@@ -432,6 +447,7 @@ pub fn stage_object<E: Arch>(
         subsecs,
         nlists,
         sym_names,
+        sym_hashes,
         unwind,
         cies,
         dice,
