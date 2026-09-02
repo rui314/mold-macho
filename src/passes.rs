@@ -2549,24 +2549,30 @@ pub fn create_output_symtab<E: Arch>(
 
     // Build the string table and assign every entry's n_strx in one
     // parallel pass, the same sharded shape as the symbol table:
-    // names bin by xxh3, each shard deduplicates its bin (first
-    // appearance wins) and lays its unique names out as one blob,
-    // prefix sums place the blobs, and the entries' offsets follow.
-    // Entries with the empty sentinel keep their fixed placeholder
-    // offsets (1 is "", 2 is "-").
+    // names bin, each shard deduplicates its bin (first appearance
+    // wins) and lays its unique names out as one blob, prefix sums
+    // place the blobs, and the entries' offsets follow. Entries with
+    // the empty sentinel keep their fixed placeholder offsets (1 is
+    // "", 2 is "-").
+    //
+    // Dedup by pointer, not by string content: hashing 1.1M long
+    // mangled names in full was the single most expensive step of a
+    // debug link. Global, undefined and private-external names are
+    // interned to canonical pointers, so pointer-dedup folds them
+    // completely - including the weak-template names that repeat
+    // across thousands of objects. Local and stab names instead point
+    // into their object's mapped string table, so they dedup within an
+    // object but keep one copy per object that defines them; that
+    // costs about 1MB of a 154MB string table (still under ld64's),
+    // far less than mold-rust, which dedups nothing here at all.
     {
         use rayon::prelude::*;
         debug_assert_eq!(names.len(), data.entries.len());
-        let hashes: Vec<u64> = names
-            .par_iter()
-            .map(|n| {
-                if n.is_empty() {
-                    0
-                } else {
-                    crate::symbol::hash_key(n)
-                }
-            })
-            .collect();
+        // Fibonacci hash of the pointer, for an even bin spread.
+        let ptr_hash = |n: &&'static str| -> u64 {
+            (n.as_ptr() as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        };
+        let hashes: Vec<u64> = names.par_iter().map(ptr_hash).collect();
         const NS: usize = 64;
         let mut bins: Vec<Vec<u32>> = vec![Vec::new(); NS];
         for (i, (&h, n)) in hashes.iter().zip(&names).enumerate() {
@@ -2584,18 +2590,17 @@ pub fn create_output_symtab<E: Arch>(
             resolved: Vec<(u32, u32)>,
         }
         let names_ref = &names;
-        let hashes_ref = &hashes;
         let shard_outs: Vec<ShardOut> = bins
             .into_par_iter()
             .map(|bin| {
-                let mut map: hashbrown::HashMap<(u64, &str), u32> = hashbrown::HashMap::new();
+                // Keyed by pointer: interned names dedup by identity.
+                let mut map: hashbrown::HashMap<*const u8, u32> = hashbrown::HashMap::new();
                 let mut uniq: Vec<(&'static str, u32)> = Vec::new();
                 let mut blob_len = 0u32;
                 let mut resolved = Vec::with_capacity(bin.len());
                 for e in bin {
                     let name = names_ref[e as usize];
-                    let hash = hashes_ref[e as usize];
-                    let idx = *map.entry((hash, name)).or_insert_with(|| {
+                    let idx = *map.entry(name.as_ptr()).or_insert_with(|| {
                         let off = blob_len;
                         uniq.push((name, off));
                         blob_len += name.len() as u32 + 1;
