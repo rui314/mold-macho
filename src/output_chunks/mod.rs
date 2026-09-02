@@ -616,7 +616,7 @@ pub fn copy_mach_header<E: Arch>(ctx: &Context<E>, buf: &mut [u8]) {
         sym.is_weak_def
             && sym.is_extern
             && !sym.is_private_extern
-            && sym.isec.is_some_and(|isec| ctx.isecs[isec].is_alive)
+            && sym.isec.map(|i| i as usize).is_some_and(|isec| ctx.isecs[isec].is_alive)
     }) {
         hdr.flags |= MH_WEAK_DEFINES;
     }

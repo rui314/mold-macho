@@ -544,7 +544,7 @@ fn claim_locals<E: Arch>(ctx: &mut Context<E>) {
                         crate::input_files::find_subsec(isecs, &obj.subsecs, nlist.n_value)
                     {
                         sym.origin = Origin::Obj(obj_idx);
-                        sym.isec = Some(isec);
+                        sym.isec = Some(isec as u32);
                         sym.value = off;
                         sym.no_dead_strip =
                             nlist.n_desc & (N_NO_DEAD_STRIP | REFERENCED_DYNAMICALLY) != 0;
@@ -693,7 +693,7 @@ fn do_resolve<E: Arch>(ctx: &mut Context<E>, only_alive: bool) {
                             nlist.n_value,
                         ) {
                             Some((isec, off)) => {
-                                sym.isec = Some(isec);
+                                sym.isec = Some(isec as u32);
                                 sym.value = off;
                             }
                             None => {
@@ -999,7 +999,7 @@ pub fn convert_common_symbols<E: Arch>(ctx: &mut Context<E>) {
 
         let sym = &mut ctx.symtab[i];
         sym.origin = Origin::Synthetic;
-        sym.isec = Some(ctx.isecs.len() - 1);
+        sym.isec = Some((ctx.isecs.len() - 1) as u32);
         sym.value = 0;
         sym.is_common = false;
         sym.is_extern = true;
@@ -1031,7 +1031,7 @@ pub fn convert_init_offsets<E: Arch>(ctx: &mut Context<E>) {
                 Some(id) => {
                     let sym = &ctx.symtab[id];
                     match sym.isec {
-                        Some(isec) => (ctx.resolve_isec(isec), sym.value),
+                        Some(isec) => (ctx.resolve_isec(isec as usize), sym.value),
                         None => continue,
                     }
                 }
@@ -1306,7 +1306,7 @@ pub fn coalesce_weak_defs<E: Arch>(ctx: &mut Context<E>) {
             if owner == obj_idx {
                 continue;
             }
-            let Some(winner) = sym.isec else { continue };
+            let Some(winner) = sym.isec.map(|i| i as usize) else { continue };
             let winner = ctx.resolve_isec(winner);
             let Some((loser, off)) = crate::input_files::find_subsec(
                 &ctx.isecs,
@@ -1582,7 +1582,7 @@ pub fn scan_relocations<E: Arch>(ctx: &mut Context<E>) {
 fn is_thread_local_sym<E: Arch>(ctx: &Context<E>, id: crate::symbol::SymbolId) -> bool {
     let sym = &ctx.symtab[id];
     match sym.origin {
-        crate::symbol::Origin::Obj(_) => sym.isec.is_some_and(|isec| {
+        crate::symbol::Origin::Obj(_) => sym.isec.map(|i| i as usize).is_some_and(|isec| {
             ctx.isecs[isec].hdr.flags & SECTION_TYPE == S_THREAD_LOCAL_VARIABLES
         }),
         crate::symbol::Origin::Dylib(idx) => {
@@ -2297,7 +2297,7 @@ pub fn create_output_symtab<E: Arch>(
                     {
                         continue;
                     }
-                    let Some(isec) = sym.isec else { continue };
+                    let Some(isec) = sym.isec.map(|i| i as usize) else { continue };
                     let isec_id = ctx.resolve_isec(isec);
                     let isec = &ctx.isecs[isec_id];
                     if !isec.is_alive {
@@ -2435,7 +2435,7 @@ pub fn create_output_symtab<E: Arch>(
                     {
                         continue;
                     }
-                    let Some(isec) = sym.isec else { continue };
+                    let Some(isec) = sym.isec.map(|i| i as usize) else { continue };
                     let isec = ctx_ref.resolve_isec(isec);
                     if !matches!(sym.origin, Origin::Obj(_)) || !ctx_ref.isecs[isec].is_alive {
                         continue;
@@ -2487,7 +2487,7 @@ pub fn create_output_symtab<E: Arch>(
                     && matches!(sym.origin, Origin::Obj(_))
                     && sym
                         .isec
-                        .is_some_and(|isec| ctx.isecs[ctx.resolve_isec(isec)].is_alive)
+                        .is_some_and(|isec| ctx.isecs[ctx.resolve_isec(isec as usize)].is_alive)
                 {
                     return Class::Pext;
                 }
@@ -2503,7 +2503,7 @@ pub fn create_output_symtab<E: Arch>(
             continue;
         }
         let sym = &ctx.symtab[i];
-        let isec = ctx.resolve_isec(sym.isec.unwrap());
+        let isec = ctx.resolve_isec(sym.isec.unwrap() as usize);
         names.push(sym.name);
         let ent = NList {
             n_strx: 0,
@@ -2526,7 +2526,7 @@ pub fn create_output_symtab<E: Arch>(
         let (n_type, n_sect, mut n_desc) = match (sym.origin, sym.isec) {
             (_, Some(isec)) => (
                 N_SECT | N_EXT,
-                ordinals[ctx.isecs[ctx.resolve_isec(isec)].osec],
+                ordinals[ctx.isecs[ctx.resolve_isec(isec as usize)].osec],
                 0,
             ),
             (Origin::Synthetic, None) => (N_SECT | N_EXT, 1, REFERENCED_DYNAMICALLY),
@@ -2795,7 +2795,7 @@ pub fn set_osec_offsets<E: Arch>(ctx: &mut Context<E>) {
                         sym.is_extern
                             && !sym.is_private_extern
                             && matches!(sym.origin, Origin::Obj(_) | Origin::Synthetic)
-                            && sym.isec.is_none_or(|isec| {
+                            && sym.isec.map(|i| i as usize).is_none_or(|isec| {
                                 shared.isecs[shared.resolve_isec(isec)].is_alive
                             })
                     })
@@ -3569,7 +3569,7 @@ fn order_file_ranks<E: Arch>(ctx: &Context<E>) -> Option<Vec<u64>> {
         let Origin::Obj(obj) = sym.origin else {
             continue;
         };
-        let Some(isec) = sym.isec else { continue };
+        let Some(isec) = sym.isec.map(|i| i as usize) else { continue };
         let Some(entries) = rank_of.get(sym.name) else {
             continue;
         };
@@ -3633,7 +3633,7 @@ fn build_function_starts<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
             if !matches!(sym.origin, Origin::Obj(_)) {
                 return None;
             }
-            let isec = &ctx.isecs[ctx.resolve_isec(sym.isec?)];
+            let isec = &ctx.isecs[ctx.resolve_isec(sym.isec? as usize)];
             if isec.is_alive
                 && isec.hdr.segname() == "__TEXT"
                 && isec.hdr.sectname() == "__text"

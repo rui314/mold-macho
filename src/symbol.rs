@@ -1,7 +1,6 @@
 //! Symbols and the global symbol table.
 
 
-use crate::input_sections::InputSectionId;
 
 pub type SymbolId = usize;
 
@@ -23,7 +22,9 @@ pub struct Symbol {
     pub name: &'static str,
     pub origin: Origin,
     /// The section the symbol is defined in, for `N_SECT` symbols.
-    pub isec: Option<InputSectionId>,
+    /// The defining subsection (u32 index, not usize, to keep Symbol
+    /// small); use `.map(|i| i as usize)` to index ctx.isecs.
+    pub isec: Option<u32>,
     /// Offset from the start of `isec`, or the absolute value for `N_ABS`
     /// symbols.
     pub value: u64,

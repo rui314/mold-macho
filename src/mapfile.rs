@@ -95,7 +95,7 @@ pub fn print_map<E: Arch>(ctx: &Context<E>) {
         let Origin::Obj(obj) = sym.origin else {
             continue;
         };
-        let Some(isec) = sym.isec else { continue };
+        let Some(isec) = sym.isec.map(|i| i as usize) else { continue };
         let isec = ctx.resolve_isec(isec);
         if !ctx.isecs[isec].is_alive || sym.name.is_empty() {
             continue;
@@ -131,7 +131,7 @@ pub fn print_map<E: Arch>(ctx: &Context<E>) {
             let Origin::Obj(obj) = sym.origin else {
                 continue;
             };
-            let Some(isec) = sym.isec else { continue };
+            let Some(isec) = sym.isec.map(|i| i as usize) else { continue };
             let isec = ctx.resolve_isec(isec);
             if ctx.isecs[isec].is_alive
                 || !ctx.objs[obj].is_alive

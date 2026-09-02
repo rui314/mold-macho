@@ -90,7 +90,7 @@ pub fn dead_strip<E: Arch>(ctx: &mut Context<E>) {
                         && sym.is_extern
                         && !sym.is_private_extern
                         && sym.is_defined());
-                if is_root { sym.isec } else { None }
+                if is_root { sym.isec.map(|i| i as usize) } else { None }
             })
             .collect()
     };
@@ -99,7 +99,7 @@ pub fn dead_strip<E: Arch>(ctx: &mut Context<E>) {
     }
     if ctx.args.output_type == MH_EXECUTE {
         if let Some(id) = ctx.symtab.get(&ctx.args.entry) {
-            if let Some(isec) = ctx.symtab[id].isec {
+            if let Some(isec) = ctx.symtab[id].isec.map(|i| i as usize) {
                 mark(&mut live, &mut pred, &mut stack, isec, usize::MAX);
             }
         }
@@ -117,7 +117,7 @@ pub fn dead_strip<E: Arch>(ctx: &mut Context<E>) {
             match rel.target {
                 RelocTarget::Sym(idx) => {
                     let sym = &ctx.symtab[ctx.objs[ctx.isecs[id].obj].syms[idx]];
-                    if let Some(isec) = sym.isec {
+                    if let Some(isec) = sym.isec.map(|i| i as usize) {
                         out.push(isec);
                     }
                 }
@@ -140,7 +140,7 @@ pub fn dead_strip<E: Arch>(ctx: &mut Context<E>) {
                 personality = personality.or(ctx.cies[ctx.fdes[fde].cie].personality);
             }
             if let Some(p) = personality {
-                if let Some(isec) = ctx.symtab[p].isec {
+                if let Some(isec) = ctx.symtab[p].isec.map(|i| i as usize) {
                     out.push(isec);
                 }
             }
@@ -179,7 +179,7 @@ pub fn dead_strip<E: Arch>(ctx: &mut Context<E>) {
                     RelocTarget::Sym(idx) => {
                         let sym =
                             &gc.ctx.symtab[gc.ctx.objs[gc.ctx.isecs[id].obj].syms[idx]];
-                        if let Some(isec) = sym.isec {
+                        if let Some(isec) = sym.isec.map(|i| i as usize) {
                             targets.push(isec);
                         }
                     }
@@ -202,7 +202,7 @@ pub fn dead_strip<E: Arch>(ctx: &mut Context<E>) {
                         personality.or(gc.ctx.cies[gc.ctx.fdes[fde].cie].personality);
                 }
                 if let Some(p) = personality {
-                    if let Some(isec) = gc.ctx.symtab[p].isec {
+                    if let Some(isec) = gc.ctx.symtab[p].isec.map(|i| i as usize) {
                         targets.push(isec);
                     }
                 }
@@ -315,7 +315,7 @@ fn print_why_live<E: Arch>(ctx: &Context<E>, pred: &[usize], live: &[bool]) {
         if !matches!(sym.origin, Origin::Obj(_)) || sym.name.is_empty() {
             continue;
         }
-        let Some(isec) = sym.isec else { continue };
+        let Some(isec) = sym.isec.map(|i| i as usize) else { continue };
         let isec = ctx.resolve_isec(isec);
         match name_of.entry(isec) {
             std::collections::hash_map::Entry::Vacant(e) => {
@@ -347,7 +347,7 @@ fn print_why_live<E: Arch>(ctx: &Context<E>, pred: &[usize], live: &[bool]) {
         {
             continue;
         }
-        let Some(isec) = sym.isec else { continue };
+        let Some(isec) = sym.isec.map(|i| i as usize) else { continue };
         let mut isec = ctx.resolve_isec(isec);
         if !live[isec] {
             continue;

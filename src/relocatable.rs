@@ -67,7 +67,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
         let sym = &ctx.symtab[id];
         match sym.isec {
             Some(isec) => {
-                let isec = &ctx.isecs[ctx.resolve_isec(isec)];
+                let isec = &ctx.isecs[ctx.resolve_isec(isec as usize)];
                 ctx.chunks[isec.osec].hdr.addr + isec.output_offset + sym.value
             }
             None => sym.value,
@@ -84,7 +84,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
                 continue;
             }
             let sym = &ctx.symtab[sym_id];
-            let Some(isec) = sym.isec else { continue };
+            let Some(isec) = sym.isec.map(|i| i as usize) else { continue };
             let isec = ctx.resolve_isec(isec);
             if !ctx.isecs[isec].is_alive || sym.name.is_empty() {
                 continue;
@@ -109,7 +109,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
                 && matches!(sym.origin, Origin::Obj(_))
                 && sym
                     .isec
-                    .is_none_or(|isec| ctx.isecs[ctx.resolve_isec(isec)].is_alive)
+                    .is_none_or(|isec| ctx.isecs[ctx.resolve_isec(isec as usize)].is_alive)
         })
         .collect();
     globals.sort_by_key(|&i| ctx.symtab[i].name);
@@ -118,7 +118,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
         let (n_type, n_sect) = match sym.isec {
             Some(isec) => (
                 N_SECT | N_EXT | if sym.is_private_extern { N_PEXT } else { 0 },
-                ordinals[ctx.isecs[ctx.resolve_isec(isec)].osec],
+                ordinals[ctx.isecs[ctx.resolve_isec(isec as usize)].osec],
             ),
             None => (N_ABS | N_EXT, 0),
         };

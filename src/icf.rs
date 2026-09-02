@@ -283,7 +283,7 @@ pub fn icf_sections<E: Arch>(ctx: &mut Context<E>) {
             if !nlist.is_extern() && (sym.name.starts_with('l') || sym.name.starts_with('L')) {
                 continue;
             }
-            let Some(isec) = sym.isec else {
+            let Some(isec) = sym.isec.map(|i| i as usize) else {
                 continue;
             };
             if nlist.n_desc & N_WEAK_DEF != 0 {
@@ -341,7 +341,7 @@ pub fn icf_sections<E: Arch>(ctx: &mut Context<E>) {
                 let sym_id = ctx.objs[obj].syms[idx];
                 let sym = &ctx.symtab[sym_id];
                 if let (Origin::Obj(_), Some(isec)) = (sym.origin, sym.isec) {
-                    let isec = ctx.resolve_isec(isec);
+                    let isec = ctx.resolve_isec(isec as usize);
                     if cand_index[isec] != usize::MAX {
                         return (Edge::Candidate(cand_index[isec]), addend + sym.value as i64);
                     }
