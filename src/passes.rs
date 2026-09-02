@@ -2383,13 +2383,45 @@ fn build_rebase_info<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
     }
     locs.sort_unstable();
 
+    // Rebase locations cluster (pointer arrays, vtables), and the
+    // opcodes have run-length forms for exactly that: a run of
+    // adjacent pointers becomes one DO_REBASE_*_TIMES, and since the
+    // state machine's address advances past each rebased slot, a gap
+    // within a segment costs only an ADD_ADDR_ULEB. ld64 compresses
+    // the same way; one SET_SEGMENT per pointer made this stream
+    // over 20x larger.
     let mut buf = Vec::new();
     buf.push(REBASE_OPCODE_SET_TYPE_IMM | REBASE_TYPE_POINTER);
-    for loc in locs {
-        let (seg, off) = segment_and_offset(ctx, loc);
-        buf.push(REBASE_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB | seg as u8);
-        write_uleb(&mut buf, off);
-        buf.push(REBASE_OPCODE_DO_REBASE_IMM_TIMES | 1);
+    let mut cur: Option<(u8, u64)> = None;
+    let mut i = 0;
+    while i < locs.len() {
+        let (seg, off) = segment_and_offset(ctx, locs[i]);
+        match cur {
+            Some((cseg, coff)) if cseg == seg as u8 && off >= coff => {
+                if off > coff {
+                    buf.push(REBASE_OPCODE_ADD_ADDR_ULEB);
+                    write_uleb(&mut buf, off - coff);
+                }
+            }
+            _ => {
+                buf.push(REBASE_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB | seg as u8);
+                write_uleb(&mut buf, off);
+            }
+        }
+
+        // Extend the run over adjacent 8-byte slots.
+        let mut n = 1u64;
+        while i + (n as usize) < locs.len() && locs[i + n as usize] == locs[i] + n * 8 {
+            n += 1;
+        }
+        if n <= 15 {
+            buf.push(REBASE_OPCODE_DO_REBASE_IMM_TIMES | n as u8);
+        } else {
+            buf.push(REBASE_OPCODE_DO_REBASE_ULEB_TIMES);
+            write_uleb(&mut buf, n);
+        }
+        cur = Some((seg as u8, off + n * 8));
+        i += n as usize;
     }
     buf.push(REBASE_OPCODE_DONE);
     while buf.len() % 8 != 0 {
