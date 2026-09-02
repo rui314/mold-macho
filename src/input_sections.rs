@@ -47,7 +47,12 @@ pub struct Reloc {
 pub struct InputSection {
     /// Index of the object file this section came from.
     pub obj: usize,
-    pub hdr: MachSection,
+    /// The parent section's header. Subsections of one section share it,
+    /// so it is referenced, not embedded - mold-rust keeps only a
+    /// reference too. `p2align` is held inline because it is the one
+    /// header field the linker raises per subsection.
+    pub hdr: &'static MachSection,
+    pub p2align: u32,
     /// This subsection's address in the object's address space.
     pub input_addr: u64,
     pub size: u64,

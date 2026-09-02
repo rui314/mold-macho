@@ -971,17 +971,18 @@ pub fn convert_common_symbols<E: Arch>(ctx: &mut Context<E>) {
         }
         let (size, p2align) = (sym.value, sym.common_p2align);
 
-        let hdr = MachSection {
+        let hdr: &'static MachSection = Box::leak(Box::new(MachSection {
             sectname: str_to_name("__common"),
             segname: str_to_name("__DATA"),
             size,
             p2align: p2align as u32,
             flags: S_ZEROFILL,
             ..Default::default()
-        };
+        }));
         ctx.isecs.push(InputSection {
             obj: usize::MAX,
             hdr,
+            p2align: p2align as u32,
             input_addr: 0,
             size,
             data: &[],
@@ -1153,10 +1154,10 @@ pub fn merge_literals<E: Arch>(ctx: &mut Context<E>) {
 
     for fold in folds {
         for (loser, winner) in fold {
-            let p2align = ctx.isecs[loser as usize].hdr.p2align;
+            let p2align = ctx.isecs[loser as usize].p2align;
             ctx.isecs[loser as usize].replacement = Some(winner as usize);
             let w = &mut ctx.isecs[winner as usize];
-            w.hdr.p2align = w.hdr.p2align.max(p2align);
+            w.p2align = w.p2align.max(p2align);
         }
     }
 }
@@ -1820,7 +1821,7 @@ pub fn create_output_sections<E: Arch>(ctx: &mut Context<E>) {
         };
 
         let chunk = &mut ctx.chunks[chunk_idx];
-        chunk.hdr.p2align = chunk.hdr.p2align.max(ctx.isecs[i].hdr.p2align);
+        chunk.hdr.p2align = chunk.hdr.p2align.max(ctx.isecs[i].p2align);
         // __thread_vars contains pointers but clang emits it with an
         // alignment of 1, so override.
         if chunk.hdr.flags & SECTION_TYPE == S_THREAD_LOCAL_VARIABLES {
@@ -1909,7 +1910,7 @@ pub fn create_output_sections<E: Arch>(ctx: &mut Context<E>) {
                 let mut off = 0;
                 for &id in isecs {
                     let isec = &ctx.isecs[id];
-                    off = align_to(off, 1 << isec.hdr.p2align);
+                    off = align_to(off, 1 << isec.p2align);
                     offs.push(off);
                     off += isec.size;
                 }

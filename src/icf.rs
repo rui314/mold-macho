@@ -556,8 +556,8 @@ pub fn icf_sections<E: Arch>(ctx: &mut Context<E>) {
             let member = candidates[i];
             let leader = candidates[l];
             ctx.isecs[member].replacement = Some(leader);
-            let a = ctx.isecs[member].hdr.p2align;
-            ctx.isecs[leader].hdr.p2align = ctx.isecs[leader].hdr.p2align.max(a);
+            let a = ctx.isecs[member].p2align;
+            ctx.isecs[leader].p2align = ctx.isecs[leader].p2align.max(a);
         }
     }
     if std::env::var_os("MOLD_TIMING").is_some() {

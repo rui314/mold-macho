@@ -27,7 +27,7 @@ pub struct ObjectFile {
     pub hidden: bool,
     /// Section headers in ordinal order (all segments' sections
     /// concatenated in load command order).
-    pub sect_hdrs: Vec<MachSection>,
+    pub sect_hdrs: &'static [MachSection],
     /// This object's relocations, grouped by subsection; each
     /// subsection references a contiguous range (rel_offset/nrels).
     pub relocs: Vec<crate::input_sections::Reloc>,
@@ -144,7 +144,7 @@ pub struct StagedObject {
     pub alive: bool,
     pub hidden: bool,
     pub priority: u32,
-    pub sect_hdrs: Vec<MachSection>,
+    pub sect_hdrs: &'static [MachSection],
     pub linker_options: Vec<Vec<String>>,
     pub isecs: Vec<InputSection>,
     pub relocs: Vec<crate::input_sections::Reloc>,
@@ -258,6 +258,11 @@ pub fn stage_object<E: Arch>(
         off += lc.cmdsize as usize;
     }
 
+    // The section headers are complete; leak them so subsections can
+    // reference (not copy) their parent header. The leak is bounded by
+    // the object's section count and lives for the whole link.
+    let sect_hdrs: &'static [MachSection] = Vec::leak(sect_hdrs);
+
     // Read the symbol table
     let mut nlists: Vec<NList> = Vec::new();
     let mut strtab: &'static [u8] = &[];
@@ -361,7 +366,8 @@ pub fn stage_object<E: Arch>(
             };
             isecs.push(InputSection {
                 obj: usize::MAX,
-                hdr: *sect,
+                hdr: sect,
+                p2align: sect.p2align,
                 input_addr: start,
                 size: end - start,
                 data: contents,
@@ -396,7 +402,7 @@ pub fn stage_object<E: Arch>(
             continue;
         }
         let raw: Vec<MachRel> = read_array(data, sect.reloff as usize, sect.nreloc as usize);
-        let mut rels = E::read_relocs(diag, &mf.name, &sect_hdrs, sect, data, &raw);
+        let mut rels = E::read_relocs(diag, &mf.name, sect_hdrs, sect, data, &raw);
         rels.sort_unstable_by_key(|rel| rel.offset);
 
         for rel in &mut rels {
@@ -886,7 +892,7 @@ pub fn parse_bitcode<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile, ali
         priority,
         linker_options: Vec::new(),
         hidden: false,
-        sect_hdrs: Vec::new(),
+        sect_hdrs: &[],
         relocs: Vec::new(),
         subsecs: Vec::new(),
         objc_image_info: None,

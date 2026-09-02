@@ -73,7 +73,7 @@ pub fn create_range_extension_thunks<E: Arch>(
                 scan_relocs_into_thunk::<E>(ctx, &[monster], thunk_off, fwd_ok, &mut thunks);
             off = thunk_off + n * E::THUNK_SIZE;
             let isec = &mut ctx.isecs[monster];
-            off = align_to(off, 1 << isec.hdr.p2align);
+            off = align_to(off, 1 << isec.p2align);
             isec.output_offset = off;
             off += isec.size;
             i += 1;
@@ -84,7 +84,7 @@ pub fn create_range_extension_thunks<E: Arch>(
         // it staying within reach of the batch start.
         while i < isecs.len() {
             let isec = &ctx.isecs[isecs[i]];
-            let aligned = align_to(off, 1 << isec.hdr.p2align);
+            let aligned = align_to(off, 1 << isec.p2align);
             if i != batch_start
                 && (aligned + isec.size - batch_start_off > budget
                     || aligned - batch_start_off >= BATCH)
