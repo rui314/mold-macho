@@ -24,8 +24,14 @@ pub fn dead_strip<E: Arch>(ctx: &mut Context<E>) {
     // roots), giving a spanning tree of the liveness walk.
     let mut pred = vec![usize::MAX; ctx.isecs.len()];
     let mut stack: Vec<usize> = Vec::new();
-    let redirects: Vec<usize> = (0..ctx.isecs.len()).map(|i| ctx.resolve_isec(i)).collect();
-    let redirects2 = redirects.clone();
+    let redirects: Vec<usize> = {
+        use rayon::prelude::*;
+        (0..ctx.isecs.len())
+            .into_par_iter()
+            .map(|i| ctx.resolve_isec(i))
+            .collect()
+    };
+    let redirects = &redirects;
     let mark =
         move |live: &mut Vec<bool>, pred: &mut Vec<usize>, stack: &mut Vec<usize>, id: usize, from: usize| {
             let id = redirects[id];
@@ -72,18 +78,24 @@ pub fn dead_strip<E: Arch>(ctx: &mut Context<E>) {
         mark(&mut live, &mut pred, &mut stack, isec, usize::MAX);
     }
 
-    // Symbol-level roots
-    for sym in &ctx.symtab.syms {
-        let is_root = sym.no_dead_strip
-            || (ctx.args.output_type != MH_EXECUTE
-                && sym.is_extern
-                && !sym.is_private_extern
-                && sym.is_defined());
-        if is_root {
-            if let Some(isec) = sym.isec {
-                mark(&mut live, &mut pred, &mut stack, isec, usize::MAX);
-            }
-        }
+    // Symbol-level roots, found on all cores like the section roots.
+    let sym_roots: Vec<usize> = {
+        use rayon::prelude::*;
+        ctx.symtab
+            .syms
+            .par_iter()
+            .filter_map(|sym| {
+                let is_root = sym.no_dead_strip
+                    || (ctx.args.output_type != MH_EXECUTE
+                        && sym.is_extern
+                        && !sym.is_private_extern
+                        && sym.is_defined());
+                if is_root { sym.isec } else { None }
+            })
+            .collect()
+    };
+    for isec in sym_roots {
+        mark(&mut live, &mut pred, &mut stack, isec, usize::MAX);
     }
     if ctx.args.output_type == MH_EXECUTE {
         if let Some(id) = ctx.symtab.get(&ctx.args.entry) {
@@ -145,25 +157,107 @@ pub fn dead_strip<E: Arch>(ctx: &mut Context<E>) {
         use std::sync::atomic::{AtomicBool, Ordering};
         let visited: Vec<AtomicBool> =
             live.iter().map(|&l| AtomicBool::new(l)).collect();
-        let redirects = &redirects2;
-        let mut frontier = std::mem::take(&mut stack);
-        while !frontier.is_empty() {
-            frontier = frontier
-                .par_iter()
-                .flat_map_iter(|&id| {
-                    let mut out = Vec::new();
-                    edges_of(id, &mut out);
-                    out.into_iter().filter_map(|t| {
-                        let t = redirects[t];
-                        if !visited[t].swap(true, Ordering::Relaxed) {
-                            Some(t)
-                        } else {
-                            None
-                        }
-                    })
-                })
-                .collect();
+
+        // mold's gc-sections marks with a work-stealing task pool, not
+        // synchronous frontier rounds: each visit follows edges up to
+        // three levels inline and banks the rest in small batches that
+        // spawn as tasks (rayon tasks are heavier than TBB feeder
+        // items, so batches of 16 amortize them). Unoptimized debug
+        // code has deep call chains, which starve round-based marking;
+        // dynamic tasks keep every core fed regardless of graph depth.
+        const GC_BATCH: usize = 16;
+        struct Gc<'a, E: Arch> {
+            ctx: &'a Context<E>,
+            unwind_by_isec: &'a hashbrown::HashMap<usize, Vec<usize>>,
+            visited: &'a [AtomicBool],
+            redirects: &'a [usize],
         }
+        fn visit_section<'s, E: Arch>(
+            gc: &'s Gc<'s, E>,
+            id: usize,
+            depth: usize,
+            scope: &rayon::Scope<'s>,
+            next: &mut Vec<usize>,
+        ) {
+            let mut targets = Vec::new();
+            for rel in &gc.ctx.isecs[id].relocs {
+                match rel.target {
+                    RelocTarget::Sym(idx) => {
+                        let sym =
+                            &gc.ctx.symtab[gc.ctx.objs[gc.ctx.isecs[id].obj].syms[idx]];
+                        if let Some(isec) = sym.isec {
+                            targets.push(isec);
+                        }
+                    }
+                    RelocTarget::Section(isec) => targets.push(isec),
+                }
+            }
+            for &rec_idx in gc
+                .unwind_by_isec
+                .get(&id)
+                .map(Vec::as_slice)
+                .unwrap_or(&[])
+            {
+                let rec = &gc.ctx.unwind_records[rec_idx];
+                if let Some((lsda, _)) = rec.lsda {
+                    targets.push(lsda);
+                }
+                let mut personality = rec.personality;
+                if let Some(fde) = rec.fde {
+                    if let Some((lsda, _)) = gc.ctx.fdes[fde].lsda {
+                        targets.push(lsda);
+                    }
+                    personality =
+                        personality.or(gc.ctx.cies[gc.ctx.fdes[fde].cie].personality);
+                }
+                if let Some(p) = personality {
+                    if let Some(isec) = gc.ctx.symtab[p].isec {
+                        targets.push(isec);
+                    }
+                }
+            }
+            for t in targets {
+                let t = gc.redirects[t];
+                if !gc.visited[t].swap(true, Ordering::Relaxed) {
+                    if depth < 3 {
+                        visit_section(gc, t, depth + 1, scope, next);
+                    } else {
+                        next.push(t);
+                    }
+                }
+            }
+        }
+        fn visit_batch<'s, E: Arch>(
+            gc: &'s Gc<'s, E>,
+            batch: Vec<usize>,
+            scope: &rayon::Scope<'s>,
+        ) {
+            let mut next = Vec::with_capacity(GC_BATCH);
+            for id in batch {
+                visit_section(gc, id, 0, scope, &mut next);
+                if next.len() >= GC_BATCH {
+                    let found =
+                        std::mem::replace(&mut next, Vec::with_capacity(GC_BATCH));
+                    scope.spawn(move |scope| visit_batch(gc, found, scope));
+                }
+            }
+            if !next.is_empty() {
+                scope.spawn(move |scope| visit_batch(gc, next, scope));
+            }
+        }
+        let gc = Gc {
+            ctx,
+            unwind_by_isec: &unwind_by_isec,
+            visited: &visited,
+            redirects,
+        };
+        let gc = &gc;
+        let roots = std::mem::take(&mut stack);
+        rayon::scope(|scope| {
+            roots
+                .par_chunks(GC_BATCH)
+                .for_each(|batch| visit_batch(gc, batch.to_vec(), scope));
+        });
         for (l, v) in live.iter_mut().zip(&visited) {
             *l = v.load(Ordering::Relaxed);
         }
