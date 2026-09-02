@@ -476,140 +476,198 @@ fn clear_claims<E: Arch>(ctx: &mut Context<E>) {
 }
 
 fn do_resolve<E: Arch>(ctx: &mut Context<E>, only_alive: bool) {
-    // The best claim seen per symbol: (rank class << 32) | priority,
-    // lower is better.
-    let mut best = vec![u64::MAX; ctx.symtab.syms.len()];
+    use rayon::prelude::*;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+    let n = ctx.symtab.syms.len();
 
     // Which symbols the files considered this round actually reference.
     // References from dead archive members must not count: they would
     // otherwise demand definitions nothing live needs.
-    let mut used = vec![false; ctx.symtab.syms.len()];
-    for obj in &ctx.objs {
-        if only_alive && !obj.is_alive {
-            continue;
-        }
-        for (nlist, &sym_id) in obj.nlists.iter().zip(&obj.syms) {
-            if !nlist.is_stab() && nlist.is_extern() && nlist.n_type() == N_UNDF {
-                used[sym_id] = true;
-                if nlist.n_desc & N_WEAK_REF != 0 {
-                    ctx.symtab[sym_id].is_weak_ref = true;
+    let used: Vec<AtomicBool> = (0..n).map(|_| AtomicBool::new(false)).collect();
+    let weak_ref: Vec<AtomicBool> = (0..n).map(|_| AtomicBool::new(false)).collect();
+    ctx.objs
+        .par_iter()
+        .filter(|obj| !only_alive || obj.is_alive)
+        .for_each(|obj| {
+            for (nlist, &sym_id) in obj.nlists.iter().zip(&obj.syms) {
+                if !nlist.is_stab() && nlist.is_extern() && nlist.n_type() == N_UNDF {
+                    used[sym_id].store(true, Ordering::Relaxed);
+                    if nlist.n_desc & N_WEAK_REF != 0 {
+                        weak_ref[sym_id].store(true, Ordering::Relaxed);
+                    }
                 }
             }
-        }
-    }
+        });
     for name in &ctx.args.forced_undefined {
         if let Some(id) = ctx.symtab.get(name) {
-            used[id] = true;
+            used[id].store(true, Ordering::Relaxed);
         }
     }
     if let Some(id) = ctx.symtab.get(&ctx.args.entry) {
-        used[id] = true;
+        used[id].store(true, Ordering::Relaxed);
     }
 
-    for obj_idx in 0..ctx.objs.len() {
-        let alive = ctx.objs[obj_idx].is_alive;
-        if only_alive && !alive {
-            continue;
+    // The rank of a definition: (class << 32) | priority, lower is
+    // better. Ranks race into `best` with an atomic minimum, as in
+    // mold: the race is order-free because the winner is the same
+    // whatever the interleaving, and since each object has a unique
+    // priority, exactly one object ends up owning each symbol.
+    let rank_of = |obj: &crate::input_files::ObjectFile, nlist: &NList| -> Option<u64> {
+        if nlist.is_stab() || !nlist.is_extern() {
+            return None;
         }
-        let priority = ctx.objs[obj_idx].priority as u64;
+        let is_weak = nlist.n_desc & N_WEAK_DEF != 0;
+        let class: u64 = match nlist.n_type() {
+            N_SECT | N_ABS if obj.is_alive && !is_weak => 0,
+            N_SECT | N_ABS if obj.is_alive => 1,
+            N_SECT | N_ABS => 2,
+            N_UNDF if nlist.is_common() && obj.is_alive => 3,
+            _ => return None,
+        };
+        Some((class << 32) | obj.priority as u64)
+    };
 
-        for i in 0..ctx.objs[obj_idx].nlists.len() {
-            let nlist = ctx.objs[obj_idx].nlists[i];
-            let sym_id = ctx.objs[obj_idx].syms[i];
-            if nlist.is_stab() || !nlist.is_extern() {
-                continue;
+    let best: Vec<AtomicU64> = (0..n).map(|_| AtomicU64::new(u64::MAX)).collect();
+    ctx.objs
+        .par_iter()
+        .filter(|obj| !only_alive || obj.is_alive)
+        .for_each(|obj| {
+            for (nlist, &sym_id) in obj.nlists.iter().zip(&obj.syms) {
+                if let Some(rank) = rank_of(obj, nlist) {
+                    best[sym_id].fetch_min(rank, Ordering::Relaxed);
+                }
             }
+        });
 
-            let is_weak = nlist.n_desc & N_WEAK_DEF != 0;
-            let class: u64 = match nlist.n_type() {
-                N_SECT | N_ABS if alive && !is_weak => 0,
-                N_SECT | N_ABS if alive => 1,
-                N_SECT | N_ABS => 2,
-                N_UNDF if nlist.is_common() && alive => 3,
-                _ => continue,
-            };
-            let rank = (class << 32) | priority;
+    // Claim phase: each object writes the symbols whose race it won.
+    // Ranks are unique per object, so every symbol has exactly one
+    // writer and the parallel writes are disjoint.
+    struct SymsPtr(*mut crate::symbol::Symbol);
+    unsafe impl Sync for SymsPtr {}
+    let syms_ptr = SymsPtr(ctx.symtab.syms.as_mut_ptr());
+    let syms_ptr = &syms_ptr;
+    let isecs = &ctx.isecs;
+    let objs = &ctx.objs;
+    // Duplicate strong definitions, reported after the race settles.
+    let duplicates: std::sync::Mutex<Vec<(usize, usize)>> = std::sync::Mutex::new(Vec::new());
 
-            // Common symbols merge: the largest size and strictest
-            // alignment win regardless of input order.
-            if class == 3 {
-                let sym = &mut ctx.symtab[sym_id];
-                if best[sym_id] >> 32 == 3 {
-                    sym.value = sym.value.max(nlist.n_value);
-                    sym.common_p2align =
-                        sym.common_p2align.max(((nlist.n_desc >> 8) & 0xf) as u8);
-                    best[sym_id] = best[sym_id].min(rank);
+    objs.par_iter()
+        .enumerate()
+        .filter(|(_, obj)| !only_alive || obj.is_alive)
+        .for_each(|(obj_idx, obj)| {
+            for (i, (nlist, &sym_id)) in obj.nlists.iter().zip(&obj.syms).enumerate() {
+                let _ = i;
+                let Some(rank) = rank_of(obj, nlist) else {
+                    continue;
+                };
+                let won = best[sym_id].load(Ordering::Relaxed);
+                if won != rank {
+                    // Two live strong definitions of one name are an
+                    // error whichever wins.
+                    if only_alive && rank >> 32 == 0 && won >> 32 == 0 {
+                        duplicates.lock().unwrap().push((sym_id, obj_idx));
+                    }
                     continue;
                 }
-            }
+                // SAFETY: this object holds the unique minimum rank
+                // for sym_id, so no other thread writes this slot.
+                let sym = unsafe { &mut *syms_ptr.0.add(sym_id) };
+                sym.is_extern = true;
+                sym.is_imported = false;
+                sym.is_common = false;
+                sym.is_weak_def = nlist.n_desc & N_WEAK_DEF != 0;
+                sym.is_private_extern = nlist.n_type & N_PEXT != 0 || obj.hidden;
+                sym.no_dead_strip =
+                    nlist.n_desc & (N_NO_DEAD_STRIP | REFERENCED_DYNAMICALLY) != 0;
 
-            if rank >= best[sym_id] {
-                if only_alive && rank >> 32 == 0 && best[sym_id] >> 32 == 0 && rank != best[sym_id]
-                {
-                    // Two live strong definitions. Name both files,
-                    // newly seen one first, like ld64.
-                    let prev = match ctx.symtab[sym_id].origin {
-                        Origin::Obj(idx) => file_display(&ctx.objs[idx]),
-                        _ => "?".to_string(),
-                    };
-                    error!(
-                        ctx,
-                        "duplicate symbol: {}: {}: {}",
-                        file_display(&ctx.objs[obj_idx]),
-                        prev,
-                        ctx.symtab[sym_id].name
-                    );
-                }
-                continue;
-            }
-            best[sym_id] = rank;
-
-            let sym = &mut ctx.symtab[sym_id];
-            sym.is_extern = true;
-            sym.is_imported = false;
-            sym.is_common = false;
-            sym.is_weak_def = is_weak;
-            sym.is_private_extern =
-                nlist.n_type & N_PEXT != 0 || ctx.objs[obj_idx].hidden;
-            sym.no_dead_strip =
-                nlist.n_desc & (N_NO_DEAD_STRIP | REFERENCED_DYNAMICALLY) != 0;
-
-            match nlist.n_type() {
-                N_ABS => {
-                    sym.origin = Origin::Obj(obj_idx);
-                    sym.isec = None;
-                    sym.value = nlist.n_value;
-                }
-                N_SECT => {
-                    sym.origin = Origin::Obj(obj_idx);
-                    match crate::input_files::find_subsec(
-                        &ctx.isecs,
-                        &ctx.objs[obj_idx].subsecs,
-                        nlist.n_value,
-                    ) {
-                        Some((isec, off)) => {
-                            let sym = &mut ctx.symtab[sym_id];
-                            sym.isec = Some(isec);
-                            sym.value = off;
-                        }
-                        None => {
-                            // A symbol in a discarded (debug) section.
-                            let sym = &mut ctx.symtab[sym_id];
-                            sym.origin = Origin::Undef;
-                            best[sym_id] = u64::MAX;
+                match nlist.n_type() {
+                    N_ABS => {
+                        sym.origin = Origin::Obj(obj_idx);
+                        sym.isec = None;
+                        sym.value = nlist.n_value;
+                    }
+                    N_SECT => {
+                        sym.origin = Origin::Obj(obj_idx);
+                        match crate::input_files::find_subsec(
+                            isecs,
+                            &obj.subsecs,
+                            nlist.n_value,
+                        ) {
+                            Some((isec, off)) => {
+                                sym.isec = Some(isec);
+                                sym.value = off;
+                            }
+                            None => {
+                                // A symbol in a discarded (debug)
+                                // section resolves as if undefined.
+                                sym.origin = Origin::Undef;
+                                best[sym_id].store(u64::MAX, Ordering::Relaxed);
+                            }
                         }
                     }
+                    N_UNDF => {
+                        // A common symbol takes a tentative claim.
+                        sym.origin = Origin::Undef;
+                        sym.is_common = true;
+                        sym.value = nlist.n_value;
+                        sym.common_p2align = ((nlist.n_desc >> 8) & 0xf) as u8;
+                    }
+                    _ => unreachable!(),
                 }
-                N_UNDF => {
-                    // A common symbol takes a tentative claim.
-                    let sym = &mut ctx.symtab[sym_id];
-                    sym.origin = Origin::Undef;
-                    sym.is_common = true;
-                    sym.value = nlist.n_value;
-                    sym.common_p2align = ((nlist.n_desc >> 8) & 0xf) as u8;
-                }
-                _ => unreachable!(),
             }
+        });
+
+    // Common symbols merge: the largest size and strictest alignment
+    // win regardless of input order, gathered from every common claim
+    // once the class-3 winners are known.
+    let commons: Vec<(usize, u64, u8)> = ctx
+        .objs
+        .par_iter()
+        .filter(|obj| (!only_alive || obj.is_alive) && obj.is_alive)
+        .flat_map_iter(|obj| {
+            obj.nlists.iter().zip(&obj.syms).filter_map(|(nlist, &sym_id)| {
+                if !nlist.is_stab()
+                    && nlist.is_extern()
+                    && nlist.n_type() == N_UNDF
+                    && nlist.is_common()
+                    && best[sym_id].load(Ordering::Relaxed) >> 32 == 3
+                {
+                    Some((sym_id, nlist.n_value, ((nlist.n_desc >> 8) & 0xf) as u8))
+                } else {
+                    None
+                }
+            })
+        })
+        .collect();
+    for (sym_id, size, p2align) in commons {
+        let sym = &mut ctx.symtab[sym_id];
+        sym.value = sym.value.max(size);
+        sym.common_p2align = sym.common_p2align.max(p2align);
+    }
+
+    // Report duplicates deterministically, sorted by symbol name.
+    let mut duplicates = duplicates.into_inner().unwrap();
+    duplicates.sort_by_key(|&(sym_id, obj_idx)| (ctx.symtab[sym_id].name, obj_idx));
+    duplicates.dedup();
+    for (sym_id, obj_idx) in duplicates {
+        let prev = match ctx.symtab[sym_id].origin {
+            Origin::Obj(idx) => file_display(&ctx.objs[idx]),
+            _ => "?".to_string(),
+        };
+        error!(
+            ctx,
+            "duplicate symbol: {}: {}: {}",
+            file_display(&ctx.objs[obj_idx]),
+            prev,
+            ctx.symtab[sym_id].name
+        );
+    }
+
+    // Record weak references seen this round.
+    for (i, w) in weak_ref.iter().enumerate() {
+        if w.load(Ordering::Relaxed) {
+            ctx.symtab.syms[i].is_weak_ref = true;
         }
     }
 
@@ -617,26 +675,25 @@ fn do_resolve<E: Arch>(ctx: &mut Context<E>, only_alive: bool) {
     // earlier dylib beats a later archive member and vice versa. A
     // relocatable link keeps every reference undefined instead.
     if ctx.args.relocatable {
-        for (i, &u) in used.iter().enumerate() {
-            ctx.symtab.syms[i].is_used = u;
+        for (i, u) in used.iter().enumerate() {
+            ctx.symtab.syms[i].is_used = u.load(Ordering::Relaxed);
         }
         return;
     }
-    for i in 0..ctx.symtab.syms.len() {
-        let sym = &ctx.symtab[i];
-        if !used[i] || sym.is_common {
-            continue;
+    let dylibs = &ctx.dylibs;
+    (0..n).into_par_iter().for_each(|i| {
+        if !used[i].load(Ordering::Relaxed) {
+            return;
         }
-        if best[i] >> 32 < 2 {
-            continue;
+        // SAFETY: each index is written only by its own iteration.
+        let sym = unsafe { &mut *syms_ptr.0.add(i) };
+        if sym.is_common || best[i].load(Ordering::Relaxed) >> 32 < 2 {
+            return;
         }
-        let name = sym.name;
-        for dylib_idx in 0..ctx.dylibs.len() {
-            let dylib = &ctx.dylibs[dylib_idx];
+        for (dylib_idx, dylib) in dylibs.iter().enumerate() {
             let rank = (2u64 << 32) | dylib.priority as u64;
-            if rank < best[i] && dylib.exports.contains(name) {
-                best[i] = rank;
-                let sym = &mut ctx.symtab[i];
+            if rank < best[i].load(Ordering::Relaxed) && dylib.exports.contains(sym.name) {
+                best[i].store(rank, Ordering::Relaxed);
                 sym.origin = Origin::Dylib(dylib_idx);
                 sym.is_imported = true;
                 sym.is_extern = true;
@@ -645,11 +702,11 @@ fn do_resolve<E: Arch>(ctx: &mut Context<E>, only_alive: bool) {
                 break;
             }
         }
-    }
+    });
 
     // Record the final usage set for downstream passes.
-    for (i, &u) in used.iter().enumerate() {
-        ctx.symtab.syms[i].is_used = u;
+    for (i, u) in used.iter().enumerate() {
+        ctx.symtab.syms[i].is_used = u.load(Ordering::Relaxed);
     }
 }
 
@@ -1988,6 +2045,7 @@ pub fn create_output_symtab<E: Arch>(ctx: &mut Context<E>) {
         ));
     }
 
+    let __t = std::time::Instant::now();
     // Debug stabs. Mach-O binaries don't carry DWARF; instead, for each
     // object with debug info the symbol table gets stab entries telling
     // the debugger where the object file is (N_OSO) and where its
@@ -2108,6 +2166,11 @@ pub fn create_output_symtab<E: Arch>(ctx: &mut Context<E>) {
         }
     }
 
+    if std::env::var_os("MOLD_TIMING").is_some() {
+        eprintln!("      symtab-stabs {:?}", __t.elapsed());
+    }
+    let __t = std::time::Instant::now();
+
     // Local symbols (-x drops them)
     for obj in &ctx.objs {
         if ctx.args.strip_locals {
@@ -2152,6 +2215,10 @@ pub fn create_output_symtab<E: Arch>(ctx: &mut Context<E>) {
             data.entries.push((ent, Some(sym_id)));
         }
     }
+    if std::env::var_os("MOLD_TIMING").is_some() {
+        eprintln!("      symtab-locals {:?}", __t.elapsed());
+    }
+    let __t = std::time::Instant::now();
     // Private external symbols resolve globally but appear as locals
     // (with N_PEXT still set) in the output.
     for i in 0..ctx.symtab.syms.len() {
@@ -2177,8 +2244,12 @@ pub fn create_output_symtab<E: Arch>(ctx: &mut Context<E>) {
     }
     data.nlocal = data.entries.len() as u32;
 
-    // Defined global symbols, sorted by name
+    // Defined global symbols, sorted by name. The filter walks
+    // millions of slots (every local symbol has one), so it runs on
+    // all cores, as does the sort.
+    use rayon::prelude::*;
     let mut globals: Vec<usize> = (0..ctx.symtab.syms.len())
+        .into_par_iter()
         .filter(|&i| {
             let sym = &ctx.symtab[i];
             sym.is_extern
@@ -2189,7 +2260,7 @@ pub fn create_output_symtab<E: Arch>(ctx: &mut Context<E>) {
                     .is_none_or(|isec| ctx.isecs[ctx.resolve_isec(isec)].is_alive)
         })
         .collect();
-    globals.sort_by_key(|&i| ctx.symtab[i].name);
+    globals.par_sort_by_key(|&i| ctx.symtab[i].name);
 
     for &i in &globals {
         let sym = &ctx.symtab[i];
@@ -2220,9 +2291,10 @@ pub fn create_output_symtab<E: Arch>(ctx: &mut Context<E>) {
     // Undefined (imported) symbols, sorted by name. The library ordinal
     // lives in the high byte of n_desc.
     let mut undefs: Vec<usize> = (0..ctx.symtab.syms.len())
+        .into_par_iter()
         .filter(|&i| matches!(ctx.symtab[i].origin, Origin::Dylib(_)))
         .collect();
-    undefs.sort_by_key(|&i| ctx.symtab[i].name);
+    undefs.par_sort_by_key(|&i| ctx.symtab[i].name);
 
     for &i in &undefs {
         let sym = &ctx.symtab[i];
@@ -2264,6 +2336,9 @@ pub fn create_output_symtab<E: Arch>(ctx: &mut Context<E>) {
     while data.strtab.len() % 8 != 0 {
         data.strtab.push(0);
     }
+    if std::env::var_os("MOLD_TIMING").is_some() {
+        eprintln!("      symtab-globals {:?}", __t.elapsed());
+    }
 
     ctx.symtab_data = data;
 }
@@ -2285,12 +2360,12 @@ pub fn set_osec_offsets<E: Arch>(ctx: &mut Context<E>) {
         // is laid out by the time we reach __LINKEDIT.
         if ctx.segments[seg_idx].name == "__LINKEDIT" {
             if ctx.use_chained_fixups() {
-                build_chained_fixups(ctx);
+                t!("chained_fixups", build_chained_fixups(ctx));
             } else {
-                ctx.rebase_data = build_rebase_info(ctx);
-                ctx.bind_data = build_bind_info(ctx);
+                ctx.rebase_data = t!("rebase_info", build_rebase_info(ctx));
+                ctx.bind_data = t!("bind_info", build_bind_info(ctx));
             }
-            ctx.function_starts_data = build_function_starts(ctx);
+            ctx.function_starts_data = t!("function_starts", build_function_starts(ctx));
         }
 
         if ctx.segments[seg_idx].name == "__PAGEZERO" {
@@ -2641,46 +2716,52 @@ const MAX_INLINE_ADDEND: u64 = 255;
 /// absolute address that dyld must slide) and binds (dyld writes an
 /// imported symbol's address), with the bind addends.
 fn collect_fixups<E: Arch>(ctx: &Context<E>) -> Vec<(u64, Option<crate::symbol::SymbolId>, u64)> {
-    let mut fixups: Vec<(u64, Option<crate::symbol::SymbolId>, u64)> = Vec::new();
+    use rayon::prelude::*;
 
-    for isec in &ctx.isecs {
-        if !isec.is_alive || isec.replacement.is_some() {
-            continue;
-        }
-        let base = ctx.chunks[isec.osec].hdr.addr + isec.output_offset;
-        for rel in &isec.relocs {
-            if E::classify_reloc(rel.r_type) != RelocClass::Plain
-                || rel.size != 8
-                || rel.is_pcrel
-                || rel.is_subtracted
-            {
-                continue;
-            }
-            let addr = base + rel.offset as u64;
-            // A chain link's stride is 4 bytes, so a fixup at an
-            // unaligned address is unrepresentable. ld64 diagnoses
-            // the offending input section rather than the output.
-            if addr % 4 != 0 {
-                fatal!(
-                    ctx,
-                    "{}({},{}): unaligned base relocation",
-                    file_display(&ctx.objs[isec.obj]),
-                    isec.hdr.segname(),
-                    isec.hdr.sectname()
-                );
-            }
-            match ctx.reloc_target_sym(isec.obj, rel) {
-                Some(id) if ctx.symtab[id].is_imported => {
-                    fixups.push((addr, Some(id), rel.addend as u64));
+    // Every subsection's fixups are independent; collect them on all
+    // cores and sort the union in parallel, as mold does.
+    let mut fixups: Vec<(u64, Option<crate::symbol::SymbolId>, u64)> = ctx
+        .isecs
+        .par_iter()
+        .filter(|isec| isec.is_alive && isec.replacement.is_none())
+        .flat_map_iter(|isec| {
+            let base = ctx.chunks[isec.osec].hdr.addr + isec.output_offset;
+            isec.relocs.iter().filter_map(move |rel| {
+                if E::classify_reloc(rel.r_type) != RelocClass::Plain
+                    || rel.size != 8
+                    || rel.is_pcrel
+                    || rel.is_subtracted
+                {
+                    return None;
                 }
-                _ => {
-                    if !ctx.reloc_target_is_tls(isec.obj, rel) {
-                        fixups.push((addr, None, 0));
+                let addr = base + rel.offset as u64;
+                // A chain link's stride is 4 bytes, so a fixup at an
+                // unaligned address is unrepresentable. ld64 diagnoses
+                // the offending input section rather than the output.
+                if addr % 4 != 0 {
+                    fatal!(
+                        ctx,
+                        "{}({},{}): unaligned base relocation",
+                        file_display(&ctx.objs[isec.obj]),
+                        isec.hdr.segname(),
+                        isec.hdr.sectname()
+                    );
+                }
+                match ctx.reloc_target_sym(isec.obj, rel) {
+                    Some(id) if ctx.symtab[id].is_imported => {
+                        Some((addr, Some(id), rel.addend as u64))
+                    }
+                    _ => {
+                        if !ctx.reloc_target_is_tls(isec.obj, rel) {
+                            Some((addr, None, 0))
+                        } else {
+                            None
+                        }
                     }
                 }
-            }
-        }
-    }
+            })
+        })
+        .collect();
 
     if let Some(idx) = output_chunks::find_chunk(ctx, |k| matches!(k, ChunkKind::Got)) {
         let addr = ctx.chunks[idx].hdr.addr;
@@ -2703,7 +2784,7 @@ fn collect_fixups<E: Arch>(ctx: &Context<E>) -> Vec<(u64, Option<crate::symbol::
         }
     }
 
-    fixups.sort_unstable_by_key(|&(addr, _, _)| addr);
+    fixups.par_sort_unstable_by_key(|&(addr, _, _)| addr);
     fixups
 }
 
@@ -3031,21 +3112,30 @@ fn build_function_starts<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
     if !ctx.args.function_starts {
         return Vec::new();
     }
-    let mut addrs: Vec<u64> = Vec::new();
-    for sym in &ctx.symtab.syms {
-        if !matches!(sym.origin, Origin::Obj(_)) {
-            continue;
-        }
-        let Some(isec) = sym.isec else { continue };
-        let isec = &ctx.isecs[ctx.resolve_isec(isec)];
-        if isec.is_alive && isec.hdr.segname() == "__TEXT" && isec.hdr.sectname() == "__text" {
-            addrs.push(ctx.chunks[isec.osec].hdr.addr + isec.output_offset + sym.value);
-        }
-    }
+    use rayon::prelude::*;
+    let mut addrs: Vec<u64> = ctx
+        .symtab
+        .syms
+        .par_iter()
+        .filter_map(|sym| {
+            if !matches!(sym.origin, Origin::Obj(_)) {
+                return None;
+            }
+            let isec = &ctx.isecs[ctx.resolve_isec(sym.isec?)];
+            if isec.is_alive
+                && isec.hdr.segname() == "__TEXT"
+                && isec.hdr.sectname() == "__text"
+            {
+                Some(ctx.chunks[isec.osec].hdr.addr + isec.output_offset + sym.value)
+            } else {
+                None
+            }
+        })
+        .collect();
     if addrs.is_empty() {
         return Vec::new();
     }
-    addrs.sort_unstable();
+    addrs.par_sort_unstable();
     addrs.dedup();
 
     let mut buf = Vec::new();
