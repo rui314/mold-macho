@@ -1027,31 +1027,62 @@ pub fn remove_unreachable_files<E: Arch>(ctx: &mut Context<E>) {
 /// Merges identical literal elements across all live inputs: the first
 /// live copy wins and the rest redirect to it.
 pub fn merge_literals<E: Arch>(ctx: &mut Context<E>) {
-    let mut map: std::collections::HashMap<(u32, &'static [u8]), usize> =
-        std::collections::HashMap::new();
-    for i in 0..ctx.isecs.len() {
-        let isec = &ctx.isecs[i];
-        if !isec.is_alive || isec.replacement.is_some() {
-            continue;
-        }
-        let ty = isec.hdr.section_type();
-        if !matches!(
-            ty,
-            S_CSTRING_LITERALS | S_4BYTE_LITERALS | S_8BYTE_LITERALS | S_16BYTE_LITERALS
-        ) {
-            continue;
-        }
-        match map.entry((ty, isec.data)) {
-            std::collections::hash_map::Entry::Occupied(e) => {
-                let winner = *e.get();
-                let p2align = ctx.isecs[i].hdr.p2align;
-                ctx.isecs[i].replacement = Some(winner);
-                let w = &mut ctx.isecs[winner];
-                w.hdr.p2align = w.hdr.p2align.max(p2align);
+    use rayon::prelude::*;
+
+    // Deduplication follows the symbol table's sharded shape: every
+    // element's content hash is computed in parallel, elements bin by
+    // hash, and the shards resolve independently - within a shard the
+    // first occurrence in input order wins, which is exactly the
+    // winner the old serial single-map walk picked.
+    let hashed: Vec<(u64, u32, u32)> = ctx
+        .isecs
+        .par_iter()
+        .enumerate()
+        .filter_map(|(i, isec)| {
+            if !isec.is_alive || isec.replacement.is_some() {
+                return None;
             }
-            std::collections::hash_map::Entry::Vacant(e) => {
-                e.insert(i);
+            let ty = isec.hdr.section_type();
+            if !matches!(
+                ty,
+                S_CSTRING_LITERALS | S_4BYTE_LITERALS | S_8BYTE_LITERALS | S_16BYTE_LITERALS
+            ) {
+                return None;
             }
+            Some((xxhash_rust::xxh3::xxh3_64(isec.data), ty, i as u32))
+        })
+        .collect();
+
+    const NUM_SHARDS: usize = 64;
+    let mut bins: Vec<Vec<(u64, u32, u32)>> = vec![Vec::new(); NUM_SHARDS];
+    for &e in &hashed {
+        bins[(e.0 % NUM_SHARDS as u64) as usize].push(e);
+    }
+
+    let isecs = &ctx.isecs;
+    let folds: Vec<Vec<(u32, u32)>> = bins
+        .into_par_iter()
+        .map(|bin| {
+            let mut map: hashbrown::HashMap<(u64, u32, &[u8]), u32> = hashbrown::HashMap::new();
+            let mut out = Vec::new();
+            for (hash, ty, i) in bin {
+                match map.entry((hash, ty, isecs[i as usize].data)) {
+                    hashbrown::hash_map::Entry::Occupied(e) => out.push((i, *e.get())),
+                    hashbrown::hash_map::Entry::Vacant(e) => {
+                        e.insert(i);
+                    }
+                }
+            }
+            out
+        })
+        .collect();
+
+    for fold in folds {
+        for (loser, winner) in fold {
+            let p2align = ctx.isecs[loser as usize].hdr.p2align;
+            ctx.isecs[loser as usize].replacement = Some(winner as usize);
+            let w = &mut ctx.isecs[winner as usize];
+            w.hdr.p2align = w.hdr.p2align.max(p2align);
         }
     }
 }
@@ -2060,30 +2091,17 @@ pub fn create_output_symtab<E: Arch>(ctx: &mut Context<E>) {
     // by stab source-file entries.
     data.strtab = vec![b' ', 0, b'-', 0];
 
-    // Identical names share one string-table entry, as in ld64. This
-    // matters most for debug stabs, whose N_FUN/N_GSYM entries repeat
-    // the very names the regular symbol table carries: without
-    // deduplication a Rust binary's string table doubles (mangled
-    // names average well over 100 bytes). The map follows the symbol
-    // table's key discipline - borrowed names, precomputed xxh3,
-    // pass-through hashing - so deduplication allocates nothing and
-    // hashes each name once.
-    let mut string_offsets = crate::symbol::PrehashedMap::<u32>::default();
-    let mut add_string = |strtab: &mut Vec<u8>, s: &'static str| -> u32 {
-        let hash = crate::symbol::hash_key(s);
-        if let Some(&off) = string_offsets.get(s, hash) {
-            return off;
-        }
-        let off = strtab.len() as u32;
-        strtab.extend_from_slice(s.as_bytes());
-        strtab.push(0);
-        string_offsets.insert(s, hash, off);
-        off
-    };
+    // Names are collected alongside the entries and the string table
+    // is built afterwards in one parallel pass (below); an entry
+    // whose name is the empty sentinel keeps whatever fixed n_strx
+    // its loop assigned (the "" and "-" placeholders).
+    let mut names: Vec<&'static str> = Vec::new();
+
 
     // Swift AST paths for the debugger (-add_ast_path), as N_AST stabs.
     for path in &ctx.args.add_ast_paths {
-        let n_strx = add_string(&mut data.strtab, String::leak(path.clone()));
+        let n_strx = 0;
+        names.push(String::leak(path.clone()));
         data.entries.push((
             NList {
                 n_strx,
@@ -2113,6 +2131,7 @@ pub fn create_output_symtab<E: Arch>(ctx: &mut Context<E>) {
             // The source-file N_SO's name is unused by debuggers; "-"
             // stands in. N_OSO points at the object (or "archive(member)"),
             // as an absolute path.
+            names.push("");
             data.entries.push((
                 NList {
                     n_strx: 2,
@@ -2136,12 +2155,10 @@ pub fn create_output_symtab<E: Arch>(ctx: &mut Context<E>) {
                     oso_name = rest.to_string();
                 }
             }
+            names.push(String::leak(std::mem::take(&mut oso_name)));
             data.entries.push((
                 NList {
-                    n_strx: add_string(
-                        &mut data.strtab,
-                        String::leak(std::mem::take(&mut oso_name)),
-                    ),
+                    n_strx: 0,
                     n_type: N_OSO,
                     n_sect: E::CPUSUBTYPE as u8,
                     n_desc: 1,
@@ -2165,12 +2182,15 @@ pub fn create_output_symtab<E: Arch>(ctx: &mut Context<E>) {
                     continue;
                 }
 
-                let n_strx = add_string(&mut data.strtab, sym.name);
+                let n_strx = 0;
+                let stab_name = sym.name;
                 let is_text = isec.hdr.segname() == "__TEXT"
                     && isec.hdr.flags & (S_ATTR_PURE_INSTRUCTIONS | S_ATTR_SOME_INSTRUCTIONS)
                         != 0;
                 if is_text {
                     // A pair: the function's address, then its size.
+                    names.push(stab_name);
+                    names.push("");
                     data.entries.push((
                         NList {
                             n_strx,
@@ -2190,6 +2210,7 @@ pub fn create_output_symtab<E: Arch>(ctx: &mut Context<E>) {
                         None,
                     ));
                 } else {
+                    names.push(stab_name);
                     data.entries.push((
                         NList {
                             n_strx,
@@ -2203,6 +2224,7 @@ pub fn create_output_symtab<E: Arch>(ctx: &mut Context<E>) {
             }
 
             // An N_SO with an empty name closes the object's stabs.
+            names.push("");
             data.entries.push((
                 NList {
                     n_strx: 1,
@@ -2253,7 +2275,8 @@ pub fn create_output_symtab<E: Arch>(ctx: &mut Context<E>) {
             if !matches!(sym.origin, Origin::Obj(_)) || !ctx.isecs[isec].is_alive {
                 continue;
             }
-            let n_strx = add_string(&mut data.strtab, sym.name);
+            let n_strx = 0;
+        names.push(sym.name);
             let ent = NList {
                 n_strx,
                 n_type: N_SECT,
@@ -2281,7 +2304,8 @@ pub fn create_output_symtab<E: Arch>(ctx: &mut Context<E>) {
         if !ctx.isecs[isec].is_alive {
             continue;
         }
-        let n_strx = add_string(&mut data.strtab, sym.name);
+        let n_strx = 0;
+        names.push(sym.name);
         let ent = NList {
             n_strx,
             n_type: N_SECT | N_PEXT,
@@ -2313,7 +2337,8 @@ pub fn create_output_symtab<E: Arch>(ctx: &mut Context<E>) {
 
     for &i in &globals {
         let sym = &ctx.symtab[i];
-        let n_strx = add_string(&mut data.strtab, sym.name);
+        let n_strx = 0;
+        names.push(sym.name);
         let (n_type, n_sect, mut n_desc) = match (sym.origin, sym.isec) {
             (_, Some(isec)) => (
                 N_SECT | N_EXT,
@@ -2350,7 +2375,8 @@ pub fn create_output_symtab<E: Arch>(ctx: &mut Context<E>) {
         let Origin::Dylib(dylib) = sym.origin else {
             unreachable!()
         };
-        let n_strx = add_string(&mut data.strtab, sym.name);
+        let n_strx = 0;
+        names.push(sym.name);
         // A flat-namespace import records the DYNAMIC_LOOKUP ordinal.
         let ordinal = (ctx.bind_ordinal(dylib) as u8) as u16;
         let mut n_desc = ordinal << 8;
@@ -2367,6 +2393,100 @@ pub fn create_output_symtab<E: Arch>(ctx: &mut Context<E>) {
         data.entries.push((ent, None));
     }
     data.nundef = undefs.len() as u32;
+
+    // Build the string table and assign every entry's n_strx in one
+    // parallel pass, the same sharded shape as the symbol table:
+    // names bin by xxh3, each shard deduplicates its bin (first
+    // appearance wins) and lays its unique names out as one blob,
+    // prefix sums place the blobs, and the entries' offsets follow.
+    // Entries with the empty sentinel keep their fixed placeholder
+    // offsets (1 is "", 2 is "-").
+    {
+        use rayon::prelude::*;
+        debug_assert_eq!(names.len(), data.entries.len());
+        let hashes: Vec<u64> = names
+            .par_iter()
+            .map(|n| {
+                if n.is_empty() {
+                    0
+                } else {
+                    crate::symbol::hash_key(n)
+                }
+            })
+            .collect();
+        const NS: usize = 64;
+        let mut bins: Vec<Vec<u32>> = vec![Vec::new(); NS];
+        for (i, (&h, n)) in hashes.iter().zip(&names).enumerate() {
+            if !n.is_empty() {
+                bins[(h % NS as u64) as usize].push(i as u32);
+            }
+        }
+
+        struct ShardOut {
+            /// Unique names in first-appearance order, with their
+            /// shard-local byte offsets.
+            uniq: Vec<(&'static str, u32)>,
+            blob_len: u32,
+            /// (entry index, shard-local unique index)
+            resolved: Vec<(u32, u32)>,
+        }
+        let names_ref = &names;
+        let hashes_ref = &hashes;
+        let shard_outs: Vec<ShardOut> = bins
+            .into_par_iter()
+            .map(|bin| {
+                let mut map: hashbrown::HashMap<(u64, &str), u32> = hashbrown::HashMap::new();
+                let mut uniq: Vec<(&'static str, u32)> = Vec::new();
+                let mut blob_len = 0u32;
+                let mut resolved = Vec::with_capacity(bin.len());
+                for e in bin {
+                    let name = names_ref[e as usize];
+                    let hash = hashes_ref[e as usize];
+                    let idx = *map.entry((hash, name)).or_insert_with(|| {
+                        let off = blob_len;
+                        uniq.push((name, off));
+                        blob_len += name.len() as u32 + 1;
+                        uniq.len() as u32 - 1
+                    });
+                    resolved.push((e, idx));
+                }
+                ShardOut {
+                    uniq,
+                    blob_len,
+                    resolved,
+                }
+            })
+            .collect();
+
+        let mut bases = Vec::with_capacity(NS);
+        let mut base = data.strtab.len() as u32;
+        for so in &shard_outs {
+            bases.push(base);
+            base += so.blob_len;
+        }
+
+        let blobs: Vec<Vec<u8>> = shard_outs
+            .par_iter()
+            .map(|so| {
+                let mut blob = Vec::with_capacity(so.blob_len as usize);
+                for &(name, _) in &so.uniq {
+                    blob.extend_from_slice(name.as_bytes());
+                    blob.push(0);
+                }
+                blob
+            })
+            .collect();
+        data.strtab.reserve(base as usize - data.strtab.len());
+        for blob in blobs {
+            data.strtab.extend_from_slice(&blob);
+        }
+
+        for (so, &b) in shard_outs.iter().zip(&bases) {
+            for &(e, idx) in &so.resolved {
+                data.entries[e as usize].0.n_strx = b + so.uniq[idx as usize].1;
+            }
+        }
+    }
 
     // Record each global symbol's index for the indirect symbol table.
     for (i, (_, sym)) in data.entries.iter().enumerate() {
