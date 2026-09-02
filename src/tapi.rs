@@ -42,47 +42,22 @@ fn unquote(s: &str) -> &str {
         .unwrap_or(s)
 }
 
-/// Reads the flow list (`[ a, b, ... ]`, possibly spanning lines)
-/// following position `pos`, appending its elements to `out`.
-fn read_list(text: &'static str, pos: usize, out: &mut Vec<&'static str>, prefix: &str) {
-    let Some(start) = text[pos..].find('[') else {
-        return;
-    };
-    let start = pos + start + 1;
-    let Some(end) = text[start..].find(']') else {
-        return;
-    };
-    for item in text[start..start + end].split(',') {
-        let item = unquote(item.trim());
-        if !item.is_empty() {
-            // Plain names borrow straight out of the mapped file; the
-            // few Objective-C entries that need a mangling prefix are
-            // leaked (bounded by the small objc lists).
-            if prefix.is_empty() {
-                out.push(item);
-            } else {
-                out.push(String::leak(format!("{prefix}{item}")));
-            }
-        }
+fn memchr_from(bytes: &[u8], needle: u8, from: usize) -> Option<usize> {
+    if from >= bytes.len() {
+        return None;
     }
-}
-
-/// Reads all `<key>: [ ... ]` lists in a document.
-fn read_lists(doc: &'static str, key: &str, out: &mut Vec<&'static str>, prefix: &str) {
-    let pat = format!("{key}:");
-    let mut pos = 0;
-    while let Some(found) = doc[pos..].find(&pat) {
-        let at = pos + found;
-        // The key must be a whole word: "symbols" must not match
-        // "weak-symbols".
-        let line_ok = doc[..at]
-            .chars()
-            .next_back()
-            .map_or(true, |c| c == '\n' || c == ' ');
-        pos = at + pat.len();
-        if line_ok {
-            read_list(doc, pos, out, prefix);
-        }
+    // SAFETY: memchr reads within the given range.
+    let p = unsafe {
+        libc::memchr(
+            bytes.as_ptr().add(from) as *const _,
+            needle as i32,
+            bytes.len() - from,
+        )
+    };
+    if p.is_null() {
+        None
+    } else {
+        Some(p as usize - bytes.as_ptr() as usize)
     }
 }
 
@@ -141,40 +116,106 @@ pub fn parse(diag: &Diagnostics, mf: &MappedFile) -> TbdFile {
         external_reexports: Vec::new(),
     };
 
-    let mut doc_names = Vec::new();
-    let mut reexports = Vec::new();
+    let mut doc_names: Vec<&'static str> = Vec::new();
+    let mut reexports: Vec<&'static str> = Vec::new();
 
-    for (i, doc) in text.split("\n---").enumerate() {
-        for line in doc.lines() {
+    // One pass over the file. Lines are walked with memchr; a line
+    // whose (indentation- and "- "-stripped) head matches a key has
+    // its flow list "[ a, b, ... ]" - which may span lines - consumed
+    // in place, so nothing is ever scanned twice. Longer keys are
+    // tested first so "symbols:" cannot claim "weak-symbols:" lines.
+    let bytes = text.as_bytes();
+    let mut pos = 0usize;
+    let mut doc = 0usize;
+
+    // What a matched key does with its list items.
+    enum Sink {
+        Exports,
+        ObjcClass,
+        ObjcEhType,
+        ObjcIvar,
+        Weak,
+        Tlv,
+        Reexports,
+    }
+
+    while pos < bytes.len() {
+        let eol = match memchr_from(bytes, b'\n', pos) {
+            Some(i) => i,
+            None => bytes.len(),
+        };
+        let line = text[pos..eol].trim_start();
+        let mut next = eol + 1;
+
+        if line.starts_with("---") {
+            doc += 1;
+        } else {
+            let line = line.strip_prefix("- ").unwrap_or(line);
             if let Some(val) = line.strip_prefix("install-name:") {
                 doc_names.push(unquote(val));
-                if i == 0 {
+                if doc <= 1 && tbd.install_name.is_empty() {
                     tbd.install_name = unquote(val).to_string();
                 }
-            } else if i == 0 {
-                if let Some(val) = line.strip_prefix("current-version:") {
-                    tbd.current_version = parse_version(unquote(val));
-                } else if let Some(val) = line.strip_prefix("flags:") {
-                    if val.contains("not_app_extension_safe") {
-                        tbd.not_app_extension_safe = true;
+            } else if doc <= 1 && line.starts_with("current-version:") {
+                tbd.current_version = parse_version(unquote(&line["current-version:".len()..]));
+            } else if doc <= 1 && line.starts_with("flags:") {
+                if line.contains("not_app_extension_safe") {
+                    tbd.not_app_extension_safe = true;
+                }
+            } else {
+                let sink = if line.starts_with("thread-local-symbols:") {
+                    Some(Sink::Tlv)
+                } else if line.starts_with("weak-symbols:") {
+                    Some(Sink::Weak)
+                } else if line.starts_with("symbols:") {
+                    Some(Sink::Exports)
+                } else if line.starts_with("objc-classes:") {
+                    Some(Sink::ObjcClass)
+                } else if line.starts_with("objc-eh-types:") {
+                    Some(Sink::ObjcEhType)
+                } else if line.starts_with("objc-ivars:") {
+                    Some(Sink::ObjcIvar)
+                } else if doc <= 1 && line.starts_with("libraries:") {
+                    Some(Sink::Reexports)
+                } else {
+                    None
+                };
+                if let Some(sink) = sink {
+                    // The list starts at '[' (possibly on this line)
+                    // and runs to the matching ']', across lines.
+                    if let Some(open) = memchr_from(bytes, b'[', pos) {
+                        let close = memchr_from(bytes, b']', open).unwrap_or(bytes.len());
+                        for item in text[open + 1..close].split(',') {
+                            let item = unquote(item.trim());
+                            if item.is_empty() {
+                                continue;
+                            }
+                            match sink {
+                                Sink::Exports => tbd.exports.push(item),
+                                Sink::Weak => tbd.weak_exports.push(item),
+                                Sink::Tlv => tbd.tlv_exports.push(item),
+                                Sink::Reexports => reexports.push(item),
+                                Sink::ObjcClass => {
+                                    tbd.exports
+                                        .push(String::leak(format!("_OBJC_CLASS_$_{item}")));
+                                    tbd.exports.push(String::leak(format!(
+                                        "_OBJC_METACLASS_$_{item}"
+                                    )));
+                                }
+                                Sink::ObjcEhType => tbd
+                                    .exports
+                                    .push(String::leak(format!("_OBJC_EHTYPE_$_{item}"))),
+                                Sink::ObjcIvar => tbd
+                                    .exports
+                                    .push(String::leak(format!("_OBJC_IVAR_$_{item}"))),
+                            }
+                        }
+                        next = memchr_from(bytes, b'\n', close).map_or(bytes.len(), |i| i + 1);
                     }
                 }
             }
         }
-
-        if i == 0 {
-            read_lists(doc, "libraries", &mut reexports, "");
-        }
-
-        // Merge the exported symbols of every document. Objective-C
-        // entities are exported under mangled symbol names.
-        read_lists(doc, "symbols", &mut tbd.exports, "");
-        read_lists(doc, "objc-classes", &mut tbd.exports, "_OBJC_CLASS_$_");
-        read_lists(doc, "objc-classes", &mut tbd.exports, "_OBJC_METACLASS_$_");
-        read_lists(doc, "objc-eh-types", &mut tbd.exports, "_OBJC_EHTYPE_$_");
-        read_lists(doc, "objc-ivars", &mut tbd.exports, "_OBJC_IVAR_$_");
-        read_lists(doc, "weak-symbols", &mut tbd.weak_exports, "");
-        read_lists(doc, "thread-local-symbols", &mut tbd.tlv_exports, "");
+        pos = next;
     }
 
     // Reexported libraries not inlined as documents live in files of
