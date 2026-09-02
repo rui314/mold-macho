@@ -94,6 +94,9 @@ pub struct Context<E: Arch> {
     pub fixup_ordinals: std::collections::HashMap<SymbolId, usize>,
     /// The encoded LC_DYLD_CHAINED_FIXUPS payload, built during layout.
     pub chained_data: Vec<u8>,
+    /// LC_DATA_IN_CODE entries (fileoff, length, kind), built once
+    /// when layout reaches __LINKEDIT.
+    pub dice_data: Vec<(u32, u16, u16)>,
     /// The address of the first thread-local data section. Thread
     /// pointers are encoded relative to it.
     pub tls_begin: u64,
@@ -163,6 +166,7 @@ impl<E: Arch> Context<E> {
             fixup_imports: Vec::new(),
             fixup_ordinals: std::collections::HashMap::new(),
             chained_data: Vec::new(),
+            dice_data: Vec::new(),
             tls_begin: 0,
             literals: std::collections::HashMap::new(),
             objc_image_info_flags: 0,

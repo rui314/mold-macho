@@ -13,7 +13,7 @@ use crate::input_sections::InputSection;
 use crate::macho::*;
 use crate::mapped_file::MappedFile;
 use crate::output_chunks::{
-    self, Chunk, ChunkKind, OutputSegment, code_signature_size, mach_header_size,
+    self, Chunk, ChunkKind, OutputSegment, SymtabData, code_signature_size, mach_header_size,
     section_ordinals,
 };
 use crate::arch::RelocClass;
@@ -2145,9 +2145,9 @@ fn keep_local_symbol(name: &str) -> bool {
 /// then defined globals and undefined symbols, each sorted by name.
 /// Symbol values are filled in when the table is copied out, after
 /// addresses are assigned.
-pub fn create_output_symtab<E: Arch>(ctx: &mut Context<E>) {
+pub fn create_output_symtab<E: Arch>(ctx: &Context<E>) -> SymtabData {
     let ordinals = section_ordinals(ctx);
-    let mut data = std::mem::take(&mut ctx.symtab_data);
+    let mut data = SymtabData::default();
     // Offset 1 is the empty string, offset 2 the "-" placeholder used
     // by stab source-file entries.
     data.strtab = vec![b' ', 0, b'-', 0];
@@ -2622,7 +2622,7 @@ pub fn create_output_symtab<E: Arch>(ctx: &mut Context<E>) {
         eprintln!("      symtab-globals {:?}", __t.elapsed());
     }
 
-    ctx.symtab_data = data;
+    data
 }
 
 /// Assigns virtual addresses and file offsets to all segments and chunks.
@@ -2670,8 +2670,6 @@ pub fn set_osec_offsets<E: Arch>(ctx: &mut Context<E>) {
 
     // Chunk sizes that are independent of the layout.
     let header_size = mach_header_size(ctx);
-    let symtab_size = (ctx.symtab_data.entries.len() * size_of::<NList>()) as u64;
-    let strtab_size = ctx.symtab_data.strtab.len() as u64;
 
     for seg_idx in 0..ctx.segments.len() {
         // Everything the bind stream describes (the GOT, data sections)
@@ -2691,13 +2689,64 @@ pub fn set_osec_offsets<E: Arch>(ctx: &mut Context<E>) {
                     ctx.isecs[i].addr = a;
                 }
             }
-            if ctx.use_chained_fixups() {
-                t!("chained_fixups", build_chained_fixups(ctx));
-            } else {
-                ctx.rebase_data = t!("rebase_info", build_rebase_info(ctx));
-                ctx.bind_data = t!("bind_info", build_bind_info(ctx));
+            // The LINKEDIT tables are independent of one another and
+            // every address they read is final (the symbol table needs
+            // none at all), so they build as one parallel task group;
+            // the chunk loop below just consumes the cached bytes.
+            // sold sizes its __LINKEDIT members with the same
+            // parallel-for.
+            enum Streams {
+                Chained(ChainedFixups),
+                Classic(Vec<u8>, Vec<u8>),
             }
-            ctx.function_starts_data = t!("function_starts", build_function_starts(ctx));
+            let use_chained = ctx.use_chained_fixups();
+            let shared = &*ctx;
+            let ((symtab, dice), (streams, (starts, trie))) = rayon::join(
+                || {
+                    rayon::join(
+                        || t!("symtab", create_output_symtab(shared)),
+                        || t!("data_in_code", build_data_in_code(shared)),
+                    )
+                },
+                || {
+                    rayon::join(
+                        || {
+                            if use_chained {
+                                Streams::Chained(t!(
+                                    "chained_fixups",
+                                    build_chained_fixups(shared)
+                                ))
+                            } else {
+                                let (rebase, bind) = rayon::join(
+                                    || t!("rebase_info", build_rebase_info(shared)),
+                                    || t!("bind_info", build_bind_info(shared)),
+                                );
+                                Streams::Classic(rebase, bind)
+                            }
+                        },
+                        || {
+                            rayon::join(
+                                || t!("function_starts", build_function_starts(shared)),
+                                || t!("trie_encode", output_chunks::encode_export_trie(shared)),
+                            )
+                        },
+                    )
+                },
+            );
+            ctx.symtab_data = symtab;
+            ctx.dice_data = dice;
+            match streams {
+                Streams::Chained(chained) => {
+                    (ctx.chained_data, ctx.fixups, ctx.fixup_imports, ctx.fixup_ordinals) =
+                        chained;
+                }
+                Streams::Classic(rebase, bind) => {
+                    ctx.rebase_data = rebase;
+                    ctx.bind_data = bind;
+                }
+            }
+            ctx.function_starts_data = starts;
+            trie_cache = Some(trie);
         }
 
         if ctx.segments[seg_idx].name == "__PAGEZERO" {
@@ -2721,8 +2770,10 @@ pub fn set_osec_offsets<E: Arch>(ctx: &mut Context<E>) {
             }
             let size = match &ctx.chunks[idx].kind {
                 ChunkKind::MachHeader => header_size,
-                ChunkKind::Symtab => symtab_size,
-                ChunkKind::Strtab => strtab_size,
+                ChunkKind::Symtab => {
+                    (ctx.symtab_data.entries.len() * size_of::<NList>()) as u64
+                }
+                ChunkKind::Strtab => ctx.symtab_data.strtab.len() as u64,
                 // Encoded once; the personality cells the encoding
                 // cannot know yet (GOT addresses) come back as a
                 // patch list for the copy phase.
@@ -2736,20 +2787,15 @@ pub fn set_osec_offsets<E: Arch>(ctx: &mut Context<E>) {
                 ChunkKind::ChainedFixups => ctx.chained_data.len() as u64,
                 ChunkKind::RebaseInfo => ctx.rebase_data.len() as u64,
                 ChunkKind::BindInfo => ctx.bind_data.len() as u64,
-                // The trie is encoded once here - __LINKEDIT is
-                // sized after every address is final - and copied out
-                // verbatim later. (__unwind_info above cannot get the
-                // same treatment: its content includes personality GOT
-                // addresses, which the data segments haven't fixed yet
-                // when __TEXT is sized.)
-                ChunkKind::ExportTrie => {
-                    let data = t!("trie_encode", output_chunks::encode_export_trie(ctx));
-                    let len = data.len() as u64;
-                    trie_cache = Some(data);
-                    len
-                }
+                // Encoded with the other LINKEDIT tables when layout
+                // reached __LINKEDIT, and copied out verbatim later.
+                // (__unwind_info above cannot get the same treatment:
+                // its content includes personality GOT addresses,
+                // which the data segments haven't fixed yet when
+                // __TEXT is sized.)
+                ChunkKind::ExportTrie => trie_cache.as_ref().unwrap().len() as u64,
                 ChunkKind::FunctionStarts => ctx.function_starts_data.len() as u64,
-                ChunkKind::DataInCode => (dice_entries(ctx).len() * 8) as u64,
+                ChunkKind::DataInCode => (ctx.dice_data.len() * 8) as u64,
                 ChunkKind::CodeSignature => {
                     cursor = align_to(cursor, 16);
                     code_signature_size(&ctx.args.output, cursor)
@@ -3139,12 +3185,20 @@ fn collect_fixups<E: Arch>(ctx: &Context<E>) -> Vec<(u64, Option<crate::symbol::
 /// of the first fixup; each 64-bit fixup word in the data itself then
 /// encodes its target (a rebase value or an import ordinal) plus the
 /// distance to the next fixup in the page, forming a chain dyld walks.
-fn build_chained_fixups<E: Arch>(ctx: &mut Context<E>) {
+/// Builds the chained-fixups payload; returns the encoded bytes, the
+/// collected fixups, the import table and the symbol->import ordinal
+/// map, for the caller to store on the context.
+type ChainedFixups = (
+    Vec<u8>,
+    Vec<(u64, Option<crate::symbol::SymbolId>, u64)>,
+    Vec<(crate::symbol::SymbolId, u64)>,
+    std::collections::HashMap<crate::symbol::SymbolId, usize>,
+);
+
+fn build_chained_fixups<E: Arch>(ctx: &Context<E>) -> ChainedFixups {
     let fixups = collect_fixups(ctx);
     if fixups.is_empty() {
-        ctx.chained_data.clear();
-        ctx.fixups.clear();
-        return;
+        return Default::default();
     }
 
     // The import table: one entry per (symbol, table addend). Addends
@@ -3292,10 +3346,7 @@ fn build_chained_fixups<E: Arch>(ctx: &mut Context<E>) {
     }
     pad8(&mut buf);
 
-    ctx.chained_data = buf;
-    ctx.fixups = fixups;
-    ctx.fixup_imports = dynsyms;
-    ctx.fixup_ordinals = ordinals;
+    (buf, fixups, dynsyms, ordinals)
 }
 
 /// Writes the fixup chains into the copied output: every fixup word is
@@ -3433,8 +3484,12 @@ fn order_file_ranks<E: Arch>(ctx: &Context<E>) -> Option<Vec<u64>> {
 /// the object's own address space (sections there are laid out from
 /// zero), which find_subsec maps to the owning subsection - entries
 /// whose subsection was dead-stripped vanish with it.
-fn dice_entries<E: Arch>(ctx: &Context<E>) -> Vec<(usize, u64, u16, u16)> {
-    let mut out = Vec::new();
+/// Builds the LC_DATA_IN_CODE entries. Runs when layout reaches
+/// __LINKEDIT: the __text file offsets the entries record are final by
+/// then, so the table is built exactly once (sold builds its contents
+/// in compute_size the same way) and copied out verbatim.
+fn build_data_in_code<E: Arch>(ctx: &Context<E>) -> Vec<(u32, u16, u16)> {
+    let mut out: Vec<(u32, u16, u16)> = Vec::new();
     for obj in &ctx.objs {
         if !obj.is_alive {
             continue;
@@ -3445,12 +3500,14 @@ fn dice_entries<E: Arch>(ctx: &Context<E>) -> Vec<(usize, u64, u16, u16)> {
             else {
                 continue;
             };
-            let isec = ctx.resolve_isec(isec);
-            if ctx.isecs[isec].is_alive {
-                out.push((isec, off_in, len, kind));
+            let isec = &ctx.isecs[ctx.resolve_isec(isec)];
+            if isec.is_alive {
+                let fileoff = ctx.chunks[isec.osec].hdr.fileoff + isec.output_offset + off_in;
+                out.push((fileoff as u32, len, kind));
             }
         }
     }
+    out.sort_unstable();
     out
 }
 
@@ -3616,18 +3673,8 @@ fn copy_chunk<E: Arch>(ctx: &Context<E>, chunk: &Chunk, buf: &mut [u8]) {
             buf[..ctx.function_starts_data.len()].copy_from_slice(&ctx.function_starts_data);
         }
         ChunkKind::DataInCode => {
-            let mut entries: Vec<(u32, u16, u16)> = dice_entries(ctx)
-                .into_iter()
-                .map(|(isec, off, len, kind)| {
-                    let isec = &ctx.isecs[isec];
-                    let fileoff =
-                        ctx.chunks[isec.osec].hdr.fileoff + isec.output_offset + off;
-                    (fileoff as u32, len, kind)
-                })
-                .collect();
-            entries.sort_unstable();
             let mut p = 0;
-            for (off, len, kind) in entries {
+            for &(off, len, kind) in &ctx.dice_data {
                 buf[p..p + 4].copy_from_slice(&off.to_le_bytes());
                 buf[p + 4..p + 6].copy_from_slice(&len.to_le_bytes());
                 buf[p + 6..p + 8].copy_from_slice(&kind.to_le_bytes());
