@@ -3071,17 +3071,33 @@ fn copy_chunk<E: Arch>(ctx: &Context<E>, chunk: &Chunk, buf: &mut [u8]) {
                 let end = off + thunk.syms.len() * E::THUNK_SIZE as usize;
                 E::write_thunk(ctx, chunk.hdr.addr + thunk.offset, &thunk.syms, &mut buf[off..end]);
             }
-            for &id in isecs {
+            // Subsections copy and relocate in parallel, as in mold:
+            // each occupies a disjoint slice of the output section
+            // (relocations only ever write within their own
+            // subsection), so the work distributes freely. A pointer
+            // wrapper stands in for the aliasing split rayon can't
+            // express directly.
+            use rayon::prelude::*;
+            struct BufPtr(*mut u8);
+            unsafe impl Sync for BufPtr {}
+            let bufp = BufPtr(buf.as_mut_ptr());
+            let bufp = &bufp;
+            isecs.par_iter().for_each(|&id| {
                 let isec = &ctx.isecs[id];
                 if isec.data.is_empty() {
-                    continue;
+                    return;
                 }
                 let off = isec.output_offset as usize;
-                let end = off + isec.data.len();
-                buf[off..end].copy_from_slice(isec.data);
+                // SAFETY: subsections' [output_offset, +size) ranges
+                // are disjoint by layout, so each iteration touches
+                // its own slice.
+                let slice = unsafe {
+                    std::slice::from_raw_parts_mut(bufp.0.add(off), isec.data.len())
+                };
+                slice.copy_from_slice(isec.data);
                 let base = chunk.hdr.addr + isec.output_offset;
-                E::apply_relocs(ctx, &isec.relocs, id, base, &mut buf[off..end]);
-            }
+                E::apply_relocs(ctx, &isec.relocs, id, base, slice);
+            });
         }
         ChunkKind::Stubs => E::write_stubs(ctx, chunk.hdr.addr, buf),
         ChunkKind::Got => {
