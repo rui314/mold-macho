@@ -992,7 +992,7 @@ pub fn convert_common_symbols<E: Arch>(ctx: &mut Context<E>) {
             p2align: p2align as u32,
             input_addr: 0,
             size,
-            data: &[],
+            data_ptr: 0,
             rel_offset: 0,
             nrels: 0,
             osec: u32::MAX,
@@ -1131,7 +1131,7 @@ pub fn merge_literals<E: Arch>(ctx: &mut Context<E>) {
             ) {
                 return None;
             }
-            Some((xxhash_rust::xxh3::xxh3_64(isec.data), ty, i as u32))
+            Some((xxhash_rust::xxh3::xxh3_64(isec.data()), ty, i as u32))
         })
         .collect();
 
@@ -1148,7 +1148,7 @@ pub fn merge_literals<E: Arch>(ctx: &mut Context<E>) {
             let mut map: hashbrown::HashMap<(u64, u32, &[u8]), u32> = hashbrown::HashMap::new();
             let mut out = Vec::new();
             for (hash, ty, i) in bin {
-                match map.entry((hash, ty, isecs[i as usize].data)) {
+                match map.entry((hash, ty, isecs[i as usize].data())) {
                     hashbrown::hash_map::Entry::Occupied(e) => out.push((i, *e.get())),
                     hashbrown::hash_map::Entry::Vacant(e) => {
                         e.insert(i);
@@ -1560,7 +1560,7 @@ pub fn scan_relocations<E: Arch>(ctx: &mut Context<E>) {
                 // slot at all; an unrelaxable one is an ordinary GOT
                 // reference.
                 if class == RelocClass::GotLoad
-                    && !E::can_relax_got_load(isec.data, rel.offset, rel.r_type)
+                    && !E::can_relax_got_load(isec.data(), rel.offset, rel.r_type)
                 {
                     class = RelocClass::Got;
                 }
@@ -3756,7 +3756,7 @@ fn copy_chunk<E: Arch>(ctx: &Context<E>, chunk: &Chunk, buf: &mut [u8]) {
             let bufp = &bufp;
             isecs.par_iter().for_each(|&id| {
                 let isec = &ctx.isecs[id];
-                if isec.data.is_empty() {
+                if isec.data().is_empty() {
                     return;
                 }
                 let off = isec.output_offset as usize;
@@ -3764,9 +3764,9 @@ fn copy_chunk<E: Arch>(ctx: &Context<E>, chunk: &Chunk, buf: &mut [u8]) {
                 // are disjoint by layout, so each iteration touches
                 // its own slice.
                 let slice = unsafe {
-                    std::slice::from_raw_parts_mut(bufp.0.add(off), isec.data.len())
+                    std::slice::from_raw_parts_mut(bufp.0.add(off), isec.data().len())
                 };
-                slice.copy_from_slice(isec.data);
+                slice.copy_from_slice(isec.data());
                 let base = chunk.hdr.addr + isec.output_offset as u64;
                 E::apply_relocs(ctx, ctx.isec_relocs(id), id, base, slice);
             });

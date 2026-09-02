@@ -61,8 +61,12 @@ pub struct InputSection {
     /// This subsection's address in the object's address space.
     pub input_addr: u64,
     pub size: u64,
-    /// The subsection contents; empty for zero-fill sections.
-    pub data: &'static [u8],
+    /// The subsection contents, as a bare pointer - the length is
+    /// `size` - or 0 when there are none (a zero-fill or empty
+    /// section). Stored as an integer, not a slice, to save 8 bytes and
+    /// keep the struct trivially Send/Sync; read through `data()`.
+    /// mold-rust likewise keeps `contents` as a bare address.
+    pub data_ptr: usize,
     /// This subsection's relocations: a range in the owning object's
     /// `relocs` arena, offsets relative to the subsection. sold keeps
     /// rel_offset/nrels per subsection the same way, rather than a Vec
@@ -97,4 +101,21 @@ pub struct InputSection {
 // InputSection is the highest-count struct in a link (millions on a
 // debug build), so it is kept compact - mold-rust's is 64 bytes; ours
 // carries a few Mach-O-specific fields more.
-const _: () = assert!(std::mem::size_of::<InputSection>() == 88);
+const _: () = assert!(std::mem::size_of::<InputSection>() == 80);
+
+impl InputSection {
+    /// This subsection's bytes. Empty for a zero-fill or empty section;
+    /// otherwise the `size` bytes at `data_ptr` (which point into the
+    /// mmap'd input, so they live for the whole link).
+    #[inline]
+    pub fn data(&self) -> &'static [u8] {
+        if self.data_ptr == 0 {
+            &[]
+        } else {
+            // SAFETY: for a non-empty section data_ptr is the start of
+            // `size` valid bytes in the leaked/mmap'd input, and every
+            // such section is built with size == contents.len().
+            unsafe { std::slice::from_raw_parts(self.data_ptr as *const u8, self.size as usize) }
+        }
+    }
+}

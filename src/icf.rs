@@ -370,8 +370,8 @@ pub fn icf_sections<E: Arch>(ctx: &mut Context<E>) {
         let mut h = SipHash13_128::new(&KEY);
         h.update(&isec.hdr.flags.to_ne_bytes());
         h.update(&isec.size.to_ne_bytes());
-        h.update(&isec.data.len().to_ne_bytes());
-        h.update(isec.data);
+        h.update(&isec.data().len().to_ne_bytes());
+        h.update(isec.data());
         for rel in ctx.isec_relocs(id) {
             h.update(&rel.offset.to_ne_bytes());
             h.update(&rel.r_type.to_ne_bytes());
@@ -530,7 +530,7 @@ pub fn icf_sections<E: Arch>(ctx: &mut Context<E>) {
         let equal = |a: usize, b: usize| -> bool {
             let (x, y) = (&ctx.isecs[a], &ctx.isecs[b]);
             let (xr, yr) = (ctx.isec_relocs(a), ctx.isec_relocs(b));
-            x.data == y.data
+            x.data() == y.data()
                 && x.hdr.flags == y.hdr.flags
                 && xr.len() == yr.len()
                 && xr.iter().zip(yr).all(|(r, s)| {

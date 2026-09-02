@@ -580,11 +580,11 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
         let base = sect_offsets[i] as usize;
         for &id in isecs {
             let isec = &ctx.isecs[id];
-            if isec.data.is_empty() {
+            if isec.data().is_empty() {
                 continue;
             }
             let dst = base + isec.output_offset as usize;
-            buf[dst..dst + isec.data.len()].copy_from_slice(isec.data);
+            buf[dst..dst + isec.data().len()].copy_from_slice(isec.data());
 
             for rel in crate::input_files::isec_relocs_of(&ctx.objs, isec) {
                 let RelocTarget::Section(target) = rel.target else {
