@@ -173,7 +173,6 @@ pub fn icf_sections<E: Arch>(ctx: &mut Context<E>) {
         eprintln!("      icf-prep {:?} candidates {}", __t.elapsed(), candidates.len());
     }
     let __t = std::time::Instant::now();
-    let rounds = (usize::BITS - candidates.len().leading_zeros()) as usize + 1;
 
     // Content is hashed exactly once; the refinement rounds mix only
     // fixed-size digests - each candidate's base digest plus its
@@ -200,25 +199,34 @@ pub fn icf_sections<E: Arch>(ctx: &mut Context<E>) {
         })
         .collect();
 
-    // Stop refining once the number of equivalence classes stops
-    // growing, as mold does - most graphs settle in a handful of
-    // rounds, far under the log2(n) worst case.
+    // Refine until the number of equivalence classes stops growing,
+    // as mold does. Counting classes costs about as much as a
+    // propagation, so propagate three times per count (mold's ratio),
+    // ping-ponging between two buffers instead of allocating a fresh
+    // vector every round. Classes only ever split, so the count is
+    // monotone and the loop terminates.
     let mut hashes = base.clone();
+    let mut scratch = vec![0u64; hashes.len()];
+    let mut sorted = Vec::new();
     let mut prev_classes = 0usize;
-    for _ in 0..rounds {
-        hashes = (0..candidates.len())
-            .into_par_iter()
-            .map(|i| {
-                use std::hash::Hasher;
-                let mut h = xxhash_rust::xxh3::Xxh3::new();
-                h.write_u64(base[i]);
-                for &c in &cand_edges[i] {
-                    h.write_u64(hashes[c as usize]);
-                }
-                h.finish()
-            })
-            .collect();
-        let mut sorted = hashes.clone();
+    loop {
+        for _ in 0..3 {
+            let cur = &hashes;
+            (0..candidates.len())
+                .into_par_iter()
+                .map(|i| {
+                    use std::hash::Hasher;
+                    let mut h = xxhash_rust::xxh3::Xxh3::new();
+                    h.write_u64(base[i]);
+                    for &c in &cand_edges[i] {
+                        h.write_u64(cur[c as usize]);
+                    }
+                    h.finish()
+                })
+                .collect_into_vec(&mut scratch);
+            std::mem::swap(&mut hashes, &mut scratch);
+        }
+        sorted.clone_from(&hashes);
         sorted.par_sort_unstable();
         sorted.dedup();
         if sorted.len() == prev_classes {
