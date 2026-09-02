@@ -2593,16 +2593,16 @@ pub fn create_output_symtab<E: Arch>(ctx: &mut Context<E>) {
     }
 
     // Record each global symbol's index for the indirect symbol table.
+    data.output_sym_indices = vec![u32::MAX; ctx.symtab.syms.len()];
     for (i, (_, sym)) in data.entries.iter().enumerate() {
         if let Some(id) = sym {
             if ctx.symtab[*id].is_extern {
-                data.global_index.insert(*id, i as u32);
+                data.output_sym_indices[*id] = i as u32;
             }
         }
     }
     for (i, &id) in undefs.iter().enumerate() {
-        data.global_index
-            .insert(id, data.nlocal + data.nextdef + i as u32);
+        data.output_sym_indices[id] = data.nlocal + data.nextdef + i as u32;
     }
 
     // Pad the string table to 8 bytes.
@@ -3628,9 +3628,9 @@ fn copy_chunk<E: Arch>(ctx: &Context<E>, chunk: &Chunk, buf: &mut [u8]) {
         ChunkKind::IndirectSymtab => {
             let mut off = 0;
             for &id in ctx.stub_syms.iter().chain(&ctx.got_syms) {
-                let val = match ctx.symtab_data.global_index.get(&id) {
-                    Some(&idx) => idx,
-                    None => INDIRECT_SYMBOL_LOCAL,
+                let val = match ctx.symtab_data.output_sym_indices[id] {
+                    u32::MAX => INDIRECT_SYMBOL_LOCAL,
+                    idx => idx,
                 };
                 buf[off..off + 4].copy_from_slice(&val.to_le_bytes());
                 off += 4;

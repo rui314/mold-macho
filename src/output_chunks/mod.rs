@@ -189,9 +189,12 @@ pub struct SymtabData {
     pub nlocal: u32,
     pub nextdef: u32,
     pub nundef: u32,
-    /// The output symbol table index of each global symbol, for the
-    /// indirect symbol table.
-    pub global_index: std::collections::HashMap<SymbolId, u32>,
+    /// Each symbol's index in the output symbol table (u32::MAX if
+    /// absent), for the indirect symbol table. mold keeps output
+    /// symtab indices as direct per-symbol data too, not in a map;
+    /// one flat array serves here because Mach-O name-sorts its
+    /// globals across all files, which rules out per-file bases.
+    pub output_sym_indices: Vec<u32>,
 }
 
 pub fn find_chunk<E: Arch>(ctx: &Context<E>, f: impl Fn(&ChunkKind) -> bool) -> Option<usize> {
