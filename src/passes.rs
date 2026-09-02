@@ -2260,6 +2260,7 @@ pub fn set_osec_offsets<E: Arch>(ctx: &mut Context<E>) {
     let page = E::PAGE_SIZE;
     let mut addr = 0;
     let mut fileoff = 0;
+    let mut trie_cache: Option<Vec<u8>> = None;
 
     // Chunk sizes that are independent of the layout.
     let header_size = mach_header_size(ctx);
@@ -2306,7 +2307,18 @@ pub fn set_osec_offsets<E: Arch>(ctx: &mut Context<E>) {
                 ChunkKind::ChainedFixups => ctx.chained_data.len() as u64,
                 ChunkKind::RebaseInfo => ctx.rebase_data.len() as u64,
                 ChunkKind::BindInfo => ctx.bind_data.len() as u64,
-                ChunkKind::ExportTrie => output_chunks::encode_export_trie(ctx).len() as u64,
+                // The trie is encoded once here - __LINKEDIT is
+                // sized after every address is final - and copied out
+                // verbatim later. (__unwind_info above cannot get the
+                // same treatment: its content includes personality GOT
+                // addresses, which the data segments haven't fixed yet
+                // when __TEXT is sized.)
+                ChunkKind::ExportTrie => {
+                    let data = output_chunks::encode_export_trie(ctx);
+                    let len = data.len() as u64;
+                    trie_cache = Some(data);
+                    len
+                }
                 ChunkKind::FunctionStarts => ctx.function_starts_data.len() as u64,
                 ChunkKind::DataInCode => (dice_entries(ctx).len() * 8) as u64,
                 ChunkKind::CodeSignature => {
@@ -2364,6 +2376,7 @@ pub fn set_osec_offsets<E: Arch>(ctx: &mut Context<E>) {
     }
 
     ctx.output_size = fileoff;
+    ctx.export_trie_data = trie_cache.unwrap_or_default();
 
     // Thread pointers are relative to the start of the first
     // thread-local data section.
@@ -3124,8 +3137,8 @@ fn copy_chunk<E: Arch>(ctx: &Context<E>, chunk: &Chunk, buf: &mut [u8]) {
         ChunkKind::RebaseInfo => buf[..ctx.rebase_data.len()].copy_from_slice(&ctx.rebase_data),
         ChunkKind::BindInfo => buf[..ctx.bind_data.len()].copy_from_slice(&ctx.bind_data),
         ChunkKind::ExportTrie => {
-            let data = output_chunks::encode_export_trie(ctx);
-            buf[..data.len()].copy_from_slice(&data);
+            let data = &ctx.export_trie_data;
+            buf[..data.len()].copy_from_slice(data);
         }
         ChunkKind::FunctionStarts => {
             buf[..ctx.function_starts_data.len()].copy_from_slice(&ctx.function_starts_data);

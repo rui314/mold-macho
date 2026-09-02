@@ -59,6 +59,9 @@ pub struct Context<E: Arch> {
     /// For -why_load: the symbol that made each object live, refreshed
     /// each resolution round.
     pub why_load: std::collections::HashMap<usize, &'static str>,
+    /// The export trie, encoded once when its chunk is sized (every
+    /// address is final by then) and reused when copied out.
+    pub export_trie_data: Vec<u8>,
     /// Contents of the synthesized __objc_methname section, and each
     /// selector's offset in it.
     pub objc_methname_data: Vec<u8>,
@@ -132,6 +135,7 @@ impl<E: Arch> Context<E> {
             objc_msgsend_sym: None,
             boundary_syms: Vec::new(),
             why_load: std::collections::HashMap::new(),
+            export_trie_data: Vec::new(),
             objc_methname_data: Vec::new(),
             objc_methname_offs: Vec::new(),
             rebase_data: Vec::new(),
