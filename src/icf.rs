@@ -315,6 +315,11 @@ pub fn icf_sections<E: Arch>(ctx: &mut Context<E>) {
             && isec.hdr.flags & S_ATTR_PURE_INSTRUCTIONS != 0
             && isec.hdr.flags & (S_ATTR_NO_DEAD_STRIP | S_ATTR_LIVE_SUPPORT) == 0
             && weak_only[id] == Some(true)
+            // Don't fold functions carrying debug info: it would leave
+            // their DWARF describing folded-away code. ld64 disables
+            // its deduplication pass for debug objects for the same
+            // reason (it folds freely on release links).
+            && (isec.obj == usize::MAX || !ctx.objs[isec.obj].has_debug_info)
     };
 
     let __t = std::time::Instant::now();
