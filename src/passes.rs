@@ -2569,27 +2569,36 @@ pub fn create_output_symtab<E: Arch>(ctx: &mut Context<E>) {
             base += so.blob_len;
         }
 
-        let blobs: Vec<Vec<u8>> = shard_outs
-            .par_iter()
-            .map(|so| {
-                let mut blob = Vec::with_capacity(so.blob_len as usize);
-                for &(name, _) in &so.uniq {
-                    blob.extend_from_slice(name.as_bytes());
-                    blob.push(0);
+        // Each shard writes its unique names straight into the final
+        // string table at its prefix-summed base, and stamps its
+        // entries' n_strx - the same parallel populate-at-precomputed-
+        // offsets shape as mold's populate_symtab. A name binned to
+        // one shard and an entry resolved in one bin make both write
+        // sets disjoint.
+        struct BufPtr(*mut u8);
+        unsafe impl Sync for BufPtr {}
+        struct EntPtr(*mut (NList, Option<crate::symbol::SymbolId>));
+        unsafe impl Sync for EntPtr {}
+        data.strtab.resize(base as usize, 0);
+        let buf = BufPtr(data.strtab.as_mut_ptr());
+        let buf = &buf;
+        let ents = EntPtr(data.entries.as_mut_ptr());
+        let ents = &ents;
+        shard_outs.par_iter().zip(&bases).for_each(|(so, &b)| {
+            let mut p = b as usize;
+            for &(name, _) in &so.uniq {
+                unsafe {
+                    std::ptr::copy_nonoverlapping(name.as_ptr(), buf.0.add(p), name.len());
+                    *buf.0.add(p + name.len()) = 0;
                 }
-                blob
-            })
-            .collect();
-        data.strtab.reserve(base as usize - data.strtab.len());
-        for blob in blobs {
-            data.strtab.extend_from_slice(&blob);
-        }
-
-        for (so, &b) in shard_outs.iter().zip(&bases) {
-            for &(e, idx) in &so.resolved {
-                data.entries[e as usize].0.n_strx = b + so.uniq[idx as usize].1;
+                p += name.len() + 1;
             }
-        }
+            for &(e, idx) in &so.resolved {
+                unsafe {
+                    (*ents.0.add(e as usize)).0.n_strx = b + so.uniq[idx as usize].1;
+                }
+            }
+        });
     }
 
     // Record each global symbol's index for the indirect symbol table.
