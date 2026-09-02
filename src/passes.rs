@@ -1870,10 +1870,21 @@ pub fn compute_symtab<E: Arch>(ctx: &mut Context<E>) {
     // by stab source-file entries.
     data.strtab = vec![b' ', 0, b'-', 0];
 
-    let add_string = |strtab: &mut Vec<u8>, s: &str| -> u32 {
+    // Identical names share one string-table entry, as in ld64. This
+    // matters most for debug stabs, whose N_FUN/N_GSYM entries repeat
+    // the very names the regular symbol table carries: without
+    // deduplication a Rust binary's string table doubles (mangled
+    // names average well over 100 bytes).
+    let mut string_offsets: std::collections::HashMap<Box<str>, u32> =
+        std::collections::HashMap::new();
+    let mut add_string = |strtab: &mut Vec<u8>, s: &str| -> u32 {
+        if let Some(&off) = string_offsets.get(s) {
+            return off;
+        }
         let off = strtab.len() as u32;
         strtab.extend_from_slice(s.as_bytes());
         strtab.push(0);
+        string_offsets.insert(s.into(), off);
         off
     };
 
