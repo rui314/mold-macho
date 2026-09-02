@@ -80,6 +80,13 @@ pub fn link<E: Arch>(cmdline: &[String], diag: &Diagnostics) -> Result<i32, Stri
         }
     }
 
+    // Fork so exit latency (unmapping every input) hides behind the
+    // parent's return, as in mold; MOLD_NO_FORK=1 keeps one process
+    // for debuggers and profilers.
+    if std::env::var_os("MOLD_NO_FORK").is_none() {
+        crate::subprocess::fork_child();
+    }
+
     let mut ctx: Context<E> = Context::new(args, Diagnostics::new(false));
     ctx.diag.set_suppress_warnings(ctx.args.suppress_warnings);
 
@@ -191,6 +198,7 @@ pub fn link<E: Arch>(cmdline: &[String], diag: &Diagnostics) -> Result<i32, Stri
     passes::copy_chunks(&ctx, &mut buf);
     ctx.diag.checkpoint();
     output_file::write(&ctx.diag, &ctx.args.output, &buf);
+    crate::subprocess::notify_parent();
     lap(&mut phases, "copy+write");
 
     // ld64's -print_statistics reports its phase times and memory to

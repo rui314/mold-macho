@@ -19,6 +19,7 @@ pub mod output_chunks;
 pub mod output_file;
 pub mod passes;
 pub mod relocatable;
+pub mod subprocess;
 pub mod symbol;
 pub mod tapi;
 pub mod thunks;

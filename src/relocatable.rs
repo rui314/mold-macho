@@ -644,4 +644,5 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
     buf[stroff as usize..stroff as usize + strtab.len()].copy_from_slice(&strtab);
 
     output_file::write(&ctx.diag, &ctx.args.output, &buf);
+    crate::subprocess::notify_parent();
 }
