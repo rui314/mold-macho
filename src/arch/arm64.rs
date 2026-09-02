@@ -127,9 +127,22 @@ impl Arch for Arm64 {
             opc | ((target.wrapping_sub(pc) as u32 >> 2) & 0x7_ffff) << 5 | rt
         };
 
-        for obj in &ctx.objs {
+        use rayon::prelude::*;
+        struct BufPtr(*mut u8);
+        unsafe impl Sync for BufPtr {}
+        let bufp = BufPtr(buf.as_mut_ptr());
+        let bufp = &bufp;
+        let buf_len = buf.len();
+        // Objects rewrite their own instructions only, so their hint
+        // lists process in parallel.
+        ctx.objs.par_iter().for_each(|obj| {
+            // SAFETY: every hint writes within its object's own
+            // subsections; different objects' subsections are
+            // disjoint ranges of the output.
+            let buf =
+                unsafe { std::slice::from_raw_parts_mut(bufp.0, buf_len) };
             if !obj.is_alive {
-                continue;
+                return;
             }
             'hint: for (kind, addrs) in &obj.loh {
                 // Map input addresses to (file offset, address).
@@ -241,7 +254,7 @@ impl Arch for Arm64 {
                     _ => {}
                 }
             }
-        }
+        });
     }
 
     fn classify_reloc(r_type: u8) -> crate::arch::RelocClass {

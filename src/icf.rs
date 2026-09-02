@@ -39,9 +39,12 @@ pub fn icf_sections<E: Arch>(ctx: &mut Context<E>) {
 
     // Candidates: live, executable, and defined exclusively by weak
     // symbols, so no one may rely on their addresses being distinct.
-    let mut weak_only = vec![None::<bool>; ctx.isecs.len()];
-    let mut has_syms = vec![false; ctx.isecs.len()];
-    for obj in &ctx.objs {
+    // The per-subsection weak-only AND accumulates in parallel as a
+    // three-state atomic: unset, all-weak-so-far, or poisoned by a
+    // non-weak definition (which wins under any ordering).
+    use std::sync::atomic::{AtomicU8, Ordering};
+    let weak_state: Vec<AtomicU8> = (0..ctx.isecs.len()).map(|_| AtomicU8::new(0)).collect();
+    ctx.objs.par_iter().for_each(|obj| {
         for (nlist, &sym_id) in obj.nlists.iter().zip(&obj.syms) {
             if nlist.is_stab() || nlist.n_type() != N_SECT {
                 continue;
@@ -55,11 +58,26 @@ pub fn icf_sections<E: Arch>(ctx: &mut Context<E>) {
             let Some(isec) = sym.isec else {
                 continue;
             };
-            has_syms[isec] = true;
-            let weak = nlist.n_desc & N_WEAK_DEF != 0;
-            weak_only[isec] = Some(weak_only[isec].unwrap_or(true) && weak);
+            if nlist.n_desc & N_WEAK_DEF != 0 {
+                let _ = weak_state[isec].compare_exchange(
+                    0,
+                    1,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                );
+            } else {
+                weak_state[isec].store(2, Ordering::Relaxed);
+            }
         }
-    }
+    });
+    let weak_only: Vec<Option<bool>> = weak_state
+        .into_iter()
+        .map(|s| match s.into_inner() {
+            0 => None,
+            1 => Some(true),
+            _ => Some(false),
+        })
+        .collect();
 
     let is_candidate = |ctx: &Context<E>, id: usize| -> bool {
         let isec = &ctx.isecs[id];
@@ -73,6 +91,7 @@ pub fn icf_sections<E: Arch>(ctx: &mut Context<E>) {
 
     let __t = std::time::Instant::now();
     let candidates: Vec<usize> = (0..ctx.isecs.len())
+        .into_par_iter()
         .filter(|&i| is_candidate(ctx, i))
         .collect();
     if candidates.len() < 2 {

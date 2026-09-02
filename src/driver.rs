@@ -167,9 +167,18 @@ pub fn link<E: Arch>(cmdline: &[String], diag: &Diagnostics) -> Result<i32, Stri
     passes::scan_objc_stubs(&mut ctx);
 
     // Decide the output layout
+    let tt = std::time::Instant::now();
     passes::create_output_sections(&mut ctx);
+    let t_sections = tt.elapsed();
+    let tt = std::time::Instant::now();
     passes::create_output_symtab(&mut ctx);
+    let t_symtab = tt.elapsed();
+    let tt = std::time::Instant::now();
     passes::set_osec_offsets(&mut ctx);
+    let t_offsets = tt.elapsed();
+    if std::env::var_os("MOLD_TIMING").is_some() {
+        eprintln!("    sections {t_sections:?} symtab {t_symtab:?} offsets {t_offsets:?}");
+    }
     passes::fix_synthetic_symbols(&mut ctx);
     passes::resolve_entry(&mut ctx);
     ctx.diag.checkpoint();

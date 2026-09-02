@@ -818,13 +818,24 @@ pub fn encode_export_trie<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
 /// This runs twice: once during layout for the section's size (function
 /// addresses are final by then, so the size is stable) and once when the
 /// output is written, with every referenced address final.
-pub fn encode_unwind_info<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
-    let mut records = ctx.unwind_records.clone();
-    records.retain(|rec| {
-        ctx.isecs[rec.isec].is_alive && ctx.isecs[rec.isec].replacement.is_none()
-    });
+/// Encodes __unwind_info. The personality entries are image-relative
+/// pointers to GOT slots, whose addresses are not final when __TEXT
+/// (and this section's size) is computed - so they are returned as a
+/// patch list instead of written, and the copy phase fills the cells
+/// at offsets 28, 32, ... once the GOT has its address. Everything
+/// else in the encoding is final at sizing time.
+pub fn encode_unwind_info<E: Arch>(ctx: &Context<E>) -> (Vec<u8>, Vec<SymbolId>) {
+    use rayon::prelude::*;
+    let mut records: Vec<crate::input_files::UnwindRecord> = ctx
+        .unwind_records
+        .par_iter()
+        .filter(|rec| {
+            ctx.isecs[rec.isec].is_alive && ctx.isecs[rec.isec].replacement.is_none()
+        })
+        .cloned()
+        .collect();
     if records.is_empty() {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     }
 
     let base = ctx.args.pagezero_size;
@@ -857,7 +868,7 @@ pub fn encode_unwind_info<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
         }
     }
 
-    records.sort_by_key(func_addr);
+    records.par_sort_by_key(func_addr);
 
     // Merge adjacent records with identical contents.
     let mut merged: Vec<crate::input_files::UnwindRecord> = Vec::with_capacity(records.len());
@@ -913,9 +924,9 @@ pub fn encode_unwind_info<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
     push32(&mut buf, pages.len() as u32 + 1);
 
     // Personalities are image-relative pointers to the functions' GOT
-    // slots.
-    for &sym in &personalities {
-        push32(&mut buf, ctx.sym_got_addr(sym).wrapping_sub(base) as u32);
+    // slots, patched in by the copy phase (see above).
+    for &_sym in &personalities {
+        push32(&mut buf, 0);
     }
 
     // First-level pages, second-level pages and the LSDA table are
@@ -974,7 +985,7 @@ pub fn encode_unwind_info<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
     buf.extend_from_slice(&page1);
     buf.extend_from_slice(&lsda);
     buf.extend_from_slice(&page2);
-    buf
+    (buf, personalities)
 }
 
 /// Writes the re-synthesized __eh_frame section: live CIEs with their

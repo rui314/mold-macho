@@ -1354,13 +1354,18 @@ pub fn dead_strip_dylibs<E: Arch>(ctx: &mut Context<E>) {
 /// Decides which symbols need a stub or a GOT slot, from how relocations
 /// refer to them.
 pub fn scan_relocations<E: Arch>(ctx: &mut Context<E>) {
-    let mut classes = Vec::new();
-    for isec in &ctx.isecs {
-        if !isec.is_alive {
-            continue;
-        }
-        for rel in &isec.relocs {
-            if let Some(id) = ctx.reloc_target_sym(isec.obj, rel) {
+    // Classification reads only; collect it on all cores. The apply
+    // loop below stays serial so GOT and stub slots keep their
+    // deterministic first-seen order.
+    use rayon::prelude::*;
+    let ctx_ref: &Context<E> = ctx;
+    let classes: Vec<(crate::symbol::SymbolId, RelocClass)> = ctx_ref
+        .isecs
+        .par_iter()
+        .filter(|isec| isec.is_alive)
+        .flat_map_iter(|isec| {
+            isec.relocs.iter().filter_map(move |rel| {
+                let id = ctx_ref.reloc_target_sym(isec.obj, rel)?;
                 let mut class = E::classify_reloc(rel.r_type);
                 // A relaxable GOT load of a local symbol needs no
                 // slot at all; an unrelaxable one is an ordinary GOT
@@ -1370,10 +1375,10 @@ pub fn scan_relocations<E: Arch>(ctx: &mut Context<E>) {
                 {
                     class = RelocClass::Got;
                 }
-                classes.push((id, class));
-            }
-        }
-    }
+                Some((id, class))
+            })
+        })
+        .collect();
 
     for (id, class) in classes {
         let sym = &ctx.symtab[id];
@@ -2349,6 +2354,7 @@ pub fn set_osec_offsets<E: Arch>(ctx: &mut Context<E>) {
     let mut addr = 0;
     let mut fileoff = 0;
     let mut trie_cache: Option<Vec<u8>> = None;
+    let mut unwind_cache: Option<(Vec<u8>, Vec<crate::symbol::SymbolId>)> = None;
 
     // Chunk sizes that are independent of the layout.
     let header_size = mach_header_size(ctx);
@@ -2391,7 +2397,15 @@ pub fn set_osec_offsets<E: Arch>(ctx: &mut Context<E>) {
                 ChunkKind::MachHeader => header_size,
                 ChunkKind::Symtab => symtab_size,
                 ChunkKind::Strtab => strtab_size,
-                ChunkKind::UnwindInfo => output_chunks::encode_unwind_info(ctx).len() as u64,
+                // Encoded once; the personality cells the encoding
+                // cannot know yet (GOT addresses) come back as a
+                // patch list for the copy phase.
+                ChunkKind::UnwindInfo => {
+                    let (data, personalities) = output_chunks::encode_unwind_info(ctx);
+                    let len = data.len() as u64;
+                    unwind_cache = Some((data, personalities));
+                    len
+                }
                 ChunkKind::ChainedFixups => ctx.chained_data.len() as u64,
                 ChunkKind::RebaseInfo => ctx.rebase_data.len() as u64,
                 ChunkKind::BindInfo => ctx.bind_data.len() as u64,
@@ -2465,6 +2479,9 @@ pub fn set_osec_offsets<E: Arch>(ctx: &mut Context<E>) {
 
     ctx.output_size = fileoff;
     ctx.export_trie_data = trie_cache.unwrap_or_default();
+    let (unwind_data, unwind_personalities) = unwind_cache.unwrap_or_default();
+    ctx.unwind_info_data = unwind_data;
+    ctx.unwind_personalities = unwind_personalities;
 
     // Thread pointers are relative to the start of the first
     // thread-local data section.
@@ -3245,9 +3262,16 @@ fn copy_chunk<E: Arch>(ctx: &Context<E>, chunk: &Chunk, buf: &mut [u8]) {
             }
         }
         ChunkKind::UnwindInfo => {
-            let data = output_chunks::encode_unwind_info(ctx);
+            let data = &ctx.unwind_info_data;
             debug_assert_eq!(data.len() as u64, chunk.hdr.size);
-            buf[..data.len()].copy_from_slice(&data);
+            buf[..data.len()].copy_from_slice(data);
+            // Patch the personality cells now the GOT has addresses.
+            let base = ctx.args.pagezero_size;
+            for (i, &sym) in ctx.unwind_personalities.iter().enumerate() {
+                let off = 28 + i * 4;
+                let val = ctx.sym_got_addr(sym).wrapping_sub(base) as u32;
+                buf[off..off + 4].copy_from_slice(&val.to_le_bytes());
+            }
         }
         ChunkKind::EhFrame => output_chunks::copy_eh_frame(ctx, buf),
         ChunkKind::ChainedFixups => {
@@ -3336,14 +3360,14 @@ pub fn copy_chunks<E: Arch>(ctx: &Context<E>, buf: &mut [u8]) {
         consumed = off + size;
     }
 
-    slices
+    t!("par-copy", slices
         .into_par_iter()
-        .for_each(|(idx, slice)| copy_chunk(ctx, &ctx.chunks[idx], slice));
+        .for_each(|(idx, slice)| copy_chunk(ctx, &ctx.chunks[idx], slice)));
 
     if ctx.use_chained_fixups() {
-        write_fixup_chains(ctx, buf);
+        t!("write-chains", write_fixup_chains(ctx, buf));
     }
-    E::apply_optimization_hints(ctx, buf);
+    t!("loh", E::apply_optimization_hints(ctx, buf));
     output_chunks::copy_symtab(ctx, buf);
     output_chunks::copy_mach_header(ctx, buf);
 
@@ -3381,6 +3405,6 @@ pub fn copy_chunks<E: Arch>(ctx: &Context<E>, buf: &mut [u8]) {
     }
 
     if ctx.args.adhoc_codesign {
-        output_chunks::write_code_signature(ctx, buf);
+        t!("codesign", output_chunks::write_code_signature(ctx, buf));
     }
 }

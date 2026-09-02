@@ -62,6 +62,11 @@ pub struct Context<E: Arch> {
     /// The export trie, encoded once when its chunk is sized (every
     /// address is final by then) and reused when copied out.
     pub export_trie_data: Vec<u8>,
+    /// __unwind_info likewise, except its personality cells (GOT
+    /// addresses unknown when __TEXT is sized): the symbols to patch
+    /// into offsets 28, 32, ... at copy time.
+    pub unwind_info_data: Vec<u8>,
+    pub unwind_personalities: Vec<crate::symbol::SymbolId>,
     /// Contents of the synthesized __objc_methname section, and each
     /// selector's offset in it.
     pub objc_methname_data: Vec<u8>,
@@ -136,6 +141,8 @@ impl<E: Arch> Context<E> {
             boundary_syms: Vec::new(),
             why_load: std::collections::HashMap::new(),
             export_trie_data: Vec::new(),
+            unwind_info_data: Vec::new(),
+            unwind_personalities: Vec::new(),
             objc_methname_data: Vec::new(),
             objc_methname_offs: Vec::new(),
             rebase_data: Vec::new(),
