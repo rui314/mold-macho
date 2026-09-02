@@ -987,7 +987,7 @@ pub fn convert_common_symbols<E: Arch>(ctx: &mut Context<E>) {
             ..Default::default()
         }));
         ctx.isecs.push(InputSection {
-            obj: usize::MAX,
+            obj: u32::MAX,
             hdr,
             p2align: p2align as u32,
             input_addr: 0,
@@ -995,11 +995,11 @@ pub fn convert_common_symbols<E: Arch>(ctx: &mut Context<E>) {
             data: &[],
             rel_offset: 0,
             nrels: 0,
-            osec: usize::MAX,
+            osec: u32::MAX,
             output_offset: 0,
             addr: 0,
             is_alive: true,
-            replacement: None,
+            replacement: crate::input_sections::NO_REPLACEMENT,
             unwind_offset: 0,
             nunwind: 0,
         });
@@ -1033,7 +1033,7 @@ pub fn convert_init_offsets<E: Arch>(ctx: &mut Context<E>) {
         let mut relocs = ctx.isec_relocs(i).to_vec();
         relocs.sort_by_key(|r| r.offset);
         for rel in relocs {
-            let obj = ctx.isecs[i].obj;
+            let obj = ctx.isecs[i].obj as usize;
             let target = match ctx.reloc_target_sym(obj, &rel) {
                 Some(id) => {
                     let sym = &ctx.symtab[id];
@@ -1059,7 +1059,7 @@ pub fn convert_init_offsets<E: Arch>(ctx: &mut Context<E>) {
 /// dead, so nothing of theirs reaches the output.
 pub fn remove_unreachable_files<E: Arch>(ctx: &mut Context<E>) {
     for isec in &mut ctx.isecs {
-        if isec.obj != usize::MAX && !ctx.objs[isec.obj].is_alive {
+        if isec.obj != u32::MAX && !ctx.objs[isec.obj as usize].is_alive {
             isec.is_alive = false;
         }
     }
@@ -1121,7 +1121,7 @@ pub fn merge_literals<E: Arch>(ctx: &mut Context<E>) {
         .par_iter()
         .enumerate()
         .filter_map(|(i, isec)| {
-            if !isec.is_alive || isec.replacement.is_some() {
+            if !isec.is_alive || isec.replacement != crate::input_sections::NO_REPLACEMENT {
                 return None;
             }
             let ty = isec.hdr.section_type();
@@ -1162,7 +1162,7 @@ pub fn merge_literals<E: Arch>(ctx: &mut Context<E>) {
     for fold in folds {
         for (loser, winner) in fold {
             let p2align = ctx.isecs[loser as usize].p2align;
-            ctx.isecs[loser as usize].replacement = Some(winner as usize);
+            ctx.isecs[loser as usize].replacement = winner as u32;
             let w = &mut ctx.isecs[winner as usize];
             w.p2align = w.p2align.max(p2align);
         }
@@ -1357,11 +1357,11 @@ pub fn coalesce_weak_defs<E: Arch>(ctx: &mut Context<E>) {
             if loser == winner
                 || off != sym_value
                 || ctx.isecs[loser].size != ctx.isecs[winner].size
-                || ctx.isecs[loser].replacement.is_some()
+                || ctx.isecs[loser].replacement != crate::input_sections::NO_REPLACEMENT
             {
                 continue;
             }
-            ctx.isecs[loser].replacement = Some(winner);
+            ctx.isecs[loser].replacement = winner as u32;
         }
     }
 }
@@ -1554,7 +1554,7 @@ pub fn scan_relocations<E: Arch>(ctx: &mut Context<E>) {
         .filter(|isec| isec.is_alive)
         .flat_map_iter(|isec| {
             crate::input_files::isec_relocs_of(&ctx_ref.objs, isec).iter().filter_map(move |rel| {
-                let id = ctx_ref.reloc_target_sym(isec.obj, rel)?;
+                let id = ctx_ref.reloc_target_sym(isec.obj as usize, rel)?;
                 let mut class = E::classify_reloc(rel.r_type);
                 // A relaxable GOT load of a local symbol needs no
                 // slot at all; an unrelaxable one is an ordinary GOT
@@ -1835,7 +1835,7 @@ pub fn create_output_sections<E: Arch>(ctx: &mut Context<E>) {
     let mut last_hdr: *const crate::macho::MachSection = std::ptr::null();
     let mut last_chunk: usize = 0;
     for i in 0..ctx.isecs.len() {
-        if !ctx.isecs[i].is_alive || ctx.isecs[i].replacement.is_some() {
+        if !ctx.isecs[i].is_alive || ctx.isecs[i].replacement != crate::input_sections::NO_REPLACEMENT {
             continue;
         }
         let hdr_ptr = ctx.isecs[i].hdr as *const crate::macho::MachSection;
@@ -1887,7 +1887,7 @@ pub fn create_output_sections<E: Arch>(ctx: &mut Context<E>) {
             unreachable!()
         };
         isecs.push(i);
-        ctx.isecs[i].osec = chunk_idx;
+        ctx.isecs[i].osec = chunk_idx as u32;
     }
 
     // -sectalign overrides an output section's alignment, e.g. to
@@ -2152,7 +2152,7 @@ pub fn create_output_sections<E: Arch>(ctx: &mut Context<E>) {
     // FDEs of folded copies duplicate their leader's; drop them.
     {
         let isecs = &ctx.isecs;
-        ctx.fdes.retain(|fde| isecs[fde.isec].replacement.is_none());
+        ctx.fdes.retain(|fde| isecs[fde.isec].replacement == crate::input_sections::NO_REPLACEMENT);
     }
     if !ctx.fdes.is_empty() {
         for fde in &ctx.fdes {
@@ -2372,7 +2372,7 @@ pub fn create_output_symtab<E: Arch>(
                             NList {
                                 n_strx: 0,
                                 n_type: N_FUN,
-                                n_sect: ordinals[isec.osec],
+                                n_sect: ordinals[isec.osec as usize],
                                 ..Default::default()
                             },
                             Some(sym_id),
@@ -2393,7 +2393,7 @@ pub fn create_output_symtab<E: Arch>(
                             NList {
                                 n_strx: 0,
                                 n_type: if nlist.is_extern() { N_GSYM } else { N_STSYM },
-                                n_sect: ordinals[isec.osec],
+                                n_sect: ordinals[isec.osec as usize],
                                 ..Default::default()
                             },
                             Some(sym_id),
@@ -2499,7 +2499,7 @@ pub fn create_output_symtab<E: Arch>(
                     let ent = NList {
                         n_strx: 0,
                         n_type: N_SECT,
-                        n_sect: ordinals[ctx_ref.isecs[isec].osec],
+                        n_sect: ordinals[ctx_ref.isecs[isec].osec as usize],
                         n_desc: 0,
                         n_value: 0,
                     };
@@ -2564,7 +2564,7 @@ pub fn create_output_symtab<E: Arch>(
         let ent = NList {
             n_strx: 0,
             n_type: N_SECT | N_PEXT,
-            n_sect: ordinals[ctx.isecs[isec].osec],
+            n_sect: ordinals[ctx.isecs[isec].osec as usize],
             n_desc: 0,
             n_value: 0,
         };
@@ -2582,7 +2582,7 @@ pub fn create_output_symtab<E: Arch>(
         let (n_type, n_sect, mut n_desc) = match (sym.origin, sym.isec) {
             (_, Some(isec)) => (
                 N_SECT | N_EXT,
-                ordinals[ctx.isecs[ctx.resolve_isec(isec as usize)].osec],
+                ordinals[ctx.isecs[ctx.resolve_isec(isec as usize)].osec as usize],
                 0,
             ),
             (Origin::Synthetic, None) => (N_SECT | N_EXT, 1, REFERENCED_DYNAMICALLY),
@@ -2816,7 +2816,7 @@ pub fn set_osec_offsets<E: Arch>(ctx: &mut Context<E>) {
                 use rayon::prelude::*;
                 let patches: Vec<(usize, u64)> = (0..ctx.isecs.len())
                     .into_par_iter()
-                    .filter(|&i| ctx.isecs[i].replacement.is_some())
+                    .filter(|&i| ctx.isecs[i].replacement != crate::input_sections::NO_REPLACEMENT)
                     .map(|i| (i, ctx.isecs[ctx.resolve_isec(i)].addr))
                     .collect();
                 for (i, a) in patches {
@@ -3061,10 +3061,10 @@ fn build_rebase_info<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
 
     // Pointers written for UNSIGNED relocations to local targets.
     for isec in &ctx.isecs {
-        if !isec.is_alive || isec.replacement.is_some() {
+        if !isec.is_alive || isec.replacement != crate::input_sections::NO_REPLACEMENT {
             continue;
         }
-        let base = ctx.chunks[isec.osec].hdr.addr + isec.output_offset;
+        let base = ctx.chunks[isec.osec as usize].hdr.addr + isec.output_offset;
         for rel in crate::input_files::isec_relocs_of(&ctx.objs, isec) {
             if E::classify_reloc(rel.r_type) != RelocClass::Plain
                 || rel.size != 8
@@ -3076,9 +3076,9 @@ fn build_rebase_info<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
             // Pointers to thread-local data are thread-pointer-relative
             // offsets, not addresses, so they are not rebased.
             let imported = ctx
-                .reloc_target_sym(isec.obj, rel)
+                .reloc_target_sym(isec.obj as usize, rel)
                 .is_some_and(|id| ctx.symtab[id].is_imported());
-            if !imported && !ctx.reloc_target_is_tls(isec.obj, rel) {
+            if !imported && !ctx.reloc_target_is_tls(isec.obj as usize, rel) {
                 locs.push(base + rel.offset as u64);
             }
         }
@@ -3195,10 +3195,10 @@ fn build_bind_info<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
     // Pointers in data sections initialized with an imported symbol's
     // address.
     for isec in &ctx.isecs {
-        if !isec.is_alive || isec.replacement.is_some() {
+        if !isec.is_alive || isec.replacement != crate::input_sections::NO_REPLACEMENT {
             continue;
         }
-        let base = ctx.chunks[isec.osec].hdr.addr + isec.output_offset;
+        let base = ctx.chunks[isec.osec as usize].hdr.addr + isec.output_offset;
         for rel in crate::input_files::isec_relocs_of(&ctx.objs, isec) {
             if E::classify_reloc(rel.r_type) != RelocClass::Plain
                 || rel.size != 8
@@ -3207,7 +3207,7 @@ fn build_bind_info<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
             {
                 continue;
             }
-            if let Some(id) = ctx.reloc_target_sym(isec.obj, rel) {
+            if let Some(id) = ctx.reloc_target_sym(isec.obj as usize, rel) {
                 if ctx.symtab[id].is_imported() {
                     binds.push((base + rel.offset as u64, id, rel.addend));
                 }
@@ -3280,9 +3280,9 @@ fn collect_fixups<E: Arch>(ctx: &Context<E>) -> Vec<(u64, Option<crate::symbol::
     let mut fixups: Vec<(u64, Option<crate::symbol::SymbolId>, u64)> = ctx
         .isecs
         .par_iter()
-        .filter(|isec| isec.is_alive && isec.replacement.is_none())
+        .filter(|isec| isec.is_alive && isec.replacement == crate::input_sections::NO_REPLACEMENT)
         .flat_map_iter(|isec| {
-            let base = ctx.chunks[isec.osec].hdr.addr + isec.output_offset;
+            let base = ctx.chunks[isec.osec as usize].hdr.addr + isec.output_offset;
             crate::input_files::isec_relocs_of(&ctx.objs, isec).iter().filter_map(move |rel| {
                 if E::classify_reloc(rel.r_type) != RelocClass::Plain
                     || rel.size != 8
@@ -3299,17 +3299,17 @@ fn collect_fixups<E: Arch>(ctx: &Context<E>) -> Vec<(u64, Option<crate::symbol::
                     fatal!(
                         ctx,
                         "{}({},{}): unaligned base relocation",
-                        file_display(&ctx.objs[isec.obj]),
+                        file_display(&ctx.objs[isec.obj as usize]),
                         isec.hdr.segname(),
                         isec.hdr.sectname()
                     );
                 }
-                match ctx.reloc_target_sym(isec.obj, rel) {
+                match ctx.reloc_target_sym(isec.obj as usize, rel) {
                     Some(id) if ctx.symtab[id].is_imported() => {
                         Some((addr, Some(id), rel.addend as u64))
                     }
                     _ => {
-                        if !ctx.reloc_target_is_tls(isec.obj, rel) {
+                        if !ctx.reloc_target_is_tls(isec.obj as usize, rel) {
                             Some((addr, None, 0))
                         } else {
                             None
@@ -3668,7 +3668,7 @@ fn build_data_in_code<E: Arch>(ctx: &Context<E>) -> Vec<(u32, u16, u16)> {
             };
             let isec = &ctx.isecs[ctx.resolve_isec(isec as usize)];
             if isec.is_alive {
-                let fileoff = ctx.chunks[isec.osec].hdr.fileoff + isec.output_offset + off_in;
+                let fileoff = ctx.chunks[isec.osec as usize].hdr.fileoff + isec.output_offset + off_in;
                 out.push((fileoff as u32, len, kind));
             }
         }
@@ -3695,7 +3695,7 @@ fn build_function_starts<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
                 && isec.hdr.segname() == "__TEXT"
                 && isec.hdr.sectname() == "__text"
             {
-                Some(ctx.chunks[isec.osec].hdr.addr + isec.output_offset + sym.value)
+                Some(ctx.chunks[isec.osec as usize].hdr.addr + isec.output_offset + sym.value)
             } else {
                 None
             }

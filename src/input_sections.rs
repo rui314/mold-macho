@@ -43,10 +43,15 @@ pub struct Reloc {
 /// so that unreferenced pieces can be dead-stripped. `hdr` is the
 /// containing section's header; `input_addr` and `size` delimit this
 /// piece of it.
+/// Sentinel for `InputSection::replacement`: no surviving copy.
+pub const NO_REPLACEMENT: u32 = u32::MAX;
+
 #[derive(Debug)]
 pub struct InputSection {
-    /// Index of the object file this section came from.
-    pub obj: usize,
+    /// Index of the object file this section came from (u32 to keep the
+    /// struct small; `usize::MAX` becomes `u32::MAX` for a synthetic
+    /// section with no object).
+    pub obj: u32,
     /// The parent section's header. Subsections of one section share it,
     /// so it is referenced, not embedded - mold-rust keeps only a
     /// reference too. `p2align` is held inline because it is the one
@@ -64,8 +69,9 @@ pub struct InputSection {
     /// per subsection - a debug link has millions of relocations.
     pub rel_offset: u32,
     pub nrels: u32,
-    /// The output section chunk this section is appended to.
-    pub osec: usize,
+    /// The output section chunk this section is appended to (u32 index;
+    /// `u32::MAX` until assigned).
+    pub osec: u32,
     /// Offset from the start of the output section.
     pub output_offset: u64,
     /// The final output address. Layout visits one output section at a
@@ -75,11 +81,18 @@ pub struct InputSection {
     /// computed twice.
     pub addr: u64,
     pub is_alive: bool,
-    /// For a literal merged with an identical one, the surviving copy.
-    pub replacement: Option<usize>,
+    /// For a literal merged with an identical one, the surviving copy's
+    /// subsection index, or `NO_REPLACEMENT`. A u32 sentinel rather than
+    /// an `Option<usize>` (16 bytes) keeps the struct small.
+    pub replacement: u32,
     /// This subsection's compact-unwind records: a range in
     /// ctx.unwind_records, as sold keeps unwind_offset/nunwind on each
     /// subsection (records arrive grouped by function).
     pub unwind_offset: u32,
     pub nunwind: u32,
 }
+
+// InputSection is the highest-count struct in a link (millions on a
+// debug build), so it is kept compact - mold-rust's is 64 bytes; ours
+// carries a few Mach-O-specific fields more.
+const _: () = assert!(std::mem::size_of::<InputSection>() == 96);

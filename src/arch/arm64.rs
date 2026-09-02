@@ -157,7 +157,7 @@ impl Arch for Arm64 {
                     if !isec.is_alive || isec.output_offset == u64::MAX {
                         continue 'hint;
                     }
-                    let chunk = &ctx.chunks[isec.osec];
+                    let chunk = &ctx.chunks[isec.osec as usize];
                     locs.push((
                         (chunk.hdr.fileoff + isec.output_offset + off) as usize,
                         chunk.hdr.addr + isec.output_offset + off,
@@ -406,7 +406,7 @@ impl Arch for Arm64 {
         base: u64,
         buf: &mut [u8],
     ) {
-        let obj = ctx.isecs[isec_id].obj;
+        let obj = ctx.isecs[isec_id].obj as usize;
         let mut i = 0;
         while i < rels.len() {
             let r = &rels[i];
@@ -459,7 +459,7 @@ impl Arch for Arm64 {
                         } else {
                             let isec = &ctx.isecs[isec_id];
                             let thunk_addr =
-                                ctx.chunks[isec.osec].hdr.addr + r.thunk_off as u64;
+                                ctx.chunks[isec.osec as usize].hdr.addr + r.thunk_off as u64;
                             val = thunk_addr.wrapping_sub(p) as i64;
                         }
                     }

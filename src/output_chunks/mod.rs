@@ -957,7 +957,7 @@ pub fn encode_unwind_info<E: Arch>(ctx: &Context<E>) -> (Vec<u8>, Vec<SymbolId>)
         .unwind_records
         .par_iter()
         .filter(|rec| {
-            ctx.isecs[rec.isec].is_alive && ctx.isecs[rec.isec].replacement.is_none()
+            ctx.isecs[rec.isec].is_alive && ctx.isecs[rec.isec].replacement == crate::input_sections::NO_REPLACEMENT
         })
         .cloned()
         .collect();

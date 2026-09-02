@@ -132,7 +132,7 @@ fn scan_relocs_into_thunk<E: Arch>(
         .par_iter()
         .map(|&isec_id| {
             let mut out = Vec::new();
-            let obj = ctx_ref.isecs[isec_id].obj;
+            let obj = ctx_ref.isecs[isec_id].obj as usize;
             if obj == usize::MAX {
                 return out;
             }

@@ -310,7 +310,7 @@ pub fn icf_sections<E: Arch>(ctx: &mut Context<E>) {
     let is_candidate = |ctx: &Context<E>, id: usize| -> bool {
         let isec = &ctx.isecs[id];
         isec.is_alive
-            && isec.replacement.is_none()
+            && isec.replacement == crate::input_sections::NO_REPLACEMENT
             && isec.hdr.segname() == "__TEXT"
             && isec.hdr.flags & S_ATTR_PURE_INSTRUCTIONS != 0
             && isec.hdr.flags & (S_ATTR_NO_DEAD_STRIP | S_ATTR_LIVE_SUPPORT) == 0
@@ -319,7 +319,7 @@ pub fn icf_sections<E: Arch>(ctx: &mut Context<E>) {
             // their DWARF describing folded-away code. ld64 disables
             // its deduplication pass for debug objects for the same
             // reason (it folds freely on release links).
-            && (isec.obj == usize::MAX || !ctx.objs[isec.obj].has_debug_info)
+            && (isec.obj == u32::MAX || !ctx.objs[isec.obj as usize].has_debug_info)
     };
 
     let __t = std::time::Instant::now();
@@ -376,7 +376,7 @@ pub fn icf_sections<E: Arch>(ctx: &mut Context<E>) {
             h.update(&rel.offset.to_ne_bytes());
             h.update(&rel.r_type.to_ne_bytes());
             h.update(&[rel.size, rel.is_pcrel as u8, rel.is_subtracted as u8]);
-            let (edge, addend) = edge_of(ctx, isec.obj, rel.target, rel.addend);
+            let (edge, addend) = edge_of(ctx, isec.obj as usize, rel.target, rel.addend);
             h.update(&addend.to_ne_bytes());
             // A candidate edge contributes nothing to the base; the
             // rounds fold in the target's evolving digest.
@@ -432,7 +432,7 @@ pub fn icf_sections<E: Arch>(ctx: &mut Context<E>) {
     let counts: Vec<u32> = candidates
         .par_iter()
         .map(|&id| {
-            let obj = ctx.isecs[id].obj;
+            let obj = ctx.isecs[id].obj as usize;
             ctx.isec_relocs(id)
                 .iter()
                 .filter(|rel| {
@@ -457,7 +457,7 @@ pub fn icf_sections<E: Arch>(ctx: &mut Context<E>) {
             let isec = &ctx.isecs[id];
             let mut i = edge_indices[vertex] as usize;
             for rel in ctx.isec_relocs(id) {
-                if let Edge::Candidate(c) = edge_of(ctx, isec.obj, rel.target, rel.addend).0 {
+                if let Edge::Candidate(c) = edge_of(ctx, isec.obj as usize, rel.target, rel.addend).0 {
                     // SAFETY: this vertex alone owns its prefix-sum range.
                     unsafe { *out.0.add(i) = c as u32 };
                     i += 1;
@@ -538,8 +538,8 @@ pub fn icf_sections<E: Arch>(ctx: &mut Context<E>) {
                         && r.r_type == s.r_type
                         && r.size == s.size
                         && r.is_pcrel == s.is_pcrel
-                        && edge_of(ctx, x.obj, r.target, r.addend)
-                            == edge_of(ctx, y.obj, s.target, s.addend)
+                        && edge_of(ctx, x.obj as usize, r.target, r.addend)
+                            == edge_of(ctx, y.obj as usize, s.target, s.addend)
                 })
         };
         for (i, &l) in leaders.iter().enumerate() {
@@ -555,7 +555,7 @@ pub fn icf_sections<E: Arch>(ctx: &mut Context<E>) {
         if l != i {
             let member = candidates[i];
             let leader = candidates[l];
-            ctx.isecs[member].replacement = Some(leader);
+            ctx.isecs[member].replacement = leader as u32;
             let a = ctx.isecs[member].p2align;
             ctx.isecs[leader].p2align = ctx.isecs[leader].p2align.max(a);
         }

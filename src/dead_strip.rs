@@ -116,7 +116,7 @@ pub fn dead_strip<E: Arch>(ctx: &mut Context<E>) {
         for rel in ctx.isec_relocs(id) {
             match rel.target {
                 RelocTarget::Sym(idx) => {
-                    let sym = &ctx.symtab[ctx.objs[ctx.isecs[id].obj].syms[idx as usize]];
+                    let sym = &ctx.symtab[ctx.objs[ctx.isecs[id].obj as usize].syms[idx as usize]];
                     if let Some(isec) = sym.isec.map(|i| i as usize) {
                         out.push(isec);
                     }
@@ -178,7 +178,7 @@ pub fn dead_strip<E: Arch>(ctx: &mut Context<E>) {
                 match rel.target {
                     RelocTarget::Sym(idx) => {
                         let sym =
-                            &gc.ctx.symtab[gc.ctx.objs[gc.ctx.isecs[id].obj].syms[idx as usize]];
+                            &gc.ctx.symtab[gc.ctx.objs[gc.ctx.isecs[id].obj as usize].syms[idx as usize]];
                         if let Some(isec) = sym.isec.map(|i| i as usize) {
                             targets.push(isec);
                         }
@@ -335,10 +335,10 @@ fn print_why_live<E: Arch>(ctx: &Context<E>, pred: &[usize], live: &[bool]) {
             .copied()
             .map(String::from)
             .unwrap_or_else(|| format!("{},{}", sec.hdr.segname(), sec.hdr.sectname()));
-        if sec.obj == usize::MAX {
+        if sec.obj == u32::MAX {
             return name;
         }
-        format!("{} from {}", name, crate::passes::file_display(&ctx.objs[sec.obj]))
+        format!("{} from {}", name, crate::passes::file_display(&ctx.objs[sec.obj as usize]))
     };
 
     for sym in &ctx.symtab.syms {
@@ -352,7 +352,7 @@ fn print_why_live<E: Arch>(ctx: &Context<E>, pred: &[usize], live: &[bool]) {
         if !live[isec] {
             continue;
         }
-        println!("{} from {}", sym.name, crate::passes::file_display(&ctx.objs[ctx.isecs[isec].obj]));
+        println!("{} from {}", sym.name, crate::passes::file_display(&ctx.objs[ctx.isecs[isec].obj as usize]));
         let mut indent = 1;
         while pred[isec] != usize::MAX {
             isec = pred[isec];

@@ -210,8 +210,8 @@ impl<E: Arch> Context<E> {
 
     /// Follows literal-merge redirects to the surviving subsection.
     pub fn resolve_isec(&self, mut id: InputSectionId) -> InputSectionId {
-        while let Some(rep) = self.isecs[id].replacement {
-            id = rep;
+        while self.isecs[id].replacement != crate::input_sections::NO_REPLACEMENT {
+            id = self.isecs[id].replacement as usize;
         }
         id
     }
@@ -237,11 +237,11 @@ impl<E: Arch> Context<E> {
     /// (subsections keep only a rel_offset/nrels range, sold-style).
     pub fn isec_relocs(&self, id: InputSectionId) -> &[crate::input_sections::Reloc] {
         let isec = &self.isecs[id];
-        if isec.obj == usize::MAX {
+        if isec.obj == u32::MAX {
             return &[];
         }
         let off = isec.rel_offset as usize;
-        &self.objs[isec.obj].relocs[off..off + isec.nrels as usize]
+        &self.objs[isec.obj as usize].relocs[off..off + isec.nrels as usize]
     }
 
     /// Returns the output address of an input section. Layout stores
