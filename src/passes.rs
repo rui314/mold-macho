@@ -982,6 +982,7 @@ pub fn convert_common_symbols<E: Arch>(ctx: &mut Context<E>) {
             relocs: Vec::new(),
             osec: usize::MAX,
             output_offset: 0,
+            addr: 0,
             is_alive: true,
             replacement: None,
         });
@@ -2616,12 +2617,47 @@ pub fn create_output_symtab<E: Arch>(ctx: &mut Context<E>) {
 }
 
 /// Assigns virtual addresses and file offsets to all segments and chunks.
+/// Gives every subsection of a just-placed output section its final
+/// global address. Layout visits one output section at a time, and
+/// everything that depends on code or data addresses (the trie, the
+/// LINKEDIT streams) comes later in the file, so a single front-to-back
+/// scan computes each address exactly once.
+fn assign_isec_addrs<E: Arch>(ctx: &mut Context<E>, chunk_idx: usize) {
+    let base = ctx.chunks[chunk_idx].hdr.addr;
+    let ChunkKind::Output { isecs: members, .. } = &ctx.chunks[chunk_idx].kind else {
+        return;
+    };
+    // A subsection belongs to exactly one output section, so the
+    // parallel writes are disjoint.
+    struct SlotPtr(*mut crate::input_sections::InputSection);
+    unsafe impl Sync for SlotPtr {}
+    let ptr = SlotPtr(ctx.isecs.as_mut_ptr());
+    let ptr = &ptr;
+    use rayon::prelude::*;
+    members.par_iter().for_each(|&id| unsafe {
+        let isec = &mut *ptr.0.add(id);
+        isec.addr = base + isec.output_offset;
+    });
+}
+
 pub fn set_osec_offsets<E: Arch>(ctx: &mut Context<E>) {
     let page = E::PAGE_SIZE;
     let mut addr = 0;
     let mut fileoff = 0;
     let mut trie_cache: Option<Vec<u8>> = None;
     let mut unwind_cache: Option<(Vec<u8>, Vec<crate::symbol::SymbolId>)> = None;
+
+    // The chunk list is final once layout begins; resolve the synthetic
+    // slot sections once so per-slot address lookups are one index.
+    for (i, chunk) in ctx.chunks.iter().enumerate() {
+        match chunk.kind {
+            ChunkKind::Stubs => ctx.stubs_chunk = i,
+            ChunkKind::Got => ctx.got_chunk = i,
+            ChunkKind::ThreadPtrs => ctx.thread_ptrs_chunk = i,
+            ChunkKind::ObjcStubs => ctx.objc_stubs_chunk = i,
+            _ => {}
+        }
+    }
 
     // Chunk sizes that are independent of the layout.
     let header_size = mach_header_size(ctx);
@@ -2632,34 +2668,19 @@ pub fn set_osec_offsets<E: Arch>(ctx: &mut Context<E>) {
         // Everything the bind stream describes (the GOT, data sections)
         // is laid out by the time we reach __LINKEDIT.
         if ctx.segments[seg_idx].name == "__LINKEDIT" {
-            // Everything before __LINKEDIT has its address; snapshot
-            // symbol addresses so the builders below and the copy
-            // phase pay one array load each.
-            let __t = std::time::Instant::now();
+            // Every code and data address is final by now. Literal-merge
+            // losers borrow their surviving copy's address so lookups
+            // from here on never chase redirects.
             {
                 use rayon::prelude::*;
-                ctx.sym_vas = (0..ctx.symtab.syms.len())
+                let patches: Vec<(usize, u64)> = (0..ctx.isecs.len())
                     .into_par_iter()
-                    .map(|i| {
-                        let sym = &ctx.symtab[i];
-                        if !sym.is_defined() {
-                            return 0;
-                        }
-                        // Symbols in subsections that never joined an
-                        // output section (dead or replaced code) have
-                        // no address; the eager snapshot must skip
-                        // them where on-demand lookups never asked.
-                        if let Some(isec) = sym.isec {
-                            if ctx.isecs[ctx.resolve_isec(isec)].osec == usize::MAX {
-                                return 0;
-                            }
-                        }
-                        ctx.sym_addr_uncached(i)
-                    })
+                    .filter(|&i| ctx.isecs[i].replacement.is_some())
+                    .map(|i| (i, ctx.isecs[ctx.resolve_isec(i)].addr))
                     .collect();
-            }
-            if std::env::var_os("MOLD_TIMING").is_some() {
-                eprintln!("    sym_vas {:?}", __t.elapsed());
+                for (i, a) in patches {
+                    ctx.isecs[i].addr = a;
+                }
             }
             if ctx.use_chained_fixups() {
                 t!("chained_fixups", build_chained_fixups(ctx));
@@ -2740,6 +2761,7 @@ pub fn set_osec_offsets<E: Arch>(ctx: &mut Context<E>) {
             chunk.hdr.addr = seg_vmaddr + (cursor - seg_fileoff);
             chunk.hdr.size = size;
             cursor += size;
+            assign_isec_addrs(ctx, idx);
         }
 
         let filesize = cursor - seg_fileoff;
@@ -2756,6 +2778,7 @@ pub fn set_osec_offsets<E: Arch>(ctx: &mut Context<E>) {
             chunk.hdr.addr = vm_end;
             chunk.hdr.fileoff = 0;
             vm_end += chunk.hdr.size;
+            assign_isec_addrs(ctx, idx);
         }
 
         // __LINKEDIT's file contents end exactly at the code signature;

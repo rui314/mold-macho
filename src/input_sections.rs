@@ -59,6 +59,12 @@ pub struct InputSection {
     pub osec: usize,
     /// Offset from the start of the output section.
     pub output_offset: u64,
+    /// The final output address. Layout visits one output section at a
+    /// time and assigns its contents global addresses on the spot;
+    /// everything that depends on code or data addresses (the trie,
+    /// LINKEDIT streams) comes later in the file, so nothing is ever
+    /// computed twice.
+    pub addr: u64,
     pub is_alive: bool,
     /// For a literal merged with an identical one, the surviving copy.
     pub replacement: Option<usize>,

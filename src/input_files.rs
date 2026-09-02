@@ -347,6 +347,7 @@ pub fn stage_object<E: Arch>(
                 relocs: Vec::new(),
                 osec: usize::MAX,
                 output_offset: 0,
+                addr: 0,
                 is_alive: true,
                 replacement: None,
             });

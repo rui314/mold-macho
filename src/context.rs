@@ -11,7 +11,7 @@ use crate::error::{Diagnostics, HasDiagnostics};
 use crate::input_files::{DylibFile, ObjectFile};
 use crate::macho::{S_THREAD_LOCAL_REGULAR, S_THREAD_LOCAL_ZEROFILL};
 use crate::input_sections::{InputSection, InputSectionId, Reloc, RelocTarget};
-use crate::output_chunks::{find_chunk, Chunk, ChunkKind, OutputSegment, SymtabData};
+use crate::output_chunks::{Chunk, OutputSegment, SymtabData};
 use crate::symbol::{Origin, SymbolId, SymbolTable};
 
 pub struct Context<E: Arch> {
@@ -67,9 +67,13 @@ pub struct Context<E: Arch> {
     /// into offsets 28, 32, ... at copy time.
     pub unwind_info_data: Vec<u8>,
     pub unwind_personalities: Vec<crate::symbol::SymbolId>,
-    /// Every symbol's final address, snapshotted when layout reaches
-    /// __LINKEDIT (empty until then).
-    pub sym_vas: Vec<u64>,
+    /// Chunk indices of the synthetic slot sections, resolved once at
+    /// the start of layout so per-slot address lookups don't search
+    /// the chunk list (mold keeps direct references on Context too).
+    pub stubs_chunk: usize,
+    pub got_chunk: usize,
+    pub thread_ptrs_chunk: usize,
+    pub objc_stubs_chunk: usize,
     /// Contents of the synthesized __objc_methname section, and each
     /// selector's offset in it.
     pub objc_methname_data: Vec<u8>,
@@ -146,7 +150,10 @@ impl<E: Arch> Context<E> {
             export_trie_data: Vec::new(),
             unwind_info_data: Vec::new(),
             unwind_personalities: Vec::new(),
-            sym_vas: Vec::new(),
+            stubs_chunk: usize::MAX,
+            got_chunk: usize::MAX,
+            thread_ptrs_chunk: usize::MAX,
+            objc_stubs_chunk: usize::MAX,
             objc_methname_data: Vec::new(),
             objc_methname_offs: Vec::new(),
             rebase_data: Vec::new(),
@@ -201,25 +208,16 @@ impl<E: Arch> Context<E> {
         id
     }
 
-    /// Returns the output address of an input section.
+    /// Returns the output address of an input section. Layout stores
+    /// every subsection's final address the moment its output section
+    /// is placed (literal-merge losers borrow their survivor's), so
+    /// this is one field read.
     pub fn isec_addr(&self, id: InputSectionId) -> u64 {
-        let isec = &self.isecs[self.resolve_isec(id)];
-        self.chunks[isec.osec].hdr.addr + isec.output_offset
+        self.isecs[id].addr
     }
 
     /// Returns the output address of a symbol.
     pub fn sym_addr(&self, id: SymbolId) -> u64 {
-        // Addresses are immutable once layout reaches __LINKEDIT;
-        // cache_sym_addrs snapshots them then, turning the hot path
-        // (relocation application calls this per relocation) into one
-        // indexed load.
-        if !self.sym_vas.is_empty() {
-            return self.sym_vas[id];
-        }
-        self.sym_addr_uncached(id)
-    }
-
-    pub fn sym_addr_uncached(&self, id: SymbolId) -> u64 {
         let sym = &self.symtab[id];
         match sym.origin {
             Origin::Undef => {
@@ -229,9 +227,7 @@ impl<E: Arch> Context<E> {
             Origin::Obj(_) | Origin::Synthetic => match (sym.isec, sym.objc_stub_idx) {
                 (Some(isec), _) => self.isec_addr(isec) + sym.value,
                 (None, Some(idx)) => {
-                    let chunk =
-                        find_chunk(self, |k| matches!(k, ChunkKind::ObjcStubs)).unwrap();
-                    self.chunks[chunk].hdr.addr + idx as u64 * E::OBJC_STUB_SIZE
+                    self.chunks[self.objc_stubs_chunk].hdr.addr + idx as u64 * E::OBJC_STUB_SIZE
                 }
                 (None, None) => sym.value,
             },
@@ -247,20 +243,19 @@ impl<E: Arch> Context<E> {
 
     /// Returns the address of a symbol's __stubs entry.
     pub fn sym_stub_addr(&self, id: SymbolId) -> u64 {
-        let idx = find_chunk(self, |k| matches!(k, ChunkKind::Stubs)).unwrap();
-        self.chunks[idx].hdr.addr + self.symtab[id].stub_idx.unwrap() as u64 * E::STUB_SIZE
+        self.chunks[self.stubs_chunk].hdr.addr
+            + self.symtab[id].stub_idx.unwrap() as u64 * E::STUB_SIZE
     }
 
     /// Returns the address of a symbol's __got slot.
     pub fn sym_got_addr(&self, id: SymbolId) -> u64 {
-        let idx = find_chunk(self, |k| matches!(k, ChunkKind::Got)).unwrap();
-        self.chunks[idx].hdr.addr + self.symtab[id].got_idx.unwrap() as u64 * 8
+        self.chunks[self.got_chunk].hdr.addr + self.symtab[id].got_idx.unwrap() as u64 * 8
     }
 
     /// Returns the address of a symbol's __thread_ptrs slot.
     pub fn sym_tlv_ptr_addr(&self, id: SymbolId) -> u64 {
-        let idx = find_chunk(self, |k| matches!(k, ChunkKind::ThreadPtrs)).unwrap();
-        self.chunks[idx].hdr.addr + self.symtab[id].tlv_idx.unwrap() as u64 * 8
+        self.chunks[self.thread_ptrs_chunk].hdr.addr
+            + self.symtab[id].tlv_idx.unwrap() as u64 * 8
     }
 
     /// Returns the symbol a relocation refers to, if it refers to one.
