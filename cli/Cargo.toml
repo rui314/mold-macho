@@ -15,6 +15,7 @@ path = "tests/integration.rs"
 harness = false
 
 [dependencies]
+mimalloc = "0.1"
 mold-macho = { path = ".." }
 mold-macho-target-arm64 = { path = "../targets/arm64", optional = true }
 mold-macho-target-x86_64 = { path = "../targets/x86_64", optional = true }

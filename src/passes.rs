@@ -1451,6 +1451,19 @@ pub fn scan_relocations<E: Arch>(ctx: &mut Context<E>) {
                 {
                     class = RelocClass::Got;
                 }
+                // Plain references need no slot of any kind, and
+                // they are the overwhelming majority; dropping them
+                // here keeps the collected list (and the serial
+                // apply loop below) small. The TLV/regular mismatch
+                // check needs the TLV side only: a plain reference
+                // to a thread-local is caught because thread-locals
+                // are reached exclusively through TLV relocations,
+                // checked against the symbol below either way.
+                if class == RelocClass::Plain
+                    && !is_thread_local_sym(ctx_ref, id)
+                {
+                    return None;
+                }
                 Some((id, class))
             })
         })

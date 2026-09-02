@@ -5,6 +5,14 @@
 
 use mold_macho::error::Diagnostics;
 
+// mold uses mimalloc on every platform (the C++ tree enables it by
+// default, mold-rust sets it as the global allocator): a linker
+// allocates and frees from many threads at once, and the system
+// allocator's cross-thread synchronization shows up directly in
+// profiles.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 fn link_for_target(target: &str, cmdline: &[String], diag: &Diagnostics) -> Result<i32, String> {
     match target {
         #[cfg(feature = "arm64")]
