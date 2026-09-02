@@ -123,7 +123,13 @@ pub fn link<E: Arch>(cmdline: &[String], diag: &Diagnostics) -> Result<i32, Stri
         return Ok(0);
     }
     passes::convert_init_offsets(&mut ctx);
-    passes::merge_literals(&mut ctx);
+    {
+        let tt = std::time::Instant::now();
+        passes::merge_literals(&mut ctx);
+        if std::env::var_os("MOLD_TIMING").is_some() {
+            eprintln!("    merge_literals {:?}", tt.elapsed());
+        }
+    }
     passes::add_synthetic_symbols(&mut ctx);
     passes::convert_common_symbols(&mut ctx);
     passes::create_objc_msgsend_stubs(&mut ctx);
@@ -136,13 +142,27 @@ pub fn link<E: Arch>(cmdline: &[String], diag: &Diagnostics) -> Result<i32, Stri
     passes::dead_strip_dylibs(&mut ctx);
     ctx.diag.checkpoint();
     if ctx.args.dead_strip {
+        let tt = std::time::Instant::now();
         dead_strip::dead_strip(&mut ctx);
+        if std::env::var_os("MOLD_TIMING").is_some() {
+            eprintln!("    dead_strip {:?}", tt.elapsed());
+        }
     }
     if ctx.args.deduplicate {
+        let tt = std::time::Instant::now();
         crate::icf::icf_sections(&mut ctx);
+        if std::env::var_os("MOLD_TIMING").is_some() {
+            eprintln!("    icf {:?}", tt.elapsed());
+        }
     }
     lap(&mut phases, "passes");
-    passes::scan_relocations(&mut ctx);
+    {
+        let tt = std::time::Instant::now();
+        passes::scan_relocations(&mut ctx);
+        if std::env::var_os("MOLD_TIMING").is_some() {
+            eprintln!("    scan_relocations {:?}", tt.elapsed());
+        }
+    }
     passes::scan_unwind_personalities(&mut ctx);
     passes::scan_objc_stubs(&mut ctx);
 

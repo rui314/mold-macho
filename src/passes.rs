@@ -20,6 +20,19 @@ use crate::arch::RelocClass;
 use crate::symbol::Origin;
 use crate::util::{align_to, write_uleb};
 
+/// Times a sub-phase to stderr when MOLD_TIMING is set - the
+/// fine-grained companion to -print_statistics.
+macro_rules! t {
+    ($name:expr, $e:expr) => {{
+        let t0 = std::time::Instant::now();
+        let r = $e;
+        if std::env::var_os("MOLD_TIMING").is_some() {
+            eprintln!("    {} {:?}", $name, t0.elapsed());
+        }
+        r
+    }};
+}
+
 /// Returns the directories to search for `-l` libraries, in order. A
 /// library path that exists under a syslibroot is looked up there; the
 /// default search path is the syslibroot's /usr/lib.
@@ -161,7 +174,7 @@ fn collect_file<E: Arch>(
             });
         }
         FileType::Tapi => {
-            let idx = input_files::parse_dylib(ctx, mf);
+            let idx = t!("parse_dylib(tbd)", input_files::parse_dylib(ctx, mf));
             ctx.dylibs[idx].is_weak |= weak;
             ctx.dylibs[idx].is_reexported |= reexport;
         }
@@ -216,7 +229,7 @@ fn load_pending<E: Arch>(ctx: &mut Context<E>, pending: Vec<PendingObject>) {
     use rayon::prelude::*;
     let diag = ctx.diag.clone();
     let keep_debug = ctx.args.relocatable;
-    let staged: Vec<input_files::StagedObject> = pending
+    let staged: Vec<input_files::StagedObject> = t!("stage", pending
         .par_iter()
         .map(|p| {
             input_files::stage_object::<E>(
@@ -228,7 +241,7 @@ fn load_pending<E: Arch>(ctx: &mut Context<E>, pending: Vec<PendingObject>) {
                 keep_debug,
             )
         })
-        .collect();
+        .collect());
 
     // Intern every staged object's global names in one parallel batch
     // (mold's sharded symbol table), so the serial integration loop
@@ -247,12 +260,12 @@ fn load_pending<E: Arch>(ctx: &mut Context<E>, pending: Vec<PendingObject>) {
         }
         counts.push(batch.len() - before);
     }
-    let mut ids = ctx.symtab.gather(&batch).into_iter();
+    let mut ids = t!("gather", ctx.symtab.gather(&batch)).into_iter();
 
-    for (st, count) in staged.into_iter().zip(counts) {
+    t!("integrate", for (st, count) in staged.into_iter().zip(counts) {
         let pre: Vec<crate::symbol::SymbolId> = ids.by_ref().take(count).collect();
         input_files::integrate_object_with(ctx, st, Some(pre));
-    }
+    });
 }
 
 pub fn read_input_files<E: Arch>(ctx: &mut Context<E>) {
@@ -341,7 +354,7 @@ pub fn read_input_files<E: Arch>(ctx: &mut Context<E>) {
         }
     }
     ctx.args.inputs = inputs;
-    load_pending(ctx, queue);
+    t!("load_pending", load_pending(ctx, queue));
 }
 
 /// Acts on auto-link options (LC_LINKER_OPTION) of live objects: each
