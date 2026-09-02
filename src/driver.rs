@@ -128,6 +128,7 @@ pub fn link<E: Arch>(cmdline: &[String], diag: &Diagnostics) -> Result<i32, Stri
     passes::convert_common_symbols(&mut ctx);
     passes::create_objc_msgsend_stubs(&mut ctx);
     passes::auto_hide_weak_defs(&mut ctx);
+    passes::coalesce_weak_defs(&mut ctx);
     passes::check_undefined_symbols(&mut ctx);
     passes::print_dependencies(&ctx);
     passes::print_why_load(&ctx);

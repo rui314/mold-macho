@@ -1049,6 +1049,62 @@ pub fn auto_hide_weak_defs<E: Arch>(ctx: &mut Context<E>) {
     }
 }
 
+/// Discards the losing copies of coalesced weak definitions. Symbol
+/// resolution picks one definition per weak symbol, but the losing
+/// objects' subsections still hold the duplicate bodies - a C++-heavy
+/// link would otherwise ship every object's copy of every template
+/// instantiation as anonymous dead weight (12MB of clang's 80MB
+/// __text). Each losing subsection is redirected to the winner's, the
+/// same replacement mechanism literal merging and ICF use, so
+/// section-target relocations into a loser resolve into the winning
+/// copy. Only exact-shape losers are folded: the defining symbol must
+/// sit at the same offset in both, and the subsections must be the
+/// same size - C++ guarantees identical weak instantiations, but a
+/// mismatch means something odd, and keeping the copy is safe.
+pub fn coalesce_weak_defs<E: Arch>(ctx: &mut Context<E>) {
+    for obj_idx in 0..ctx.objs.len() {
+        if !ctx.objs[obj_idx].is_alive {
+            continue;
+        }
+        for i in 0..ctx.objs[obj_idx].nlists.len() {
+            let nlist = ctx.objs[obj_idx].nlists[i];
+            if nlist.is_stab()
+                || !nlist.is_extern()
+                || nlist.n_type() != N_SECT
+                || nlist.n_desc & N_WEAK_DEF == 0
+            {
+                continue;
+            }
+            let sym_id = ctx.objs[obj_idx].syms[i];
+            let sym = &ctx.symtab[sym_id];
+            let Origin::Obj(owner) = sym.origin else {
+                continue;
+            };
+            if owner == obj_idx {
+                continue;
+            }
+            let Some(winner) = sym.isec else { continue };
+            let winner = ctx.resolve_isec(winner);
+            let Some((loser, off)) = crate::input_files::find_subsec(
+                &ctx.isecs,
+                &ctx.objs[obj_idx].subsecs,
+                nlist.n_value,
+            ) else {
+                continue;
+            };
+            let loser = ctx.resolve_isec(loser);
+            if loser == winner
+                || off != sym.value
+                || ctx.isecs[loser].size != ctx.isecs[winner].size
+                || ctx.isecs[loser].replacement.is_some()
+            {
+                continue;
+            }
+            ctx.isecs[loser].replacement = Some(winner);
+        }
+    }
+}
+
 pub fn check_undefined_symbols<E: Arch>(ctx: &mut Context<E>) {
     // Errors name a file that wants the symbol; the map from symbol to
     // referencing object is built only once an error is certain.
