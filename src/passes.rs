@@ -2361,6 +2361,31 @@ pub fn set_osec_offsets<E: Arch>(ctx: &mut Context<E>) {
         // Everything the bind stream describes (the GOT, data sections)
         // is laid out by the time we reach __LINKEDIT.
         if ctx.segments[seg_idx].name == "__LINKEDIT" {
+            // Everything before __LINKEDIT has its address; snapshot
+            // symbol addresses so the builders below and the copy
+            // phase pay one array load each.
+            {
+                use rayon::prelude::*;
+                ctx.sym_vas = (0..ctx.symtab.syms.len())
+                    .into_par_iter()
+                    .map(|i| {
+                        let sym = &ctx.symtab[i];
+                        if !sym.is_defined() {
+                            return 0;
+                        }
+                        // Symbols in subsections that never joined an
+                        // output section (dead or replaced code) have
+                        // no address; the eager snapshot must skip
+                        // them where on-demand lookups never asked.
+                        if let Some(isec) = sym.isec {
+                            if ctx.isecs[ctx.resolve_isec(isec)].osec == usize::MAX {
+                                return 0;
+                            }
+                        }
+                        ctx.sym_addr_uncached(i)
+                    })
+                    .collect();
+            }
             if ctx.use_chained_fixups() {
                 t!("chained_fixups", build_chained_fixups(ctx));
             } else {

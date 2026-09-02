@@ -67,6 +67,9 @@ pub struct Context<E: Arch> {
     /// into offsets 28, 32, ... at copy time.
     pub unwind_info_data: Vec<u8>,
     pub unwind_personalities: Vec<crate::symbol::SymbolId>,
+    /// Every symbol's final address, snapshotted when layout reaches
+    /// __LINKEDIT (empty until then).
+    pub sym_vas: Vec<u64>,
     /// Contents of the synthesized __objc_methname section, and each
     /// selector's offset in it.
     pub objc_methname_data: Vec<u8>,
@@ -143,6 +146,7 @@ impl<E: Arch> Context<E> {
             export_trie_data: Vec::new(),
             unwind_info_data: Vec::new(),
             unwind_personalities: Vec::new(),
+            sym_vas: Vec::new(),
             objc_methname_data: Vec::new(),
             objc_methname_offs: Vec::new(),
             rebase_data: Vec::new(),
@@ -205,6 +209,17 @@ impl<E: Arch> Context<E> {
 
     /// Returns the output address of a symbol.
     pub fn sym_addr(&self, id: SymbolId) -> u64 {
+        // Addresses are immutable once layout reaches __LINKEDIT;
+        // cache_sym_addrs snapshots them then, turning the hot path
+        // (relocation application calls this per relocation) into one
+        // indexed load.
+        if !self.sym_vas.is_empty() {
+            return self.sym_vas[id];
+        }
+        self.sym_addr_uncached(id)
+    }
+
+    pub fn sym_addr_uncached(&self, id: SymbolId) -> u64 {
         let sym = &self.symtab[id];
         match sym.origin {
             Origin::Undef => {
