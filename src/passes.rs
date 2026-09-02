@@ -2151,7 +2151,10 @@ fn keep_local_symbol(name: &str) -> bool {
 /// then defined globals and undefined symbols, each sorted by name.
 /// Symbol values are filled in when the table is copied out, after
 /// addresses are assigned.
-pub fn create_output_symtab<E: Arch>(ctx: &Context<E>) -> SymtabData {
+pub fn create_output_symtab<E: Arch>(
+    ctx: &Context<E>,
+    sorted_globals: &[crate::symbol::SymbolId],
+) -> SymtabData {
     let ordinals = section_ordinals(ctx);
     let mut data = SymtabData::default();
     // Offset 1 is the empty string, offset 2 the "-" placeholder used
@@ -2378,7 +2381,6 @@ pub fn create_output_symtab<E: Arch>(ctx: &Context<E>) -> SymtabData {
     enum Class {
         No,
         Pext,
-        Global,
         Undef,
     }
     let classes: Vec<Class> = {
@@ -2398,15 +2400,6 @@ pub fn create_output_symtab<E: Arch>(ctx: &Context<E>) -> SymtabData {
                         .is_some_and(|isec| ctx.isecs[ctx.resolve_isec(isec)].is_alive)
                 {
                     return Class::Pext;
-                }
-                if sym.is_extern
-                    && !sym.is_private_extern
-                    && matches!(sym.origin, Origin::Obj(_) | Origin::Synthetic)
-                    && sym
-                        .isec
-                        .is_none_or(|isec| ctx.isecs[ctx.resolve_isec(isec)].is_alive)
-                {
-                    return Class::Global;
                 }
                 Class::No
             })
@@ -2433,17 +2426,10 @@ pub fn create_output_symtab<E: Arch>(ctx: &Context<E>) -> SymtabData {
     }
     data.nlocal = data.entries.len() as u32;
 
-    // Defined global symbols, sorted by name.
+    // Defined global symbols, sorted by name; the caller sorted them
+    // once for this table and the export trie both.
     use rayon::prelude::*;
-    let mut globals: Vec<usize> = classes
-        .par_iter()
-        .enumerate()
-        .filter(|&(_, &c)| c == Class::Global)
-        .map(|(i, _)| i)
-        .collect();
-    globals.par_sort_by_key(|&i| crate::util::name_sort_key(ctx.symtab[i].name));
-
-    for &i in &globals {
+    for &i in sorted_globals {
         let sym = &ctx.symtab[i];
         let n_strx = 0;
         names.push(sym.name);
@@ -2707,11 +2693,42 @@ pub fn set_osec_offsets<E: Arch>(ctx: &mut Context<E>) {
             }
             let use_chained = ctx.use_chained_fixups();
             let shared = &*ctx;
-            let ((symtab, dice), (streams, (starts, trie))) = rayon::join(
+            // The defined globals, sorted by name, feed both the
+            // symbol table and the export trie (identical filters);
+            // sort once and share - on a debug link this is hundreds
+            // of thousands of long mangled names.
+            // The name sort feeds only the symtab and the trie, so it
+            // runs inside their arm of the task group and the fixup
+            // streams, function starts and data-in-code build under it.
+            let sorted_globals_of = || -> Vec<crate::symbol::SymbolId> { t!("globals_sort", {
+                use rayon::prelude::*;
+                let mut v: Vec<crate::symbol::SymbolId> = (0..shared.symtab.syms.len())
+                    .into_par_iter()
+                    .filter(|&i| {
+                        let sym = &shared.symtab[i];
+                        sym.is_extern
+                            && !sym.is_private_extern
+                            && matches!(sym.origin, Origin::Obj(_) | Origin::Synthetic)
+                            && sym.isec.is_none_or(|isec| {
+                                shared.isecs[shared.resolve_isec(isec)].is_alive
+                            })
+                    })
+                    .collect();
+                v.par_sort_by_key(|&i| crate::util::name_sort_key(shared.symtab[i].name));
+                v
+            })};
+            let ((symtab, trie), (streams, (starts, dice))) = rayon::join(
                 || {
+                    let sorted_globals = sorted_globals_of();
+                    let sorted_globals = &sorted_globals;
                     rayon::join(
-                        || t!("symtab", create_output_symtab(shared)),
-                        || t!("data_in_code", build_data_in_code(shared)),
+                        || t!("symtab", create_output_symtab(shared, sorted_globals)),
+                        || {
+                            t!(
+                                "trie_encode",
+                                output_chunks::encode_export_trie(shared, sorted_globals)
+                            )
+                        },
                     )
                 },
                 || {
@@ -2733,7 +2750,15 @@ pub fn set_osec_offsets<E: Arch>(ctx: &mut Context<E>) {
                         || {
                             rayon::join(
                                 || t!("function_starts", build_function_starts(shared)),
-                                || t!("trie_encode", output_chunks::encode_export_trie(shared)),
+                                || {
+                                    t!(
+                                        "trie_encode",
+                                        output_chunks::encode_export_trie(
+                                            shared,
+                                            sorted_globals
+                                        )
+                                    )
+                                },
                             )
                         },
                     )

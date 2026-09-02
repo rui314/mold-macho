@@ -735,30 +735,21 @@ fn uleb_len(mut val: u64) -> usize {
 /// and edges labeled with NUL-terminated string fragments pointing at
 /// child nodes by ULEB128 offset within the trie. Since offsets are
 /// variable-length, sizing iterates to a fixed point.
-pub fn encode_export_trie<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
+pub fn encode_export_trie<E: Arch>(
+    ctx: &Context<E>,
+    sorted_globals: &[SymbolId],
+) -> Vec<u8> {
     use rayon::prelude::*;
     let base = ctx.args.pagezero_size;
 
-    // Collect and sort the exports, then build sub-tries per leading
-    // byte in parallel; sorted insertion makes each build linear in
-    // the names' total length, and the root just strings the
-    // sub-tries together (their order is the sorted order).
-    let mut exports: Vec<(&'static str, (u32, u64))> = (0..ctx.symtab.syms.len())
-        .into_par_iter()
-        .filter_map(|id| {
+    // The caller hands over the defined globals already sorted by
+    // name - the same list the symbol table emits - so the trie only
+    // filters the explicit export/unexport lists (order-preserving)
+    // and never sorts.
+    let exports: Vec<(&'static str, (u32, u64))> = sorted_globals
+        .par_iter()
+        .filter_map(|&id| {
             let sym = &ctx.symtab[id];
-            if !sym.is_extern
-                || sym.is_private_extern
-                || !matches!(
-                    sym.origin,
-                    crate::symbol::Origin::Obj(_) | crate::symbol::Origin::Synthetic
-                )
-                || sym
-                    .isec
-                    .is_some_and(|isec| !ctx.isecs[ctx.resolve_isec(isec)].is_alive)
-            {
-                return None;
-            }
             if let Some(exported) = &ctx.args.exported_symbols {
                 if !exported.iter().any(|pat| pat == sym.name) {
                     return None;
@@ -778,7 +769,6 @@ pub fn encode_export_trie<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
     if exports.is_empty() {
         return Vec::new();
     }
-    exports.par_sort_unstable_by_key(|&(name, _)| crate::util::name_sort_key(name));
 
     let mut root = build_trie(&exports, 0);
 
