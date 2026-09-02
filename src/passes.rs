@@ -2358,11 +2358,41 @@ pub fn create_output_symtab<E: Arch>(
                 out
             })
             .collect();
-        for plan in planned {
-            for (name, ent, sym) in plan {
-                names.push(name);
-                data.entries.push((ent, sym));
+        // Write the planned stabs into prefix-summed ranges in
+        // parallel, instead of appending object by object - mold's
+        // populate_symtab shape. Each object owns a disjoint range
+        // starting after whatever entries (e.g. AST paths) precede it.
+        let start = data.entries.len();
+        debug_assert_eq!(names.len(), start);
+        let mut bases = Vec::with_capacity(planned.len());
+        let mut total = start;
+        for plan in &planned {
+            bases.push(total);
+            total += plan.len();
+        }
+        names.reserve(total - start);
+        data.entries.reserve(total - start);
+        struct NamePtr(*mut &'static str);
+        unsafe impl Sync for NamePtr {}
+        struct EntPtr(*mut (NList, Option<crate::symbol::SymbolId>));
+        unsafe impl Sync for EntPtr {}
+        let np = NamePtr(names.as_mut_ptr());
+        let ep = EntPtr(data.entries.as_mut_ptr());
+        let (np, ep) = (&np, &ep);
+        planned.par_iter().zip(&bases).for_each(|(plan, &base)| {
+            for (k, &(name, ent, sym)) in plan.iter().enumerate() {
+                // SAFETY: [base, base+plan.len()) ranges are disjoint
+                // across objects and lie within the reserved capacity.
+                unsafe {
+                    np.0.add(base + k).write(name);
+                    ep.0.add(base + k).write((ent, sym));
+                }
             }
+        });
+        // SAFETY: every slot in start..total was written above.
+        unsafe {
+            names.set_len(total);
+            data.entries.set_len(total);
         }
     }
 
