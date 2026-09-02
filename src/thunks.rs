@@ -32,6 +32,20 @@ pub fn create_range_extension_thunks<E: Arch>(
     const MAX_THUNK: u64 = 1024 * 1024;
     let budget = E::BRANCH_RANGE / 2 - MAX_THUNK - BATCH;
 
+    // An upper bound on the section's final size: every subsection
+    // with worst-case alignment padding, plus a full thunk per batch.
+    // A forward branch's target can't land beyond this, so if the
+    // bound is within forward reach of a batch, that batch needs no
+    // entries for still-unplaced targets - which is what keeps a
+    // merely-large section (bigger than the trigger, far smaller than
+    // the branch range) from drowning in reserved-but-unused thunk
+    // entries.
+    let total_estimate: u64 = isecs
+        .iter()
+        .map(|&id| ctx.isecs[id].size + 16)
+        .sum::<u64>();
+    let total_estimate = total_estimate + (total_estimate / BATCH + 1) * MAX_THUNK;
+
     let mut thunks: Vec<output_chunks::Thunk> = Vec::new();
     let mut off: u64 = 0;
     let mut i = 0;
@@ -54,7 +68,9 @@ pub fn create_range_extension_thunks<E: Arch>(
             let monster = isecs[i];
             // Scan the monster's relocations against a thunk placed here.
             let thunk_off = align_to(off, 16);
-            let n = scan_relocs_into_thunk::<E>(ctx, &[monster], thunk_off, &mut thunks);
+            let fwd_ok = total_estimate - off <= E::BRANCH_RANGE / 2 - MAX_THUNK;
+            let n =
+                scan_relocs_into_thunk::<E>(ctx, &[monster], thunk_off, fwd_ok, &mut thunks);
             off = thunk_off + n * E::THUNK_SIZE;
             let isec = &mut ctx.isecs[monster];
             off = align_to(off, 1 << isec.hdr.p2align);
@@ -83,7 +99,8 @@ pub fn create_range_extension_thunks<E: Arch>(
 
         let thunk_off = align_to(off, 16);
         let batch: Vec<usize> = isecs[batch_start..i].to_vec();
-        let n = scan_relocs_into_thunk::<E>(ctx, &batch, thunk_off, &mut thunks);
+        let fwd_ok = total_estimate - batch_start_off <= E::BRANCH_RANGE / 2 - MAX_THUNK;
+        let n = scan_relocs_into_thunk::<E>(ctx, &batch, thunk_off, fwd_ok, &mut thunks);
         if n > 0 {
             off = thunk_off + n * E::THUNK_SIZE;
         }
@@ -98,6 +115,7 @@ fn scan_relocs_into_thunk<E: Arch>(
     ctx: &mut Context<E>,
     batch: &[usize],
     thunk_off: u64,
+    forward_reachable: bool,
     thunks: &mut Vec<output_chunks::Thunk>,
 ) -> u64 {
     let mut entry_of: std::collections::HashMap<crate::symbol::SymbolId, u64> =
@@ -123,6 +141,10 @@ fn scan_relocs_into_thunk<E: Arch>(
                     {
                         continue;
                     }
+                } else if forward_reachable {
+                    // Still unplaced, but the whole section fits
+                    // within forward reach of this batch.
+                    continue;
                 }
             }
 
