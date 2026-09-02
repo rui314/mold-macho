@@ -2194,9 +2194,11 @@ pub fn create_output_symtab<E: Arch>(
 ) -> SymtabData {
     let ordinals = section_ordinals(ctx);
     let mut data = SymtabData::default();
-    // Offset 1 is the empty string, offset 2 the "-" placeholder used
-    // by stab source-file entries.
-    data.strtab = vec![b' ', 0, b'-', 0];
+    // The string table opens with " \0-\0": offset 1 is the empty
+    // string, offset 2 the "-" placeholder for stab source-file
+    // entries. copy_symtab writes this prefix; the deduplicated
+    // strings follow it starting at offset 4.
+    const STRTAB_PREFIX: usize = 4;
 
     // Names are collected alongside the entries and the string table
     // is built afterwards in one parallel pass (below); an entry
@@ -2546,7 +2548,6 @@ pub fn create_output_symtab<E: Arch>(
         data.entries.push((ent, None));
     }
     data.nundef = undefs.len() as u32;
-
     // Build the string table and assign every entry's n_strx in one
     // parallel pass, the same sharded shape as the symbol table:
     // names bin, each shard deduplicates its bin (first appearance
@@ -2617,42 +2618,38 @@ pub fn create_output_symtab<E: Arch>(
             .collect();
 
         let mut bases = Vec::with_capacity(NS);
-        let mut base = data.strtab.len() as u32;
+        let mut base = STRTAB_PREFIX as u32;
         for so in &shard_outs {
             bases.push(base);
             base += so.blob_len;
         }
 
-        // Each shard writes its unique names straight into the final
-        // string table at its prefix-summed base, and stamps its
-        // entries' n_strx - the same parallel populate-at-precomputed-
-        // offsets shape as mold's populate_symtab. A name binned to
-        // one shard and an entry resolved in one bin make both write
-        // sets disjoint.
-        struct BufPtr(*mut u8);
-        unsafe impl Sync for BufPtr {}
+        // Stamp each entry's n_strx in parallel (a name binned to one
+        // shard and an entry resolved in one bin make the writes
+        // disjoint). The string bytes are NOT materialized here -
+        // copy_symtab writes them straight into the output file, so a
+        // debug link avoids allocating, filling and then re-copying a
+        // 150MB temporary string table.
         struct EntPtr(*mut (NList, Option<crate::symbol::SymbolId>));
         unsafe impl Sync for EntPtr {}
-        data.strtab.resize(base as usize, 0);
-        let buf = BufPtr(data.strtab.as_mut_ptr());
-        let buf = &buf;
         let ents = EntPtr(data.entries.as_mut_ptr());
         let ents = &ents;
         shard_outs.par_iter().zip(&bases).for_each(|(so, &b)| {
-            let mut p = b as usize;
-            for &(name, _) in &so.uniq {
-                unsafe {
-                    std::ptr::copy_nonoverlapping(name.as_ptr(), buf.0.add(p), name.len());
-                    *buf.0.add(p + name.len()) = 0;
-                }
-                p += name.len() + 1;
-            }
             for &(e, idx) in &so.resolved {
                 unsafe {
                     (*ents.0.add(e as usize)).0.n_strx = b + so.uniq[idx as usize].1;
                 }
             }
         });
+
+        // Collect the distinct strings with their final offsets for
+        // copy_symtab to write.
+        data.strtab_uniques = shard_outs
+            .par_iter()
+            .zip(&bases)
+            .flat_map_iter(|(so, &b)| so.uniq.iter().map(move |&(name, off)| (b + off, name)))
+            .collect();
+        data.strtab_size = align_to(base as u64, 8) as usize;
     }
 
     // Record each global symbol's index for the indirect symbol table.
@@ -2668,10 +2665,6 @@ pub fn create_output_symtab<E: Arch>(
         data.output_sym_indices[id] = data.nlocal + data.nextdef + i as u32;
     }
 
-    // Pad the string table to 8 bytes.
-    while data.strtab.len() % 8 != 0 {
-        data.strtab.push(0);
-    }
     if std::env::var_os("MOLD_TIMING").is_some() {
         eprintln!("      symtab-globals {:?}", __t.elapsed());
     }
@@ -2858,7 +2851,7 @@ pub fn set_osec_offsets<E: Arch>(ctx: &mut Context<E>) {
                 ChunkKind::Symtab => {
                     (ctx.symtab_data.entries.len() * size_of::<NList>()) as u64
                 }
-                ChunkKind::Strtab => ctx.symtab_data.strtab.len() as u64,
+                ChunkKind::Strtab => ctx.symtab_data.strtab_size as u64,
                 // Encoded once; the personality cells the encoding
                 // cannot know yet (GOT addresses) come back as a
                 // patch list for the copy phase.
@@ -3829,7 +3822,7 @@ pub fn copy_chunks<E: Arch>(ctx: &Context<E>, buf: &mut [u8]) {
         t!("write-chains", write_fixup_chains(ctx, buf));
     }
     t!("loh", E::apply_optimization_hints(ctx, buf));
-    output_chunks::copy_symtab(ctx, buf);
+    t!("copy_symtab", output_chunks::copy_symtab(ctx, buf));
     output_chunks::copy_mach_header(ctx, buf);
 
     // The UUID identifies this build: a hash of the output contents,
@@ -3841,6 +3834,7 @@ pub fn copy_chunks<E: Arch>(ctx: &Context<E>, buf: &mut [u8]) {
     })
     .map_or(buf.len(), |idx| ctx.chunks[idx].hdr.fileoff as usize);
 
+    let __uuid_t = std::time::Instant::now();
     if ctx.args.uuid {
         // A hash of hashes, as in mold: 4MiB blocks are digested on
         // all cores and the digests digested once more. Equally a
@@ -3864,6 +3858,7 @@ pub fn copy_chunks<E: Arch>(ctx: &Context<E>, buf: &mut [u8]) {
         *ctx.uuid.lock().unwrap() = uuid;
         output_chunks::copy_mach_header(ctx, buf);
     }
+    if std::env::var_os("MOLD_TIMING").is_some() { eprintln!("    uuid {:?}", __uuid_t.elapsed()); }
 
     if ctx.args.adhoc_codesign {
         t!("codesign", output_chunks::write_code_signature(ctx, buf));

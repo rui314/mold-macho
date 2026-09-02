@@ -185,7 +185,14 @@ pub fn segment_prot(name: &str) -> u32 {
 #[derive(Debug, Default)]
 pub struct SymtabData {
     pub entries: Vec<(NList, Option<SymbolId>)>,
-    pub strtab: Vec<u8>,
+    /// The string table's total size (bytes, padded to 8). The bytes
+    /// themselves are not materialized here - `strtab_uniques` lists
+    /// the deduplicated strings with their offsets, and copy_symtab
+    /// writes them straight into the output, skipping a 150MB temp Vec
+    /// and the copy that would follow it.
+    pub strtab_size: usize,
+    /// Each distinct string with its offset in the string table.
+    pub strtab_uniques: Vec<(u32, &'static str)>,
     pub nlocal: u32,
     pub nextdef: u32,
     pub nundef: u32,
@@ -656,9 +663,26 @@ pub fn copy_symtab<E: Arch>(ctx: &Context<E>, buf: &mut [u8]) {
             }
         });
 
+    // The string table is written straight into the output here - no
+    // intermediate 150MB buffer. The " \0-\0" prefix (offsets 1 and 2
+    // are the empty and "-" placeholders), then every distinct string
+    // at its offset, on all cores; each string owns a disjoint range.
     let chunk = &ctx.chunks[find_chunk(ctx, |k| matches!(k, ChunkKind::Strtab)).unwrap()];
     let off = chunk.hdr.fileoff as usize;
-    buf[off..off + ctx.symtab_data.strtab.len()].copy_from_slice(&ctx.symtab_data.strtab);
+    let strtab = &mut buf[off..off + ctx.symtab_data.strtab_size];
+    strtab[..4].copy_from_slice(b" \0-\0");
+    struct BufPtr(*mut u8);
+    unsafe impl Sync for BufPtr {}
+    let base = BufPtr(strtab.as_mut_ptr());
+    let base = &base;
+    ctx.symtab_data.strtab_uniques.par_iter().for_each(|&(o, name)| {
+        let o = o as usize;
+        // SAFETY: strings occupy disjoint [o, o+len+1) ranges within
+        // the string table; the trailing NUL is already zero in buf.
+        unsafe {
+            std::ptr::copy_nonoverlapping(name.as_ptr(), base.0.add(o), name.len());
+        }
+    });
 }
 
 /// A node of the export trie under construction.
