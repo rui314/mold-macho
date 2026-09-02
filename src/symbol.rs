@@ -250,15 +250,15 @@ impl SymbolTable {
             Old(SymbolId),
             New(u32),
         }
-        let results: Vec<(Vec<(u32, Resolved)>, Vec<&'static str>)> = self
+        let results: Vec<(Vec<(u32, Resolved)>, Vec<(&'static str, u64)>)> = self
             .shards
             .par_iter_mut()
             .zip(bins)
             .map(|(shard, bin)| {
-                let mut news: Vec<&'static str> = Vec::new();
-                // Names first seen in this batch, with their
-                // shard-local index; final ids are assigned once the
-                // shards' ranges are known.
+                // Names first seen in this batch, with their hash, so
+                // the insert pass below never re-hashes them; final ids
+                // are assigned once the shards' ranges are known.
+                let mut news: Vec<(&'static str, u64)> = Vec::new();
                 let mut newmap: ShardMap = ShardMap::default();
                 let mut out = Vec::with_capacity(bin.len());
                 for i in bin {
@@ -269,7 +269,7 @@ impl SymbolTable {
                         continue;
                     }
                     let idx = *newmap.entry(key).or_insert_with(|| {
-                        news.push(name);
+                        news.push((name, hash));
                         news.len() - 1
                     });
                     out.push((i, Resolved::New(idx as u32)));
@@ -284,35 +284,63 @@ impl SymbolTable {
             bases.push(base);
             base += news.len();
         }
-        self.syms.reserve(base - self.syms.len());
-        for (_, news) in &results {
-            for name in news {
-                self.syms.push(Symbol::new(name));
-            }
+
+        // Initialize the new symbols into their prefix-summed ranges in
+        // parallel - the same disjoint-range contract integrate uses for
+        // local symbols - so a debug link's millions of new globals are
+        // constructed on all cores, not pushed one at a time.
+        let old_len = self.syms.len();
+        let total_new = base - old_len;
+        self.syms.reserve(total_new);
+        {
+            struct SlotPtr(*mut Symbol);
+            unsafe impl Sync for SlotPtr {}
+            let ptr = SlotPtr(self.syms.as_mut_ptr());
+            let ptr = &ptr;
+            results.par_iter().zip(&bases).for_each(|((_, news), &b)| {
+                for (k, &(name, _)) in news.iter().enumerate() {
+                    // SAFETY: [b, b+news.len()) ranges are disjoint
+                    // across shards and lie within the reserved space.
+                    unsafe { ptr.0.add(b + k).write(Symbol::new(name)) };
+                }
+            });
+            // SAFETY: every slot in old_len..old_len+total_new was
+            // written exactly once above.
+            unsafe { self.syms.set_len(old_len + total_new) };
         }
-        // Insert the new names with their final ids.
+
+        // Insert the new names with their final ids, reusing the hash
+        // computed during staging (no re-hash here).
         self.shards
             .par_iter_mut()
             .zip(&results)
             .zip(&bases)
             .for_each(|((shard, (_, news)), &b)| {
-                for (k, name) in news.iter().enumerate() {
-                    let key = Key {
-                        hash: hash_key(name),
-                        key: name,
-                    };
-                    shard.insert(key, b + k);
+                for (k, &(name, hash)) in news.iter().enumerate() {
+                    shard.insert(Key { hash, key: name }, b + k);
                 }
             });
 
-        let mut ids = vec![0; batch.len()];
-        for ((out, _), &b) in results.iter().zip(&bases) {
-            for &(i, ref r) in out {
-                ids[i as usize] = match r {
-                    Resolved::Old(id) => *id,
-                    Resolved::New(k) => b + *k as usize,
-                };
-            }
+        // Scatter each batch entry's resolved id in parallel; every
+        // batch index appears in exactly one shard's output list, so
+        // the writes are disjoint.
+        let mut ids = vec![0usize; batch.len()];
+        {
+            struct IdPtr(*mut usize);
+            unsafe impl Sync for IdPtr {}
+            let ptr = IdPtr(ids.as_mut_ptr());
+            let ptr = &ptr;
+            results.par_iter().zip(&bases).for_each(|((out, _), &b)| {
+                for &(i, ref r) in out {
+                    let v = match r {
+                        Resolved::Old(id) => *id,
+                        Resolved::New(k) => b + *k as usize,
+                    };
+                    // SAFETY: each batch index i is produced by exactly
+                    // one shard, so these writes never overlap.
+                    unsafe { *ptr.0.add(i as usize) = v };
+                }
+            });
         }
         ids
     }
