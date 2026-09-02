@@ -9,10 +9,10 @@ pub type SymbolId = usize;
 pub enum Origin {
     /// Not defined by any input file (yet).
     Undef,
-    /// Defined by an object file.
-    Obj(usize),
-    /// Exported by a dylib.
-    Dylib(usize),
+    /// Defined by an object file (index; u32 to keep Symbol small).
+    Obj(u32),
+    /// Exported by a dylib (index).
+    Dylib(u32),
     /// Defined by the linker itself, e.g. `__mh_execute_header`.
     Synthetic,
 }
