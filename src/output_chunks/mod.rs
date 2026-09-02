@@ -663,38 +663,52 @@ struct TrieNode {
     offset: usize,
 }
 
-impl TrieNode {
-    /// Inserts names in sorted order: a new name can share a prefix
-    /// only with the most recently added child, so each level checks
-    /// one edge instead of scanning them all, and construction is
-    /// linear in the total name length.
-    fn insert(&mut self, name: &'static str, export: (u32, u64)) {
-        if let Some((label, child)) = self.children.last_mut() {
-            let common = name
+/// Builds the subtrie for a sorted run of names that all share their
+/// first `depth` bytes. The run splits into children by the byte at
+/// `depth`, and each child's edge label is its group's remaining
+/// common prefix (for a sorted group, the common prefix of its first
+/// and last name). Sibling subtries build in parallel, so
+/// construction parallelizes at every branching level - splitting on
+/// leading bytes alone is useless when every Mach-O symbol starts
+/// with '_'. Construction stays linear in the total name length.
+fn build_trie(names: &[(&'static str, (u32, u64))], depth: usize) -> TrieNode {
+    use rayon::prelude::*;
+    let mut node = TrieNode::default();
+    let mut rest = names;
+    if let Some(&(name, export)) = rest.first() {
+        if name.len() == depth {
+            node.export = Some(export);
+            rest = &rest[1..];
+        }
+    }
+    let mut groups: Vec<&[(&'static str, (u32, u64))]> = Vec::new();
+    while let Some(&(first, _)) = rest.first() {
+        let b = first.as_bytes()[depth];
+        let n = rest
+            .iter()
+            .take_while(|(n, _)| n.as_bytes()[depth] == b)
+            .count();
+        groups.push(&rest[..n]);
+        rest = &rest[n..];
+    }
+    let build_child = |group: &&[(&'static str, (u32, u64))]| {
+        let first = group[0].0;
+        let last = group[group.len() - 1].0;
+        let common = depth
+            + first
                 .bytes()
-                .zip(label.bytes())
+                .skip(depth)
+                .zip(last.bytes().skip(depth))
                 .take_while(|(a, b)| a == b)
                 .count();
-            if common > 0 {
-                if common < label.len() {
-                    // Split the edge: "foobar" -> "foo" + "bar".
-                    let rest = &label[common..];
-                    *label = &label[..common];
-                    let old = std::mem::take(child);
-                    child.children.push((rest, old));
-                }
-                if common == name.len() {
-                    child.export = Some(export);
-                } else {
-                    child.insert(&name[common..], export);
-                }
-                return;
-            }
-        }
-        let mut node = TrieNode::default();
-        node.export = Some(export);
-        self.children.push((name, node));
-    }
+        (&first[depth..common], build_trie(group, common))
+    };
+    node.children = if names.len() >= 1024 {
+        groups.par_iter().map(build_child).collect()
+    } else {
+        groups.iter().map(build_child).collect()
+    };
+    node
 }
 
 fn uleb_len(mut val: u64) -> usize {
@@ -755,36 +769,9 @@ pub fn encode_export_trie<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
     if exports.is_empty() {
         return Vec::new();
     }
-    exports.par_sort_unstable_by_key(|&(name, _)| name);
+    exports.par_sort_unstable_by_key(|&(name, _)| crate::util::name_sort_key(name));
 
-    let mut groups: Vec<&[(&'static str, (u32, u64))]> = Vec::new();
-    let mut rest = &exports[..];
-    while !rest.is_empty() {
-        let b = rest[0].0.as_bytes().first().copied();
-        let n = rest
-            .iter()
-            .take_while(|(name, _)| name.as_bytes().first().copied() == b)
-            .count();
-        groups.push(&rest[..n]);
-        rest = &rest[n..];
-    }
-    let subtries: Vec<TrieNode> = groups
-        .par_iter()
-        .map(|group| {
-            let mut node = TrieNode::default();
-            for &(name, export) in *group {
-                node.insert(name, export);
-            }
-            node
-        })
-        .collect();
-    let mut root = TrieNode::default();
-    for sub in subtries {
-        root.children.extend(sub.children);
-        if sub.export.is_some() {
-            root.export = sub.export;
-        }
-    }
+    let mut root = build_trie(&exports, 0);
 
     // Nodes in pre-order, as raw pointers to sidestep the borrow of the
     // recursive structure.
@@ -848,7 +835,6 @@ pub fn encode_export_trie<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
         // SAFETY: as above; each node written once.
         unsafe { (*node).offset = offs[i] as usize };
     }
-
     let mut buf = Vec::new();
     for &node in &nodes {
         // SAFETY: as above.
