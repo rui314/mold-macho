@@ -517,27 +517,32 @@ pub fn resolve_symbols<E: Arch>(ctx: &mut Context<E>) {
 /// each gets its definition directly. Relocations reference them by
 /// symbol index just like externals, so they need locations too.
 fn claim_locals<E: Arch>(ctx: &mut Context<E>) {
-    for obj_idx in 0..ctx.objs.len() {
-        for i in 0..ctx.objs[obj_idx].nlists.len() {
-            let nlist = ctx.objs[obj_idx].nlists[i];
+    use rayon::prelude::*;
+    // A local symbol belongs to exactly one object (locals get fresh
+    // slots, never interned), so the per-object claims write disjoint
+    // symbols and the objects proceed in parallel.
+    struct SlotPtr(*mut crate::symbol::Symbol);
+    unsafe impl Sync for SlotPtr {}
+    let ptr = SlotPtr(ctx.symtab.syms.as_mut_ptr());
+    let ptr = &ptr;
+    let isecs = &ctx.isecs;
+    ctx.objs.par_iter().enumerate().for_each(|(obj_idx, obj)| {
+        for (i, nlist) in obj.nlists.iter().enumerate() {
             if nlist.is_stab() || nlist.is_extern() {
                 continue;
             }
-            let sym_id = ctx.objs[obj_idx].syms[i];
+            // SAFETY: disjoint per object, as above.
+            let sym = unsafe { &mut *ptr.0.add(obj.syms[i]) };
             match nlist.n_type() {
                 N_ABS => {
-                    let sym = &mut ctx.symtab[sym_id];
                     sym.origin = Origin::Obj(obj_idx);
                     sym.isec = None;
                     sym.value = nlist.n_value;
                 }
                 N_SECT => {
-                    if let Some((isec, off)) = crate::input_files::find_subsec(
-                        &ctx.isecs,
-                        &ctx.objs[obj_idx].subsecs,
-                        nlist.n_value,
-                    ) {
-                        let sym = &mut ctx.symtab[sym_id];
+                    if let Some((isec, off)) =
+                        crate::input_files::find_subsec(isecs, &obj.subsecs, nlist.n_value)
+                    {
                         sym.origin = Origin::Obj(obj_idx);
                         sym.isec = Some(isec);
                         sym.value = off;
@@ -548,11 +553,12 @@ fn claim_locals<E: Arch>(ctx: &mut Context<E>) {
                 _ => {}
             }
         }
-    }
+    });
 }
 
 fn clear_claims<E: Arch>(ctx: &mut Context<E>) {
-    for sym in &mut ctx.symtab.syms {
+    use rayon::prelude::*;
+    ctx.symtab.syms.par_iter_mut().for_each(|sym| {
         if matches!(sym.origin, Origin::Obj(_) | Origin::Dylib(_)) || sym.is_common {
             sym.origin = Origin::Undef;
             sym.isec = None;
@@ -564,7 +570,7 @@ fn clear_claims<E: Arch>(ctx: &mut Context<E>) {
             sym.common_p2align = 0;
             sym.no_dead_strip = false;
         }
-    }
+    });
 }
 
 fn do_resolve<E: Arch>(ctx: &mut Context<E>, only_alive: bool) {
