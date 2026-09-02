@@ -874,7 +874,7 @@ pub fn convert_init_offsets<E: Arch>(ctx: &mut Context<E>) {
 
 /// Hides the subsections of archive members that resolution left
 /// dead, so nothing of theirs reaches the output.
-pub fn sweep_dead_files<E: Arch>(ctx: &mut Context<E>) {
+pub fn remove_unreachable_files<E: Arch>(ctx: &mut Context<E>) {
     for isec in &mut ctx.isecs {
         if isec.obj != usize::MAX && !ctx.objs[isec.obj].is_alive {
             isec.is_alive = false;
@@ -1280,7 +1280,7 @@ pub fn dead_strip_dylibs<E: Arch>(ctx: &mut Context<E>) {
 
 /// Decides which symbols need a stub or a GOT slot, from how relocations
 /// refer to them.
-pub fn scan_relocs<E: Arch>(ctx: &mut Context<E>) {
+pub fn scan_relocations<E: Arch>(ctx: &mut Context<E>) {
     let mut classes = Vec::new();
     for isec in &ctx.isecs {
         if !isec.is_alive {
@@ -1394,7 +1394,7 @@ fn add_got<E: Arch>(ctx: &mut Context<E>, id: crate::symbol::SymbolId) {
 }
 
 /// Defines the symbols the linker itself provides.
-pub fn create_synthetic_symbols<E: Arch>(ctx: &mut Context<E>) {
+pub fn add_synthetic_symbols<E: Arch>(ctx: &mut Context<E>) {
     if ctx.args.output_type == MH_EXECUTE {
         let id = ctx.symtab.intern("__mh_execute_header");
         let sym = &mut ctx.symtab[id];
@@ -1451,7 +1451,7 @@ pub fn create_synthetic_symbols<E: Arch>(ctx: &mut Context<E>) {
     // segment$end$__SEG) resolves to the boundary's final address, and
     // wills the named section into existence if nothing else creates
     // it. Their values can only be known after layout, so they are
-    // claimed here and patched in resolve_boundary_symbols.
+    // claimed here and patched in fix_synthetic_symbols.
     for id in 0..ctx.symtab.syms.len() {
         let sym = &ctx.symtab[id];
         if !sym.is_used || sym.is_defined() {
@@ -1481,7 +1481,7 @@ pub fn create_synthetic_symbols<E: Arch>(ctx: &mut Context<E>) {
 
 /// Fills in the boundary symbols' addresses once every chunk and
 /// segment has one.
-pub fn resolve_boundary_symbols<E: Arch>(ctx: &mut Context<E>) {
+pub fn fix_synthetic_symbols<E: Arch>(ctx: &mut Context<E>) {
     for i in 0..ctx.boundary_syms.len() {
         let (id, is_start, seg, sect) = ctx.boundary_syms[i].clone();
         let value = match &sect {
@@ -1535,7 +1535,7 @@ fn output_section_rank(segname: &str, sectname: &str) -> u32 {
 
 /// Creates output section chunks and appends each input section to its
 /// chunk, and groups chunks into segments.
-pub fn create_output_chunks<E: Arch>(ctx: &mut Context<E>) {
+pub fn create_output_sections<E: Arch>(ctx: &mut Context<E>) {
     ctx.chunks.push(Chunk::new("__TEXT", "", ChunkKind::MachHeader));
 
     // Assign each input section to an output section, creating output
@@ -1931,7 +1931,7 @@ fn keep_local_symbol(name: &str) -> bool {
 /// then defined globals and undefined symbols, each sorted by name.
 /// Symbol values are filled in when the table is copied out, after
 /// addresses are assigned.
-pub fn compute_symtab<E: Arch>(ctx: &mut Context<E>) {
+pub fn create_output_symtab<E: Arch>(ctx: &mut Context<E>) {
     let ordinals = section_ordinals(ctx);
     let mut data = std::mem::take(&mut ctx.symtab_data);
     // Offset 1 is the empty string, offset 2 the "-" placeholder used
@@ -2247,7 +2247,7 @@ pub fn compute_symtab<E: Arch>(ctx: &mut Context<E>) {
 }
 
 /// Assigns virtual addresses and file offsets to all segments and chunks.
-pub fn assign_offsets<E: Arch>(ctx: &mut Context<E>) {
+pub fn set_osec_offsets<E: Arch>(ctx: &mut Context<E>) {
     let page = E::PAGE_SIZE;
     let mut addr = 0;
     let mut fileoff = 0;

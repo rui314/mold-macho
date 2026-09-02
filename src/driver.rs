@@ -114,17 +114,17 @@ pub fn link<E: Arch>(cmdline: &[String], diag: &Diagnostics) -> Result<i32, Stri
         }
     }
     lap(&mut phases, "resolve");
-    passes::sweep_dead_files(&mut ctx);
+    passes::remove_unreachable_files(&mut ctx);
     if ctx.args.relocatable {
         passes::merge_literals(&mut ctx);
-        passes::create_output_chunks(&mut ctx);
+        passes::create_output_sections(&mut ctx);
         crate::relocatable::link(&mut ctx);
         ctx.diag.checkpoint();
         return Ok(0);
     }
     passes::convert_init_offsets(&mut ctx);
     passes::merge_literals(&mut ctx);
-    passes::create_synthetic_symbols(&mut ctx);
+    passes::add_synthetic_symbols(&mut ctx);
     passes::convert_common_symbols(&mut ctx);
     passes::create_objc_msgsend_stubs(&mut ctx);
     passes::auto_hide_weak_defs(&mut ctx);
@@ -139,18 +139,18 @@ pub fn link<E: Arch>(cmdline: &[String], diag: &Diagnostics) -> Result<i32, Stri
         dead_strip::dead_strip(&mut ctx);
     }
     if ctx.args.deduplicate {
-        crate::icf::fold_identical_code(&mut ctx);
+        crate::icf::icf_sections(&mut ctx);
     }
     lap(&mut phases, "passes");
-    passes::scan_relocs(&mut ctx);
+    passes::scan_relocations(&mut ctx);
     passes::scan_unwind_personalities(&mut ctx);
     passes::scan_objc_stubs(&mut ctx);
 
     // Decide the output layout
-    passes::create_output_chunks(&mut ctx);
-    passes::compute_symtab(&mut ctx);
-    passes::assign_offsets(&mut ctx);
-    passes::resolve_boundary_symbols(&mut ctx);
+    passes::create_output_sections(&mut ctx);
+    passes::create_output_symtab(&mut ctx);
+    passes::set_osec_offsets(&mut ctx);
+    passes::fix_synthetic_symbols(&mut ctx);
     passes::resolve_entry(&mut ctx);
     ctx.diag.checkpoint();
     crate::mapfile::print_map(&ctx);

@@ -34,7 +34,7 @@ enum Edge {
     Sym(usize),
 }
 
-pub fn fold_identical_code<E: Arch>(ctx: &mut Context<E>) {
+pub fn icf_sections<E: Arch>(ctx: &mut Context<E>) {
     use rayon::prelude::*;
 
     // Candidates: live, executable, and defined exclusively by weak
