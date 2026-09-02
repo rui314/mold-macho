@@ -1,11 +1,11 @@
 //! Input file access.
 //!
-//! Every input file is read once and kept in memory for the whole link,
-//! because sections, symbol names and relocation tables of object files
-//! are used until the output is written. Files are therefore leaked with a
-//! `'static` lifetime rather than tracked with reference counts, which
-//! keeps lifetimes out of every data structure that refers to file
-//! contents.
+//! Every input file is memory-mapped, as in mold: the kernel pages
+//! bytes in on first touch, nothing is copied up front, and pages the
+//! link never reads (debug sections of dead archive members, say)
+//! never cost anything. Mappings are leaked with a `'static` lifetime
+//! rather than tracked with reference counts, which keeps lifetimes
+//! out of every data structure that refers to file contents.
 
 use std::path::Path;
 
@@ -22,18 +22,35 @@ pub struct MappedFile {
 }
 
 impl MappedFile {
-    /// Reads a file, or returns None if it doesn't exist.
+    /// Maps a file, or returns None if it doesn't exist.
     pub fn open(diag: &Diagnostics, path: &Path) -> Option<&'static MappedFile> {
         if !path.is_file() {
             return None;
         }
-        let data = match std::fs::read(path) {
-            Ok(data) => data,
-            Err(_) => fatal!(diag, "cannot open {}: {}", path.display(), errno_string()),
+        let Ok(file) = std::fs::File::open(path) else {
+            fatal!(diag, "cannot open {}: {}", path.display(), errno_string());
+        };
+        // An empty file cannot be mapped; give it an empty slice.
+        let len = file.metadata().map(|m| m.len()).unwrap_or(0);
+        let data: &'static [u8] = if len == 0 {
+            &[]
+        } else {
+            // SAFETY: the mapping outlives every reference (it is
+            // leaked), and linkers conventionally assume inputs are
+            // not modified during the link.
+            match unsafe { memmap2::Mmap::map(&file) } {
+                Ok(map) => {
+                    let slice: &'static [u8] =
+                        unsafe { std::slice::from_raw_parts(map.as_ptr(), map.len()) };
+                    std::mem::forget(map);
+                    slice
+                }
+                Err(_) => fatal!(diag, "cannot mmap {}: {}", path.display(), errno_string()),
+            }
         };
         Some(Box::leak(Box::new(MappedFile {
             name: path.to_string_lossy().into_owned(),
-            data: Vec::leak(data),
+            data,
             parent: None,
         })))
     }

@@ -17,4 +17,5 @@ default-members = [".", "cli", "targets/*", "tests"]
 
 [dependencies]
 libc = "0.2"
+memmap2 = "0.9"
 rayon = "1.12.0"
