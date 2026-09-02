@@ -694,6 +694,9 @@ struct TrieNode {
     /// here.
     export: Option<(u32, u64)>,
     offset: usize,
+    /// Pre-order index, assigned by flatten; lets the sizing pass name
+    /// a child by index without a pointer hash map.
+    index: u32,
 }
 
 /// Builds the subtrie for a sorted run of names that all share their
@@ -799,6 +802,7 @@ pub fn encode_export_trie<E: Arch>(
     // Nodes in pre-order, as raw pointers to sidestep the borrow of the
     // recursive structure.
     fn flatten(node: &mut TrieNode, out: &mut Vec<*mut TrieNode>) {
+        node.index = out.len() as u32;
         out.push(node);
         node.children.sort_by(|a, b| a.0.cmp(&b.0));
         for (_, child) in &mut node.children {
@@ -813,30 +817,34 @@ pub fn encode_export_trie<E: Arch>(
     // fixpoint (a couple of passes: offsets only grow as their ULEBs
     // widen) runs over precomputed per-node fixed sizes and child
     // index lists, no pointer chasing.
-    let node_index: hashbrown::HashMap<*mut TrieNode, u32> = nodes
-        .iter()
-        .enumerate()
-        .map(|(i, &p)| (p, i as u32))
-        .collect();
-    let mut fixed = Vec::with_capacity(nodes.len());
-    let mut kids: Vec<Vec<u32>> = Vec::with_capacity(nodes.len());
-    for &node in &nodes {
-        // SAFETY: nodes live in `root`, which outlives this function.
-        let node = unsafe { &*node };
-        let terminal_size = match node.export {
-            Some((flags, addr)) => uleb_len(flags as u64) + uleb_len(addr),
-            None => 0,
-        };
-        let mut f = uleb_len(terminal_size as u64) + terminal_size + 1;
-        let mut k = Vec::with_capacity(node.children.len());
-        for (label, child) in &node.children {
-            f += label.len() + 1;
-            k.push(node_index[&(child as *const TrieNode as *mut TrieNode)]);
-        }
-        fixed.push(f);
-        kids.push(k);
-    }
+    // Each node's fixed size and the pre-order indices of its children.
+    // flatten stamped every node's index, so a child names itself by
+    // index with no pointer hash map, and the whole pass is a pure
+    // per-node map that runs in parallel.
+    struct NodePtr(*mut TrieNode);
+    unsafe impl Sync for NodePtr {}
+    let node_ptrs: Vec<NodePtr> = nodes.iter().map(|&p| NodePtr(p)).collect();
+    let (fixed, kids): (Vec<usize>, Vec<Vec<u32>>) = node_ptrs
+        .par_iter()
+        .map(|np| {
+            // SAFETY: nodes live in `root`, which outlives this function.
+            let node = unsafe { &*np.0 };
+            let terminal_size = match node.export {
+                Some((flags, addr)) => uleb_len(flags as u64) + uleb_len(addr),
+                None => 0,
+            };
+            let mut f = uleb_len(terminal_size as u64) + terminal_size + 1;
+            let mut k = Vec::with_capacity(node.children.len());
+            for (label, child) in &node.children {
+                f += label.len() + 1;
+                k.push(child.index);
+            }
+            (f, k)
+        })
+        .unzip();
     let mut offs = vec![0u32; nodes.len()];
+    // Total encoded size, set on every pass (the loop always runs).
+    let mut total;
     loop {
         let mut changed = false;
         let mut off = 0u32;
@@ -850,6 +858,7 @@ pub fn encode_export_trie<E: Arch>(
                 off += uleb_len(offs[c as usize] as u64) as u32;
             }
         }
+        total = off;
         if !changed {
             break;
         }
@@ -858,25 +867,67 @@ pub fn encode_export_trie<E: Arch>(
         // SAFETY: as above; each node written once.
         unsafe { (*node).offset = offs[i] as usize };
     }
-    let mut buf = Vec::new();
-    for &node in &nodes {
-        // SAFETY: as above.
-        let node = unsafe { &*node };
-        match node.export {
-            Some((flags, addr)) => {
-                let terminal_size = uleb_len(flags as u64) + uleb_len(addr);
-                crate::util::write_uleb(&mut buf, terminal_size as u64);
-                crate::util::write_uleb(&mut buf, flags as u64);
-                crate::util::write_uleb(&mut buf, addr);
+
+    // Emit every node into its final slot in parallel. Node i owns the
+    // byte range [offs[i], offs[i+1]) (the last runs to `total`), the
+    // ranges are disjoint and cover the buffer, and each node reads
+    // only its children's offsets (already final) - so all writes are
+    // independent. On a big Rust debug link the trie is tens of MB, so
+    // this is the difference between a serial and a parallel memcpy.
+    fn write_uleb_at(dst: &mut [u8], mut pos: usize, mut val: u64) -> usize {
+        let start = pos;
+        loop {
+            let mut b = (val & 0x7f) as u8;
+            val >>= 7;
+            if val != 0 {
+                b |= 0x80;
             }
-            None => buf.push(0),
+            dst[pos] = b;
+            pos += 1;
+            if val == 0 {
+                break;
+            }
         }
-        buf.push(node.children.len() as u8);
-        for (label, child) in &node.children {
-            buf.extend_from_slice(label.as_bytes());
-            buf.push(0);
-            crate::util::write_uleb(&mut buf, child.offset as u64);
-        }
+        pos - start
+    }
+    let mut buf = vec![0u8; total as usize];
+    {
+        struct BufPtr(*mut u8);
+        unsafe impl Sync for BufPtr {}
+        let bp = BufPtr(buf.as_mut_ptr());
+        let bp = &bp;
+        let n = nodes.len();
+        node_ptrs.par_iter().enumerate().for_each(|(i, np)| {
+            let node = unsafe { &*np.0 };
+            let start = offs[i] as usize;
+            let end = if i + 1 < n { offs[i + 1] as usize } else { total as usize };
+            // SAFETY: the [start, end) ranges are disjoint across nodes
+            // and lie within the allocation of length `total`.
+            let dst = unsafe { std::slice::from_raw_parts_mut(bp.0.add(start), end - start) };
+            let mut p = 0;
+            match node.export {
+                Some((flags, addr)) => {
+                    let terminal_size = uleb_len(flags as u64) + uleb_len(addr);
+                    p += write_uleb_at(dst, p, terminal_size as u64);
+                    p += write_uleb_at(dst, p, flags as u64);
+                    p += write_uleb_at(dst, p, addr);
+                }
+                None => {
+                    dst[p] = 0;
+                    p += 1;
+                }
+            }
+            dst[p] = node.children.len() as u8;
+            p += 1;
+            for (label, child) in &node.children {
+                dst[p..p + label.len()].copy_from_slice(label.as_bytes());
+                p += label.len();
+                dst[p] = 0;
+                p += 1;
+                p += write_uleb_at(dst, p, child.offset as u64);
+            }
+            debug_assert_eq!(p, end - start);
+        });
     }
     while buf.len() % 8 != 0 {
         buf.push(0);
