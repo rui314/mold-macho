@@ -3238,8 +3238,22 @@ pub fn copy_chunks<E: Arch>(ctx: &Context<E>, buf: &mut [u8]) {
     .map_or(buf.len(), |idx| ctx.chunks[idx].hdr.fileoff as usize);
 
     if ctx.args.uuid {
+        // A hash of hashes, as in mold: 4MiB blocks are digested on
+        // all cores and the digests digested once more. Equally a
+        // deterministic content hash, at memory bandwidth instead of
+        // one core's SHA throughput.
+        use rayon::prelude::*;
+        let digests: Vec<[u8; 32]> = buf[..sig_start]
+            .par_chunks(4 << 20)
+            .map(|block| {
+                let mut d = [0; 32];
+                crate::util::sha256(block, &mut d);
+                d
+            })
+            .collect();
+        let flat: Vec<u8> = digests.concat();
         let mut hash = [0; 32];
-        crate::util::sha256(&buf[..sig_start], &mut hash);
+        crate::util::sha256(&flat, &mut hash);
         let mut uuid: [u8; 16] = hash[..16].try_into().unwrap();
         uuid[6] = (uuid[6] & 0x0f) | 0x40; // version 4
         uuid[8] = (uuid[8] & 0x3f) | 0x80; // RFC 4122 variant
