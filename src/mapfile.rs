@@ -101,7 +101,7 @@ pub fn print_map<E: Arch>(ctx: &Context<E>) {
         if !ctx.isecs[isec].is_alive || sym.name.is_empty() {
             continue;
         }
-        if !sym.is_extern && (sym.name.starts_with('l') || sym.name.starts_with('L')) {
+        if !sym.is_extern() && (sym.name.starts_with('l') || sym.name.starts_with('L')) {
             continue;
         }
         syms.push((ctx.sym_addr(i), file_no[obj], sym.name, isec, sym.value));
@@ -138,7 +138,7 @@ pub fn print_map<E: Arch>(ctx: &Context<E>) {
             if ctx.isecs[isec].is_alive
                 || !ctx.objs[obj].is_alive
                 || sym.name.is_empty()
-                || (!sym.is_extern && (sym.name.starts_with('l') || sym.name.starts_with('L')))
+                || (!sym.is_extern() && (sym.name.starts_with('l') || sym.name.starts_with('L')))
             {
                 continue;
             }

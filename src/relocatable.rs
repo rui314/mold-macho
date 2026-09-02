@@ -105,7 +105,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
     let mut globals: Vec<usize> = (0..ctx.symtab.syms.len())
         .filter(|&i| {
             let sym = &ctx.symtab[i];
-            sym.is_extern
+            sym.is_extern()
                 && matches!(sym.origin, Origin::Obj(_))
                 && sym
                     .isec
@@ -117,13 +117,13 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
         let sym = &ctx.symtab[i];
         let (n_type, n_sect) = match sym.isec {
             Some(isec) => (
-                N_SECT | N_EXT | if sym.is_private_extern { N_PEXT } else { 0 },
+                N_SECT | N_EXT | if sym.is_private_extern() { N_PEXT } else { 0 },
                 ordinals[ctx.isecs[ctx.resolve_isec(isec as usize)].osec],
             ),
             None => (N_ABS | N_EXT, 0),
         };
         let mut n_desc = 0;
-        if sym.is_weak_def {
+        if sym.is_weak_def() {
             n_desc |= N_WEAK_DEF;
         }
         index_of_sym.insert(i, nlists_out.len() as u32);
@@ -141,7 +141,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
     let mut undefs: Vec<usize> = (0..ctx.symtab.syms.len())
         .filter(|&i| {
             let sym = &ctx.symtab[i];
-            sym.is_used && (!sym.is_defined() || sym.is_common)
+            sym.is_used() && (!sym.is_defined() || sym.is_common())
         })
         .collect();
     undefs.sort_by_key(|&i| ctx.symtab[i].name);
@@ -149,7 +149,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
         let sym = &ctx.symtab[i];
         let mut n_desc = 0;
         let mut n_value = 0;
-        if sym.is_common {
+        if sym.is_common() {
             n_value = sym.value;
             n_desc |= (sym.common_p2align as u16) << 8;
         }

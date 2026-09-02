@@ -613,9 +613,9 @@ pub fn copy_mach_header<E: Arch>(ctx: &Context<E>, buf: &mut [u8]) {
     // and private-extern weak definitions don't count, since no other
     // image can coalesce against them.
     if ctx.symtab.syms.iter().any(|sym| {
-        sym.is_weak_def
-            && sym.is_extern
-            && !sym.is_private_extern
+        sym.is_weak_def()
+            && sym.is_extern()
+            && !sym.is_private_extern()
             && sym.isec.map(|i| i as usize).is_some_and(|isec| ctx.isecs[isec].is_alive)
     }) {
         hdr.flags |= MH_WEAK_DEFINES;
@@ -785,7 +785,7 @@ pub fn encode_export_trie<E: Arch>(
             if ctx.args.unexported_symbols.iter().any(|pat| pat == sym.name) {
                 return None;
             }
-            let flags = if sym.is_weak_def {
+            let flags = if sym.is_weak_def() {
                 EXPORT_SYMBOL_FLAGS_WEAK_DEFINITION
             } else {
                 0

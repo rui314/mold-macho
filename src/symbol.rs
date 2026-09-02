@@ -28,28 +28,62 @@ pub struct Symbol {
     /// Offset from the start of `isec`, or the absolute value for `N_ABS`
     /// symbols.
     pub value: u64,
-    pub is_extern: bool,
-    pub is_weak_def: bool,
-    /// True if the definition is in a dylib, so references need dynamic
-    /// binding.
-    pub is_imported: bool,
-    /// True if some relocation refers to this symbol, which makes an
-    /// unresolved symbol an error.
-    pub is_used: bool,
-    /// True for a private external symbol (visibility hidden): it
-    /// resolves globally at link time but is neither exported nor kept
-    /// as an external symbol in the output.
-    pub is_private_extern: bool,
-    /// True if references to this symbol may go unresolved at load
-    /// time (a weak import).
-    pub is_weak_ref: bool,
-    /// True if the symbol must survive dead-stripping.
-    pub no_dead_strip: bool,
-    /// True for a tentative definition (a common symbol) not yet
-    /// converted to a real one; `value` holds its size.
-    pub is_common: bool,
+    /// The eight boolean attributes below, packed into one byte so the
+    /// struct stays 48 bytes - mold-rust keeps its Symbol flags in a
+    /// packed byte for the same reason (Symbol is scanned in every
+    /// resolution and layout pass, so its width dominates cache
+    /// traffic). Accessed only through the generated is_*/set_* methods.
+    flags: u8,
     pub common_p2align: u8,
 }
+
+const F_EXTERN: u8 = 1 << 0;
+const F_WEAK_DEF: u8 = 1 << 1;
+const F_IMPORTED: u8 = 1 << 2;
+const F_USED: u8 = 1 << 3;
+const F_PRIVATE_EXTERN: u8 = 1 << 4;
+const F_WEAK_REF: u8 = 1 << 5;
+const F_NO_DEAD_STRIP: u8 = 1 << 6;
+const F_COMMON: u8 = 1 << 7;
+
+macro_rules! sym_flag {
+    ($get:ident, $set:ident, $bit:expr, $doc:expr) => {
+        #[doc = $doc]
+        #[inline]
+        pub fn $get(&self) -> bool {
+            self.flags & $bit != 0
+        }
+        #[inline]
+        pub fn $set(&mut self, v: bool) {
+            if v {
+                self.flags |= $bit;
+            } else {
+                self.flags &= !$bit;
+            }
+        }
+    };
+}
+
+impl Symbol {
+    sym_flag!(is_extern, set_is_extern, F_EXTERN, "An external (global) symbol.");
+    sym_flag!(is_weak_def, set_is_weak_def, F_WEAK_DEF, "A weak definition.");
+    sym_flag!(is_imported, set_is_imported, F_IMPORTED,
+        "The definition is in a dylib, so references need dynamic binding.");
+    sym_flag!(is_used, set_is_used, F_USED,
+        "Some relocation refers to this symbol, so an unresolved symbol is an error.");
+    sym_flag!(is_private_extern, set_is_private_extern, F_PRIVATE_EXTERN,
+        "A private external symbol (visibility hidden): resolves globally at link time but is neither exported nor kept as an external symbol.");
+    sym_flag!(is_weak_ref, set_is_weak_ref, F_WEAK_REF,
+        "References may go unresolved at load time (a weak import).");
+    sym_flag!(no_dead_strip, set_no_dead_strip, F_NO_DEAD_STRIP,
+        "The symbol must survive dead-stripping.");
+    sym_flag!(is_common, set_is_common, F_COMMON,
+        "A tentative definition (common symbol) not yet converted; `value` holds its size.");
+}
+
+// Symbol is loaded in every resolution and layout scan, so its width
+// is kept minimal - matching mold-rust's 48-byte Symbol.
+const _: () = assert!(std::mem::size_of::<Symbol>() == 48);
 
 /// Sentinel for a synthetic-slot index a symbol does not have.
 pub const NO_IDX: u32 = u32::MAX;
@@ -85,14 +119,7 @@ impl Symbol {
             origin: Origin::Undef,
             isec: None,
             value: 0,
-            is_extern: false,
-            is_weak_def: false,
-            is_imported: false,
-            is_used: false,
-            is_private_extern: false,
-            is_weak_ref: false,
-            no_dead_strip: false,
-            is_common: false,
+            flags: 0,
             common_p2align: 0,
         }
     }

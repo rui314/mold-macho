@@ -422,7 +422,7 @@ impl Arch for Arm64 {
                     // via a bind record.
                     let imported = ctx
                         .reloc_target_sym(obj, r)
-                        .is_some_and(|id| ctx.symtab[id].is_imported);
+                        .is_some_and(|id| ctx.symtab[id].is_imported());
                     if imported {
                         // The slot is filled by dyld.
                     } else if ctx.reloc_target_is_tls(obj, r) {
@@ -470,7 +470,7 @@ impl Arch for Arm64 {
                 // descriptor's page and the ldr becomes an add.
                 ARM64_RELOC_TLVP_LOAD_PAGE21 => {
                     let id = ctx.reloc_target_sym(obj, r).unwrap();
-                    let target = if ctx.symtab[id].is_imported {
+                    let target = if ctx.symtab[id].is_imported() {
                         ctx.sym_tlv_ptr_addr(id)
                     } else {
                         s
@@ -480,7 +480,7 @@ impl Arch for Arm64 {
                 }
                 ARM64_RELOC_TLVP_LOAD_PAGEOFF12 => {
                     let id = ctx.reloc_target_sym(obj, r).unwrap();
-                    if ctx.symtab[id].is_imported {
+                    if ctx.symtab[id].is_imported() {
                         let t = ctx.sym_tlv_ptr_addr(id);
                         write_add_ldst(loc, t.wrapping_add_signed(a));
                     } else {
@@ -506,7 +506,7 @@ impl Arch for Arm64 {
                 // "add Xn, Xm, #pageoff".
                 ARM64_RELOC_GOT_LOAD_PAGE21 => {
                     let id = ctx.reloc_target_sym(obj, r).unwrap();
-                    let target = if ctx.symtab[id].is_imported {
+                    let target = if ctx.symtab[id].is_imported() {
                         ctx.sym_got_addr(id)
                     } else {
                         s
@@ -516,7 +516,7 @@ impl Arch for Arm64 {
                 }
                 ARM64_RELOC_GOT_LOAD_PAGEOFF12 => {
                     let id = ctx.reloc_target_sym(obj, r).unwrap();
-                    if ctx.symtab[id].is_imported {
+                    if ctx.symtab[id].is_imported() {
                         let g = ctx.sym_got_addr(id);
                         write_add_ldst(loc, g.wrapping_add_signed(a));
                     } else {

@@ -190,7 +190,7 @@ impl Arch for X86_64 {
                 && buf[r.offset as usize - 2] == 0x8b
                 && ctx
                     .reloc_target_sym(obj, r)
-                    .is_some_and(|id| !ctx.symtab[id].is_imported)
+                    .is_some_and(|id| !ctx.symtab[id].is_imported())
             {
                 buf[r.offset as usize - 2] = 0x8d;
                 relaxed_got_load = true;
@@ -205,7 +205,7 @@ impl Arch for X86_64 {
                     debug_assert!(r.size == 8);
                     let imported = ctx
                         .reloc_target_sym(obj, r)
-                        .is_some_and(|id| ctx.symtab[id].is_imported);
+                        .is_some_and(|id| ctx.symtab[id].is_imported());
                     if imported {
                         // The slot is filled by dyld.
                     } else if ctx.reloc_target_is_tls(obj, r) {

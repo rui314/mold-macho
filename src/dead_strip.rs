@@ -85,10 +85,10 @@ pub fn dead_strip<E: Arch>(ctx: &mut Context<E>) {
             .syms
             .par_iter()
             .filter_map(|sym| {
-                let is_root = sym.no_dead_strip
+                let is_root = sym.no_dead_strip()
                     || (ctx.args.output_type != MH_EXECUTE
-                        && sym.is_extern
-                        && !sym.is_private_extern
+                        && sym.is_extern()
+                        && !sym.is_private_extern()
                         && sym.is_defined());
                 if is_root { sym.isec.map(|i| i as usize) } else { None }
             })
@@ -322,7 +322,7 @@ fn print_why_live<E: Arch>(ctx: &Context<E>, pred: &[usize], live: &[bool]) {
                 e.insert(sym.name);
             }
             std::collections::hash_map::Entry::Occupied(mut e) => {
-                if sym.is_extern && sym.value == 0 {
+                if sym.is_extern() && sym.value == 0 {
                     e.insert(sym.name);
                 }
             }

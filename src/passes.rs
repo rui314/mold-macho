@@ -489,16 +489,16 @@ pub fn claim_new_dylibs<E: Arch>(ctx: &mut Context<E>, first: usize) {
     (0..ctx.symtab.syms.len()).into_par_iter().for_each(|i| {
         // SAFETY: each index is written only by its own iteration.
         let sym = unsafe { &mut *syms_ptr.0.add(i) };
-        if !sym.is_used || sym.is_defined() {
+        if !sym.is_used() || sym.is_defined() {
             return;
         }
         for (dylib_idx, dylib) in dylibs.iter().enumerate().skip(first) {
             if dylib.exports.contains(sym.name) {
                 sym.origin = Origin::Dylib((dylib_idx) as u32);
-                sym.is_imported = true;
-                sym.is_extern = true;
+                sym.set_is_imported(true);
+                sym.set_is_extern(true);
                 sym.isec = None;
-                sym.is_common = false;
+                sym.set_is_common(false);
                 break;
             }
         }
@@ -553,8 +553,7 @@ fn claim_locals<E: Arch>(ctx: &mut Context<E>) {
                         sym.origin = Origin::Obj((obj_idx) as u32);
                         sym.isec = Some(isec as u32);
                         sym.value = off;
-                        sym.no_dead_strip =
-                            nlist.n_desc & (N_NO_DEAD_STRIP | REFERENCED_DYNAMICALLY) != 0;
+                        sym.set_no_dead_strip(nlist.n_desc & (N_NO_DEAD_STRIP | REFERENCED_DYNAMICALLY) != 0);
                     }
                 }
                 _ => {}
@@ -566,16 +565,16 @@ fn claim_locals<E: Arch>(ctx: &mut Context<E>) {
 fn clear_claims<E: Arch>(ctx: &mut Context<E>) {
     use rayon::prelude::*;
     ctx.symtab.syms.par_iter_mut().for_each(|sym| {
-        if matches!(sym.origin, Origin::Obj(_) | Origin::Dylib(_)) || sym.is_common {
+        if matches!(sym.origin, Origin::Obj(_) | Origin::Dylib(_)) || sym.is_common() {
             sym.origin = Origin::Undef;
             sym.isec = None;
             sym.value = 0;
-            sym.is_weak_def = false;
-            sym.is_private_extern = false;
-            sym.is_imported = false;
-            sym.is_common = false;
+            sym.set_is_weak_def(false);
+            sym.set_is_private_extern(false);
+            sym.set_is_imported(false);
+            sym.set_is_common(false);
             sym.common_p2align = 0;
-            sym.no_dead_strip = false;
+            sym.set_no_dead_strip(false);
         }
     });
 }
@@ -678,13 +677,12 @@ fn do_resolve<E: Arch>(ctx: &mut Context<E>, only_alive: bool) {
                 // SAFETY: this object holds the unique minimum rank
                 // for sym_id, so no other thread writes this slot.
                 let sym = unsafe { &mut *syms_ptr.0.add(sym_id) };
-                sym.is_extern = true;
-                sym.is_imported = false;
-                sym.is_common = false;
-                sym.is_weak_def = nlist.n_desc & N_WEAK_DEF != 0;
-                sym.is_private_extern = nlist.n_type & N_PEXT != 0 || obj.hidden;
-                sym.no_dead_strip =
-                    nlist.n_desc & (N_NO_DEAD_STRIP | REFERENCED_DYNAMICALLY) != 0;
+                sym.set_is_extern(true);
+                sym.set_is_imported(false);
+                sym.set_is_common(false);
+                sym.set_is_weak_def(nlist.n_desc & N_WEAK_DEF != 0);
+                sym.set_is_private_extern(nlist.n_type & N_PEXT != 0 || obj.hidden);
+                sym.set_no_dead_strip(nlist.n_desc & (N_NO_DEAD_STRIP | REFERENCED_DYNAMICALLY) != 0);
 
                 match nlist.n_type() {
                     N_ABS => {
@@ -714,7 +712,7 @@ fn do_resolve<E: Arch>(ctx: &mut Context<E>, only_alive: bool) {
                     N_UNDF => {
                         // A common symbol takes a tentative claim.
                         sym.origin = Origin::Undef;
-                        sym.is_common = true;
+                        sym.set_is_common(true);
                         sym.value = nlist.n_value;
                         sym.common_p2align = ((nlist.n_desc >> 8) & 0xf) as u8;
                     }
@@ -772,7 +770,7 @@ fn do_resolve<E: Arch>(ctx: &mut Context<E>, only_alive: bool) {
     // Record weak references seen this round.
     for (i, w) in weak_ref.iter().enumerate() {
         if w.load(Ordering::Relaxed) {
-            ctx.symtab.syms[i].is_weak_ref = true;
+            ctx.symtab.syms[i].set_is_weak_ref(true);
         }
     }
 
@@ -781,7 +779,7 @@ fn do_resolve<E: Arch>(ctx: &mut Context<E>, only_alive: bool) {
     // relocatable link keeps every reference undefined instead.
     if ctx.args.relocatable {
         for (i, u) in used.iter().enumerate() {
-            ctx.symtab.syms[i].is_used = u.load(Ordering::Relaxed);
+            ctx.symtab.syms[i].set_is_used(u.load(Ordering::Relaxed));
         }
         return;
     }
@@ -792,7 +790,7 @@ fn do_resolve<E: Arch>(ctx: &mut Context<E>, only_alive: bool) {
         }
         // SAFETY: each index is written only by its own iteration.
         let sym = unsafe { &mut *syms_ptr.0.add(i) };
-        if sym.is_common || best[i].load(Ordering::Relaxed) >> 32 < 2 {
+        if sym.is_common() || best[i].load(Ordering::Relaxed) >> 32 < 2 {
             return;
         }
         for (dylib_idx, dylib) in dylibs.iter().enumerate() {
@@ -800,10 +798,10 @@ fn do_resolve<E: Arch>(ctx: &mut Context<E>, only_alive: bool) {
             if rank < best[i].load(Ordering::Relaxed) && dylib.exports.contains(sym.name) {
                 best[i].store(rank, Ordering::Relaxed);
                 sym.origin = Origin::Dylib((dylib_idx) as u32);
-                sym.is_imported = true;
-                sym.is_extern = true;
+                sym.set_is_imported(true);
+                sym.set_is_extern(true);
                 sym.isec = None;
-                sym.is_common = false;
+                sym.set_is_common(false);
                 break;
             }
         }
@@ -811,7 +809,7 @@ fn do_resolve<E: Arch>(ctx: &mut Context<E>, only_alive: bool) {
 
     // Record the final usage set for downstream passes.
     for (i, u) in used.iter().enumerate() {
-        ctx.symtab.syms[i].is_used = u.load(Ordering::Relaxed);
+        ctx.symtab.syms[i].set_is_used(u.load(Ordering::Relaxed));
     }
 }
 
@@ -894,10 +892,10 @@ pub fn run_lto<E: Arch>(ctx: &mut Context<E>) -> bool {
         let mut preserve: Vec<std::ffi::CString> = Vec::new();
         for sym in &ctx.symtab.syms {
             if let Origin::Obj(idx) = sym.origin {
-                if ctx.objs[idx as usize].lto_module.is_some() && sym.is_extern {
+                if ctx.objs[idx as usize].lto_module.is_some() && sym.is_extern() {
                     if executable
                         && !ctx.args.export_dynamic
-                        && !sym.is_used
+                        && !sym.is_used()
                         && sym.name != ctx.args.entry
                         && !ctx.args.forced_undefined.iter().any(|n| n == sym.name)
                         && !ctx
@@ -952,7 +950,7 @@ pub fn run_lto<E: Arch>(ctx: &mut Context<E>) -> bool {
                 sym.origin = Origin::Undef;
                 sym.isec = None;
                 sym.value = 0;
-                sym.is_weak_def = false;
+                sym.set_is_weak_def(false);
             }
         }
         let obj = &mut ctx.objs[obj_idx];
@@ -975,7 +973,7 @@ pub fn run_lto<E: Arch>(ctx: &mut Context<E>) -> bool {
 pub fn convert_common_symbols<E: Arch>(ctx: &mut Context<E>) {
     for i in 0..ctx.symtab.syms.len() {
         let sym = &ctx.symtab[i];
-        if !sym.is_common || sym.is_defined() {
+        if !sym.is_common() || sym.is_defined() {
             continue;
         }
         let (size, p2align) = (sym.value, sym.common_p2align);
@@ -1010,8 +1008,8 @@ pub fn convert_common_symbols<E: Arch>(ctx: &mut Context<E>) {
         sym.origin = Origin::Synthetic;
         sym.isec = Some((ctx.isecs.len() - 1) as u32);
         sym.value = 0;
-        sym.is_common = false;
-        sym.is_extern = true;
+        sym.set_is_common(false);
+        sym.set_is_extern(true);
     }
 }
 
@@ -1179,7 +1177,7 @@ pub fn merge_literals<E: Arch>(ctx: &mut Context<E>) {
 pub fn create_objc_msgsend_stubs<E: Arch>(ctx: &mut Context<E>) {
     for i in 0..ctx.symtab.syms.len() {
         let sym = &ctx.symtab[i];
-        if sym.is_defined() || !sym.is_used {
+        if sym.is_defined() || !sym.is_used() {
             continue;
         }
         let Some(sel) = sym.name.strip_prefix("_objc_msgSend$") else {
@@ -1194,7 +1192,7 @@ pub fn create_objc_msgsend_stubs<E: Arch>(ctx: &mut Context<E>) {
 
     if !ctx.objc_stubs.is_empty() {
         let id = ctx.symtab.intern("_objc_msgSend");
-        ctx.symtab[id].is_used = true;
+        ctx.symtab[id].set_is_used(true);
         ctx.objc_msgsend_sym = Some(id);
 
         // The stub machinery itself references _objc_msgSend; resolve
@@ -1207,8 +1205,8 @@ pub fn create_objc_msgsend_stubs<E: Arch>(ctx: &mut Context<E>) {
             {
                 let sym = &mut ctx.symtab[id];
                 sym.origin = Origin::Dylib((dylib) as u32);
-                sym.is_imported = true;
-                sym.is_extern = true;
+                sym.set_is_imported(true);
+                sym.set_is_extern(true);
             }
         }
 
@@ -1280,12 +1278,12 @@ pub fn auto_hide_weak_defs<E: Arch>(ctx: &mut Context<E>) {
             let f = f.load(Ordering::Relaxed);
             if f & SEEN != 0
                 && f & NOT_HIDABLE == 0
-                && sym.is_weak_def
-                && sym.is_extern
+                && sym.is_weak_def()
+                && sym.is_extern()
                 && matches!(sym.origin, Origin::Obj(_))
                 && !exported.is_some_and(|list| list.iter().any(|n| n == sym.name))
             {
-                sym.is_private_extern = true;
+                sym.set_is_private_extern(true);
             }
         });
 }
@@ -1395,7 +1393,7 @@ pub fn check_undefined_symbols<E: Arch>(ctx: &mut Context<E>) {
 
     for i in 0..ctx.symtab.syms.len() {
         let sym = &ctx.symtab[i];
-        if sym.is_used && !sym.is_defined() {
+        if sym.is_used() && !sym.is_defined() {
             let allowed = ctx.args.undefined_dynamic_lookup
                 || ctx.args.allowed_undefined.iter().any(|n| n == sym.name);
             if allowed {
@@ -1404,8 +1402,8 @@ pub fn check_undefined_symbols<E: Arch>(ctx: &mut Context<E>) {
                 }
                 let sym = &mut ctx.symtab[i];
                 sym.origin = Origin::Dylib((usize::MAX) as u32);
-                sym.is_imported = true;
-                sym.is_extern = true;
+                sym.set_is_imported(true);
+                sym.set_is_extern(true);
             } else {
                 let file = who_wants(ctx, i);
                 error!(ctx, "undefined symbol: {}: {}", file, ctx.symtab[i].name);
@@ -1601,17 +1599,17 @@ pub fn scan_relocations<E: Arch>(ctx: &mut Context<E>) {
         }
 
         match class {
-            RelocClass::Branch if sym.is_imported => {
+            RelocClass::Branch if sym.is_imported() => {
                 // A stub jumps through the symbol's GOT slot.
                 add_stub(ctx, id);
                 add_got(ctx, id);
             }
             RelocClass::Got => add_got(ctx, id),
-            RelocClass::GotLoad if sym.is_imported => add_got(ctx, id),
+            RelocClass::GotLoad if sym.is_imported() => add_got(ctx, id),
             // A TLV load of a local thread-local relaxes to the
             // descriptor's address; only imported ones need a
             // __thread_ptrs slot for dyld to fill.
-            RelocClass::Tlv if sym.is_imported => add_thread_ptr(ctx, id),
+            RelocClass::Tlv if sym.is_imported() => add_thread_ptr(ctx, id),
             _ => {}
         }
     }
@@ -1683,7 +1681,7 @@ pub fn add_synthetic_symbols<E: Arch>(ctx: &mut Context<E>) {
         if !sym.is_defined() {
             sym.origin = Origin::Synthetic;
             sym.value = ctx.args.pagezero_size;
-            sym.is_extern = true;
+            sym.set_is_extern(true);
         }
     }
 
@@ -1695,7 +1693,7 @@ pub fn add_synthetic_symbols<E: Arch>(ctx: &mut Context<E>) {
     if !sym.is_defined() {
         sym.origin = Origin::Synthetic;
         sym.value = ctx.args.pagezero_size;
-        sym.is_extern = false;
+        sym.set_is_extern(false);
     }
 
     // -alias gives an existing definition a second name: the new
@@ -1723,7 +1721,7 @@ pub fn add_synthetic_symbols<E: Arch>(ctx: &mut Context<E>) {
             sym.origin = origin;
             sym.isec = isec;
             sym.value = value;
-            sym.is_extern = true;
+            sym.set_is_extern(true);
         }
     }
     ctx.args.aliases = aliases;
@@ -1736,7 +1734,7 @@ pub fn add_synthetic_symbols<E: Arch>(ctx: &mut Context<E>) {
     // claimed here and patched in fix_synthetic_symbols.
     for id in 0..ctx.symtab.syms.len() {
         let sym = &ctx.symtab[id];
-        if !sym.is_used || sym.is_defined() {
+        if !sym.is_used() || sym.is_defined() {
             continue;
         }
         let parsed = if let Some(rest) = sym.name.strip_prefix("section$") {
@@ -1756,7 +1754,7 @@ pub fn add_synthetic_symbols<E: Arch>(ctx: &mut Context<E>) {
         };
         let sym = &mut ctx.symtab[id];
         sym.origin = Origin::Synthetic;
-        sym.is_extern = false;
+        sym.set_is_extern(false);
         ctx.boundary_syms.push((id, is_start, seg, sect));
     }
 }
@@ -2540,8 +2538,8 @@ pub fn create_output_symtab<E: Arch>(
                 if matches!(sym.origin, Origin::Dylib(_)) {
                     return Class::Undef;
                 }
-                if sym.is_extern
-                    && sym.is_private_extern
+                if sym.is_extern()
+                    && sym.is_private_extern()
                     && matches!(sym.origin, Origin::Obj(_))
                     && sym
                         .isec
@@ -2590,7 +2588,7 @@ pub fn create_output_symtab<E: Arch>(
             (Origin::Synthetic, None) => (N_SECT | N_EXT, 1, REFERENCED_DYNAMICALLY),
             (_, None) => (N_ABS | N_EXT, 0, 0),
         };
-        if sym.is_weak_def {
+        if sym.is_weak_def() {
             n_desc |= N_WEAK_DEF;
         }
         let ent = NList {
@@ -2624,7 +2622,7 @@ pub fn create_output_symtab<E: Arch>(
         // A flat-namespace import records the DYNAMIC_LOOKUP ordinal.
         let ordinal = (ctx.bind_ordinal(dylib) as u8) as u16;
         let mut n_desc = ordinal << 8;
-        if sym.is_weak_ref {
+        if sym.is_weak_ref() {
             n_desc |= N_WEAK_REF;
         }
         let ent = NList {
@@ -2745,7 +2743,7 @@ pub fn create_output_symtab<E: Arch>(
     data.output_sym_indices = vec![u32::MAX; ctx.symtab.syms.len()];
     for (i, (_, sym)) in data.entries.iter().enumerate() {
         if let Some(id) = sym {
-            if ctx.symtab[*id].is_extern {
+            if ctx.symtab[*id].is_extern() {
                 data.output_sym_indices[*id] = i as u32;
             }
         }
@@ -2850,8 +2848,8 @@ pub fn set_osec_offsets<E: Arch>(ctx: &mut Context<E>) {
                     .into_par_iter()
                     .filter(|&i| {
                         let sym = &shared.symtab[i];
-                        sym.is_extern
-                            && !sym.is_private_extern
+                        sym.is_extern()
+                            && !sym.is_private_extern()
                             && matches!(sym.origin, Origin::Obj(_) | Origin::Synthetic)
                             && sym.isec.map(|i| i as usize).is_none_or(|isec| {
                                 shared.isecs[shared.resolve_isec(isec)].is_alive
@@ -3079,7 +3077,7 @@ fn build_rebase_info<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
             // offsets, not addresses, so they are not rebased.
             let imported = ctx
                 .reloc_target_sym(isec.obj, rel)
-                .is_some_and(|id| ctx.symtab[id].is_imported);
+                .is_some_and(|id| ctx.symtab[id].is_imported());
             if !imported && !ctx.reloc_target_is_tls(isec.obj, rel) {
                 locs.push(base + rel.offset as u64);
             }
@@ -3091,7 +3089,7 @@ fn build_rebase_info<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
     if let Some(idx) = output_chunks::find_chunk(ctx, |k| matches!(k, ChunkKind::ThreadPtrs)) {
         let addr = ctx.chunks[idx].hdr.addr;
         for (i, &id) in ctx.thread_ptr_syms.iter().enumerate() {
-            if !ctx.symtab[id].is_imported {
+            if !ctx.symtab[id].is_imported() {
                 locs.push(addr + i as u64 * 8);
             }
         }
@@ -3109,7 +3107,7 @@ fn build_rebase_info<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
     if let Some(idx) = output_chunks::find_chunk(ctx, |k| matches!(k, ChunkKind::Got)) {
         let got_addr = ctx.chunks[idx].hdr.addr;
         for (i, &id) in ctx.got_syms.iter().enumerate() {
-            if !ctx.symtab[id].is_imported {
+            if !ctx.symtab[id].is_imported() {
                 locs.push(got_addr + i as u64 * 8);
             }
         }
@@ -3177,7 +3175,7 @@ fn build_bind_info<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
     if let Some(idx) = output_chunks::find_chunk(ctx, |k| matches!(k, ChunkKind::Got)) {
         let got_addr = ctx.chunks[idx].hdr.addr;
         for (i, &id) in ctx.got_syms.iter().enumerate() {
-            if ctx.symtab[id].is_imported {
+            if ctx.symtab[id].is_imported() {
                 binds.push((got_addr + i as u64 * 8, id, 0));
             }
         }
@@ -3188,7 +3186,7 @@ fn build_bind_info<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
     if let Some(idx) = output_chunks::find_chunk(ctx, |k| matches!(k, ChunkKind::ThreadPtrs)) {
         let addr = ctx.chunks[idx].hdr.addr;
         for (i, &id) in ctx.thread_ptr_syms.iter().enumerate() {
-            if ctx.symtab[id].is_imported {
+            if ctx.symtab[id].is_imported() {
                 binds.push((addr + i as u64 * 8, id, 0));
             }
         }
@@ -3210,7 +3208,7 @@ fn build_bind_info<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
                 continue;
             }
             if let Some(id) = ctx.reloc_target_sym(isec.obj, rel) {
-                if ctx.symtab[id].is_imported {
+                if ctx.symtab[id].is_imported() {
                     binds.push((base + rel.offset as u64, id, rel.addend));
                 }
             }
@@ -3238,7 +3236,7 @@ fn build_bind_info<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
             buf.push(BIND_OPCODE_SET_DYLIB_ORDINAL_ULEB);
             write_uleb(&mut buf, ordinal as u64);
         }
-        let flags = if sym.is_weak_ref {
+        let flags = if sym.is_weak_ref() {
             BIND_SYMBOL_FLAGS_WEAK_IMPORT
         } else {
             0
@@ -3307,7 +3305,7 @@ fn collect_fixups<E: Arch>(ctx: &Context<E>) -> Vec<(u64, Option<crate::symbol::
                     );
                 }
                 match ctx.reloc_target_sym(isec.obj, rel) {
-                    Some(id) if ctx.symtab[id].is_imported => {
+                    Some(id) if ctx.symtab[id].is_imported() => {
                         Some((addr, Some(id), rel.addend as u64))
                     }
                     _ => {
@@ -3325,14 +3323,14 @@ fn collect_fixups<E: Arch>(ctx: &Context<E>) -> Vec<(u64, Option<crate::symbol::
     if let Some(idx) = output_chunks::find_chunk(ctx, |k| matches!(k, ChunkKind::Got)) {
         let addr = ctx.chunks[idx].hdr.addr;
         for (i, &id) in ctx.got_syms.iter().enumerate() {
-            let sym = Some(id).filter(|&id| ctx.symtab[id].is_imported);
+            let sym = Some(id).filter(|&id| ctx.symtab[id].is_imported());
             fixups.push((addr + i as u64 * 8, sym, 0));
         }
     }
     if let Some(idx) = output_chunks::find_chunk(ctx, |k| matches!(k, ChunkKind::ThreadPtrs)) {
         let addr = ctx.chunks[idx].hdr.addr;
         for (i, &id) in ctx.thread_ptr_syms.iter().enumerate() {
-            let sym = Some(id).filter(|&id| ctx.symtab[id].is_imported);
+            let sym = Some(id).filter(|&id| ctx.symtab[id].is_imported());
             fixups.push((addr + i as u64 * 8, sym, 0));
         }
     }
@@ -3483,7 +3481,7 @@ fn build_chained_fixups<E: Arch>(ctx: &Context<E>) -> ChainedFixups {
             unreachable!()
         };
         let ordinal = ctx.bind_ordinal(dylib) as u8;
-        let weak = s.is_weak_ref as u32;
+        let weak = s.is_weak_ref() as u32;
         match import_format {
             DYLD_CHAINED_IMPORT => {
                 push32(&mut buf, ordinal as u32 | (weak << 8) | (name_offs[i] << 9));
@@ -3778,14 +3776,14 @@ fn copy_chunk<E: Arch>(ctx: &Context<E>, chunk: &Chunk, buf: &mut [u8]) {
             // Slots for imported symbols stay zero; dyld fills them
             // via the bind stream.
             for (i, &id) in ctx.got_syms.iter().enumerate() {
-                if !ctx.symtab[id].is_imported {
+                if !ctx.symtab[id].is_imported() {
                     buf[i * 8..i * 8 + 8].copy_from_slice(&ctx.sym_addr(id).to_le_bytes());
                 }
             }
         }
         ChunkKind::ThreadPtrs => {
             for (i, &id) in ctx.thread_ptr_syms.iter().enumerate() {
-                if !ctx.symtab[id].is_imported {
+                if !ctx.symtab[id].is_imported() {
                     buf[i * 8..i * 8 + 8].copy_from_slice(&ctx.sym_addr(id).to_le_bytes());
                 }
             }
