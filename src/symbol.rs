@@ -61,7 +61,7 @@ pub struct Symbol {
 }
 
 impl Symbol {
-    fn new(name: &'static str) -> Symbol {
+    pub(crate) fn new(name: &'static str) -> Symbol {
         Symbol {
             name,
             origin: Origin::Undef,

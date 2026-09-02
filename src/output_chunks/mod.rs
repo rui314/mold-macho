@@ -652,7 +652,8 @@ pub fn copy_symtab<E: Arch>(ctx: &Context<E>, buf: &mut [u8]) {
 /// A node of the export trie under construction.
 #[derive(Default)]
 struct TrieNode {
-    children: Vec<(String, TrieNode)>,
+    /// Edge labels borrow from the symbol names themselves.
+    children: Vec<(&'static str, TrieNode)>,
     /// (flags, image-relative address) for an exported symbol ending
     /// here.
     export: Option<(u32, u64)>,
@@ -660,33 +661,36 @@ struct TrieNode {
 }
 
 impl TrieNode {
-    fn insert(&mut self, name: &str, export: (u32, u64)) {
-        for (label, child) in &mut self.children {
+    /// Inserts names in sorted order: a new name can share a prefix
+    /// only with the most recently added child, so each level checks
+    /// one edge instead of scanning them all, and construction is
+    /// linear in the total name length.
+    fn insert(&mut self, name: &'static str, export: (u32, u64)) {
+        if let Some((label, child)) = self.children.last_mut() {
             let common = name
                 .bytes()
                 .zip(label.bytes())
                 .take_while(|(a, b)| a == b)
                 .count();
-            if common == 0 {
-                continue;
+            if common > 0 {
+                if common < label.len() {
+                    // Split the edge: "foobar" -> "foo" + "bar".
+                    let rest = &label[common..];
+                    *label = &label[..common];
+                    let old = std::mem::take(child);
+                    child.children.push((rest, old));
+                }
+                if common == name.len() {
+                    child.export = Some(export);
+                } else {
+                    child.insert(&name[common..], export);
+                }
+                return;
             }
-            if common < label.len() {
-                // Split the edge: "foobar" -> "foo" + "bar".
-                let rest = label[common..].to_string();
-                *label = label[..common].to_string();
-                let old = std::mem::take(child);
-                child.children.push((rest, old));
-            }
-            if common == name.len() {
-                child.export = Some(export);
-            } else {
-                child.insert(&name[common..], export);
-            }
-            return;
         }
         let mut node = TrieNode::default();
         node.export = Some(export);
-        self.children.push((name.to_string(), node));
+        self.children.push((name, node));
     }
 }
 
@@ -706,42 +710,77 @@ fn uleb_len(mut val: u64) -> usize {
 /// child nodes by ULEB128 offset within the trie. Since offsets are
 /// variable-length, sizing iterates to a fixed point.
 pub fn encode_export_trie<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
+    use rayon::prelude::*;
     let base = ctx.args.pagezero_size;
-    let mut root = TrieNode::default();
-    let mut any = false;
 
-    for id in 0..ctx.symtab.syms.len() {
-        let sym = &ctx.symtab[id];
-        if !sym.is_extern
-            || sym.is_private_extern
-            || !matches!(
-                sym.origin,
-                crate::symbol::Origin::Obj(_) | crate::symbol::Origin::Synthetic
-            )
-            || sym
-                .isec
-                .is_some_and(|isec| !ctx.isecs[ctx.resolve_isec(isec)].is_alive)
-        {
-            continue;
-        }
-        if let Some(exported) = &ctx.args.exported_symbols {
-            if !exported.iter().any(|pat| pat == sym.name) {
-                continue;
+    // Collect and sort the exports, then build sub-tries per leading
+    // byte in parallel; sorted insertion makes each build linear in
+    // the names' total length, and the root just strings the
+    // sub-tries together (their order is the sorted order).
+    let mut exports: Vec<(&'static str, (u32, u64))> = (0..ctx.symtab.syms.len())
+        .into_par_iter()
+        .filter_map(|id| {
+            let sym = &ctx.symtab[id];
+            if !sym.is_extern
+                || sym.is_private_extern
+                || !matches!(
+                    sym.origin,
+                    crate::symbol::Origin::Obj(_) | crate::symbol::Origin::Synthetic
+                )
+                || sym
+                    .isec
+                    .is_some_and(|isec| !ctx.isecs[ctx.resolve_isec(isec)].is_alive)
+            {
+                return None;
             }
-        }
-        if ctx.args.unexported_symbols.iter().any(|pat| pat == sym.name) {
-            continue;
-        }
-        let flags = if sym.is_weak_def {
-            EXPORT_SYMBOL_FLAGS_WEAK_DEFINITION
-        } else {
-            0
-        };
-        root.insert(sym.name, (flags, ctx.sym_addr(id) - base));
-        any = true;
-    }
-    if !any {
+            if let Some(exported) = &ctx.args.exported_symbols {
+                if !exported.iter().any(|pat| pat == sym.name) {
+                    return None;
+                }
+            }
+            if ctx.args.unexported_symbols.iter().any(|pat| pat == sym.name) {
+                return None;
+            }
+            let flags = if sym.is_weak_def {
+                EXPORT_SYMBOL_FLAGS_WEAK_DEFINITION
+            } else {
+                0
+            };
+            Some((sym.name, (flags, ctx.sym_addr(id) - base)))
+        })
+        .collect();
+    if exports.is_empty() {
         return Vec::new();
+    }
+    exports.par_sort_unstable_by_key(|&(name, _)| name);
+
+    let mut groups: Vec<&[(&'static str, (u32, u64))]> = Vec::new();
+    let mut rest = &exports[..];
+    while !rest.is_empty() {
+        let b = rest[0].0.as_bytes().first().copied();
+        let n = rest
+            .iter()
+            .take_while(|(name, _)| name.as_bytes().first().copied() == b)
+            .count();
+        groups.push(&rest[..n]);
+        rest = &rest[n..];
+    }
+    let subtries: Vec<TrieNode> = groups
+        .par_iter()
+        .map(|group| {
+            let mut node = TrieNode::default();
+            for &(name, export) in *group {
+                node.insert(name, export);
+            }
+            node
+        })
+        .collect();
+    let mut root = TrieNode::default();
+    for sub in subtries {
+        root.children.extend(sub.children);
+        if sub.export.is_some() {
+            root.export = sub.export;
+        }
     }
 
     // Nodes in pre-order, as raw pointers to sidestep the borrow of the

@@ -2623,6 +2623,7 @@ pub fn set_osec_offsets<E: Arch>(ctx: &mut Context<E>) {
             // Everything before __LINKEDIT has its address; snapshot
             // symbol addresses so the builders below and the copy
             // phase pay one array load each.
+            let __t = std::time::Instant::now();
             {
                 use rayon::prelude::*;
                 ctx.sym_vas = (0..ctx.symtab.syms.len())
@@ -2644,6 +2645,9 @@ pub fn set_osec_offsets<E: Arch>(ctx: &mut Context<E>) {
                         ctx.sym_addr_uncached(i)
                     })
                     .collect();
+            }
+            if std::env::var_os("MOLD_TIMING").is_some() {
+                eprintln!("    sym_vas {:?}", __t.elapsed());
             }
             if ctx.use_chained_fixups() {
                 t!("chained_fixups", build_chained_fixups(ctx));
@@ -2681,7 +2685,8 @@ pub fn set_osec_offsets<E: Arch>(ctx: &mut Context<E>) {
                 // cannot know yet (GOT addresses) come back as a
                 // patch list for the copy phase.
                 ChunkKind::UnwindInfo => {
-                    let (data, personalities) = output_chunks::encode_unwind_info(ctx);
+                    let (data, personalities) =
+                        t!("unwind_encode", output_chunks::encode_unwind_info(ctx));
                     let len = data.len() as u64;
                     unwind_cache = Some((data, personalities));
                     len
@@ -2696,7 +2701,7 @@ pub fn set_osec_offsets<E: Arch>(ctx: &mut Context<E>) {
                 // addresses, which the data segments haven't fixed yet
                 // when __TEXT is sized.)
                 ChunkKind::ExportTrie => {
-                    let data = output_chunks::encode_export_trie(ctx);
+                    let data = t!("trie_encode", output_chunks::encode_export_trie(ctx));
                     let len = data.len() as u64;
                     trie_cache = Some(data);
                     len

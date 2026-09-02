@@ -579,13 +579,43 @@ pub fn integrate_objects<E: Arch>(
         })
         .collect();
 
-    // Serial arena extension: pure moves and Symbol construction.
+    // Local symbols initialize in parallel into pre-reserved disjoint
+    // ranges - mold's ParallelSymbolAllocator contract: the arena is
+    // sized up front, each object owns the exclusive range its prefix
+    // sum assigned, and init writes every slot in it.
+    {
+        use rayon::prelude::*;
+        let total_locals = locals_base - ctx.symtab.syms.len();
+        let old_len = ctx.symtab.syms.len();
+        ctx.symtab.syms.reserve(total_locals);
+        struct SlotPtr(*mut crate::symbol::Symbol);
+        unsafe impl Sync for SlotPtr {}
+        let ptr = SlotPtr(ctx.symtab.syms.as_mut_ptr());
+        let ptr = &ptr;
+        staged
+            .par_iter()
+            .zip(&bases)
+            .for_each(|(st, base)| {
+                let mut slot = base.locals;
+                for (nlist, name) in st.nlists.iter().zip(&st.sym_names) {
+                    if nlist.is_stab() || !nlist.is_extern() {
+                        // SAFETY: [base.locals, base.locals+n) ranges
+                        // are disjoint across objects and lie within
+                        // the reserved capacity.
+                        unsafe {
+                            ptr.0.add(slot).write(crate::symbol::Symbol::new(name));
+                        }
+                        slot += 1;
+                    }
+                }
+            });
+        // SAFETY: every slot in old_len..old_len+total_locals was
+        // initialized by exactly one object above.
+        unsafe { ctx.symtab.syms.set_len(old_len + total_locals) };
+    }
+
+    // Serial arena extension: pure moves.
     for (st, syms) in staged.into_iter().zip(syms_of) {
-        for (nlist, name) in st.nlists.iter().zip(&st.sym_names) {
-            if nlist.is_stab() || !nlist.is_extern() {
-                ctx.symtab.add_local(name);
-            }
-        }
         ctx.isecs.extend(st.isecs);
         ctx.unwind_records.extend(st.unwind);
         ctx.cies.extend(st.cies);
