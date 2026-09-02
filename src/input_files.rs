@@ -360,22 +360,20 @@ pub fn stage_object<E: Arch>(
 
     // Read each section's relocations and distribute them to its
     // subsections, rebasing location offsets and section-relative
-    // targets to subsections.
+    // targets to subsections. Sorted by offset, the relocations of
+    // one subsection are contiguous, so a single merge walk over the
+    // subsections hands each its run - sold assigns rel_offset/nrels
+    // ranges with the same walk - instead of binary-searching the
+    // subsection list once per relocation.
     for (i, sect) in sect_hdrs.iter().enumerate() {
         if by_ordinal[i].is_empty() || sect.nreloc == 0 {
             continue;
         }
         let raw: Vec<MachRel> = read_array(data, sect.reloff as usize, sect.nreloc as usize);
-        let rels = E::read_relocs(diag, &mf.name, &sect_hdrs, sect, data, &raw);
+        let mut rels = E::read_relocs(diag, &mf.name, &sect_hdrs, sect, data, &raw);
+        rels.sort_unstable_by_key(|rel| rel.offset);
 
-        for mut rel in rels {
-            let loc_addr = sect.addr + rel.offset as u64;
-            let Some((sub, sub_off)) = find_subsec(&isecs, &by_ordinal[i], loc_addr)
-            else {
-                fatal!(diag, "{}: relocation outside its section", mf.name);
-            };
-            rel.offset = sub_off as u32;
-
+        for rel in &mut rels {
             if let crate::input_sections::RelocTarget::Section(sect_pos) = rel.target {
                 let taddr = (sect_hdrs[sect_pos].addr as i64 + rel.addend) as u64;
                 let Some((tsub, toff)) = find_subsec(&isecs, &subsecs, taddr) else {
@@ -384,7 +382,21 @@ pub fn stage_object<E: Arch>(
                 rel.target = crate::input_sections::RelocTarget::Section(tsub);
                 rel.addend = toff as i64;
             }
-            isecs[sub].relocs.push(rel);
+        }
+
+        let mut pos = 0;
+        for &sub in &by_ordinal[i] {
+            let sub_off = (isecs[sub].input_addr - sect.addr) as u32;
+            let end = sub_off + isecs[sub].size as u32;
+            let start = pos;
+            while pos < rels.len() && rels[pos].offset < end {
+                rels[pos].offset -= sub_off;
+                pos += 1;
+            }
+            isecs[sub].relocs = rels[start..pos].to_vec();
+        }
+        if pos < rels.len() {
+            fatal!(diag, "{}: relocation outside its section", mf.name);
         }
     }
 
