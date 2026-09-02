@@ -25,6 +25,7 @@ pub fn dead_strip<E: Arch>(ctx: &mut Context<E>) {
     let mut pred = vec![usize::MAX; ctx.isecs.len()];
     let mut stack: Vec<usize> = Vec::new();
     let redirects: Vec<usize> = (0..ctx.isecs.len()).map(|i| ctx.resolve_isec(i)).collect();
+    let redirects2 = redirects.clone();
     let mark =
         move |live: &mut Vec<bool>, pred: &mut Vec<usize>, stack: &mut Vec<usize>, id: usize, from: usize| {
             let id = redirects[id];
@@ -87,35 +88,78 @@ pub fn dead_strip<E: Arch>(ctx: &mut Context<E>) {
         unwind_by_isec.entry(rec.isec).or_default().push(i);
     }
 
-    while let Some(id) = stack.pop() {
+    // Propagate liveness. mold's gc-sections walks the graph in
+    // parallel rounds: the frontier's out-edges are computed on all
+    // cores, and an atomic visited bit decides which targets extend
+    // the next frontier. The set of live sections is
+    // order-independent, so the result is deterministic; only the
+    // spanning tree (who marked whom) is not, so -why_live keeps the
+    // serial walk to report stable chains.
+    let edges_of = |id: usize, out: &mut Vec<usize>| {
         for rel in &ctx.isecs[id].relocs {
             match rel.target {
                 RelocTarget::Sym(idx) => {
                     let sym = &ctx.symtab[ctx.objs[ctx.isecs[id].obj].syms[idx]];
                     if let Some(isec) = sym.isec {
-                        mark(&mut live, &mut pred, &mut stack, isec, id);
+                        out.push(isec);
                     }
                 }
-                RelocTarget::Section(isec) => mark(&mut live, &mut pred, &mut stack, isec, id),
+                RelocTarget::Section(isec) => out.push(isec),
             }
         }
-
         for &rec_idx in unwind_by_isec.get(&id).map(Vec::as_slice).unwrap_or(&[]) {
             let rec = &ctx.unwind_records[rec_idx];
             if let Some((lsda, _)) = rec.lsda {
-                mark(&mut live, &mut pred, &mut stack, lsda, id);
+                out.push(lsda);
             }
             let mut personality = rec.personality;
             if let Some(fde) = rec.fde {
                 if let Some((lsda, _)) = ctx.fdes[fde].lsda {
-                    mark(&mut live, &mut pred, &mut stack, lsda, id);
+                    out.push(lsda);
                 }
                 personality = personality.or(ctx.cies[ctx.fdes[fde].cie].personality);
             }
             if let Some(p) = personality {
                 if let Some(isec) = ctx.symtab[p].isec {
-                    mark(&mut live, &mut pred, &mut stack, isec, id);
+                    out.push(isec);
                 }
+            }
+        }
+    };
+
+    if ctx.args.why_live.is_empty() {
+        use rayon::prelude::*;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let visited: Vec<AtomicBool> =
+            live.iter().map(|&l| AtomicBool::new(l)).collect();
+        let redirects = &redirects2;
+        let mut frontier = std::mem::take(&mut stack);
+        while !frontier.is_empty() {
+            frontier = frontier
+                .par_iter()
+                .flat_map_iter(|&id| {
+                    let mut out = Vec::new();
+                    edges_of(id, &mut out);
+                    out.into_iter().filter_map(|t| {
+                        let t = redirects[t];
+                        if !visited[t].swap(true, Ordering::Relaxed) {
+                            Some(t)
+                        } else {
+                            None
+                        }
+                    })
+                })
+                .collect();
+        }
+        for (l, v) in live.iter_mut().zip(&visited) {
+            *l = v.load(Ordering::Relaxed);
+        }
+    } else {
+        while let Some(id) = stack.pop() {
+            let mut out = Vec::new();
+            edges_of(id, &mut out);
+            for t in out {
+                mark(&mut live, &mut pred, &mut stack, t, id);
             }
         }
     }
