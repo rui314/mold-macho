@@ -500,6 +500,7 @@ pub fn integrate_objects<E: Arch>(
     let mut isec_base = ctx.isecs.len();
     let mut cie_base = ctx.cies.len();
     let mut fde_base = ctx.fdes.len();
+    let mut unwind_base = ctx.unwind_records.len();
     let mut locals_base = ctx.symtab.syms.len();
     let mut id_base = 0usize;
 
@@ -507,6 +508,7 @@ pub fn integrate_objects<E: Arch>(
         isec: usize,
         cie: usize,
         fde: usize,
+        unwind: usize,
         locals: usize,
         ids: usize,
     }
@@ -521,12 +523,14 @@ pub fn integrate_objects<E: Arch>(
             isec: isec_base,
             cie: cie_base,
             fde: fde_base,
+            unwind: unwind_base,
             locals: locals_base,
             ids: id_base,
         });
         isec_base += st.isecs.len();
         cie_base += st.cies.len();
         fde_base += st.fdes.len();
+        unwind_base += st.unwind.len();
         locals_base += n_locals;
         id_base += nids;
     }
@@ -630,12 +634,46 @@ pub fn integrate_objects<E: Arch>(
         unsafe { ctx.symtab.syms.set_len(old_len + total_locals) };
     }
 
-    // Serial arena extension: pure moves.
+    // Arena extension: each object's staged vectors move into the
+    // arenas at the exclusive ranges the prefix sums assigned - the
+    // same contract as the local symbols above, so hundreds of
+    // megabytes of subsections move on all cores instead of one.
+    fn par_moves<T: Send>(dst: &mut Vec<T>, parts: Vec<(usize, Vec<T>)>) {
+        use rayon::prelude::*;
+        struct RawPtr<T>(*mut T);
+        unsafe impl<T> Sync for RawPtr<T> {}
+        let add: usize = parts.iter().map(|(_, v)| v.len()).sum();
+        let old = dst.len();
+        dst.reserve(add);
+        let ptr = RawPtr(dst.as_mut_ptr());
+        let ptr = &ptr;
+        parts.into_par_iter().for_each(|(base, items)| {
+            let mut p = base;
+            for item in items {
+                // SAFETY: the ranges are disjoint across parts and lie
+                // within the reserved capacity; every slot is written
+                // exactly once.
+                unsafe { ptr.0.add(p).write(item) };
+                p += 1;
+            }
+        });
+        unsafe { dst.set_len(old + add) };
+    }
+    macro_rules! take_parts {
+        ($field:ident, $base:ident) => {
+            staged
+                .iter_mut()
+                .zip(&bases)
+                .map(|(st, b)| (b.$base, std::mem::take(&mut st.$field)))
+                .collect()
+        };
+    }
+    par_moves(&mut ctx.isecs, take_parts!(isecs, isec));
+    par_moves(&mut ctx.unwind_records, take_parts!(unwind, unwind));
+    par_moves(&mut ctx.cies, take_parts!(cies, cie));
+    par_moves(&mut ctx.fdes, take_parts!(fdes, fde));
+
     for (st, syms) in staged.into_iter().zip(syms_of) {
-        ctx.isecs.extend(st.isecs);
-        ctx.unwind_records.extend(st.unwind);
-        ctx.cies.extend(st.cies);
-        ctx.fdes.extend(st.fdes);
         ctx.objs.push(ObjectFile {
             mf: st.mf,
             is_alive: st.alive,
