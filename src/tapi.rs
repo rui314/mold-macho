@@ -15,21 +15,22 @@ use crate::fatal;
 use crate::mapped_file::MappedFile;
 
 #[derive(Debug, Default)]
+#[derive(Clone)]
 pub struct TbdFile {
     pub install_name: String,
     pub current_version: u32,
-    pub exports: Vec<String>,
-    pub weak_exports: Vec<String>,
+    pub exports: Vec<&'static str>,
+    pub weak_exports: Vec<&'static str>,
     /// Exports that are thread-local variables (listed separately in
     /// .tbd files; a TLV can only be referenced through TLV
     /// relocations).
-    pub tlv_exports: Vec<String>,
+    pub tlv_exports: Vec<&'static str>,
     /// The library was built without -application_extension.
     pub not_app_extension_safe: bool,
     /// Install names of reexported libraries described in *other* files
     /// (reexports inlined as documents in this file are already merged
     /// into `exports`).
-    pub external_reexports: Vec<String>,
+    pub external_reexports: Vec<&'static str>,
 }
 
 /// Strips a YAML scalar's surrounding quotes, if any.
@@ -43,7 +44,7 @@ fn unquote(s: &str) -> &str {
 
 /// Reads the flow list (`[ a, b, ... ]`, possibly spanning lines)
 /// following position `pos`, appending its elements to `out`.
-fn read_list(text: &str, pos: usize, out: &mut Vec<String>, prefix: &str) {
+fn read_list(text: &'static str, pos: usize, out: &mut Vec<&'static str>, prefix: &str) {
     let Some(start) = text[pos..].find('[') else {
         return;
     };
@@ -54,13 +55,20 @@ fn read_list(text: &str, pos: usize, out: &mut Vec<String>, prefix: &str) {
     for item in text[start..start + end].split(',') {
         let item = unquote(item.trim());
         if !item.is_empty() {
-            out.push(format!("{prefix}{item}"));
+            // Plain names borrow straight out of the mapped file; the
+            // few Objective-C entries that need a mangling prefix are
+            // leaked (bounded by the small objc lists).
+            if prefix.is_empty() {
+                out.push(item);
+            } else {
+                out.push(String::leak(format!("{prefix}{item}")));
+            }
         }
     }
 }
 
 /// Reads all `<key>: [ ... ]` lists in a document.
-fn read_lists(doc: &str, key: &str, out: &mut Vec<String>, prefix: &str) {
+fn read_lists(doc: &'static str, key: &str, out: &mut Vec<&'static str>, prefix: &str) {
     let pat = format!("{key}:");
     let mut pos = 0;
     while let Some(found) = doc[pos..].find(&pat) {
@@ -87,8 +95,39 @@ pub fn parse_version(val: &str) -> u32 {
 }
 
 /// Parses a .tbd file, merging exports of all its documents.
+/// A memoized parse. Stub parsing is pure string work over the mapped
+/// file, so results are cached by the file's address and the big SDK
+/// stubs (libSystem's tree, framework umbrellas) can be parsed once,
+/// in parallel, by prefetch() before the serial input loop needs them.
+pub fn parse_cached(diag: &Diagnostics, mf: &'static MappedFile) -> TbdFile {
+    static CACHE: std::sync::Mutex<Option<hashbrown::HashMap<usize, TbdFile>>> =
+        std::sync::Mutex::new(None);
+    let key = mf.data.as_ptr() as usize;
+    if let Some(tbd) = CACHE
+        .lock()
+        .unwrap()
+        .get_or_insert_with(hashbrown::HashMap::new)
+        .get(&key)
+    {
+        return tbd.clone();
+    }
+    let tbd = parse(diag, mf);
+    CACHE
+        .lock()
+        .unwrap()
+        .get_or_insert_with(hashbrown::HashMap::new)
+        .insert(key, tbd.clone());
+    tbd
+}
+
+/// Warms the parse cache on all cores.
+pub fn prefetch(diag: &Diagnostics, mfs: &[&'static MappedFile]) -> Vec<TbdFile> {
+    use rayon::prelude::*;
+    mfs.par_iter().map(|mf| parse_cached(diag, mf)).collect()
+}
+
 pub fn parse(diag: &Diagnostics, mf: &MappedFile) -> TbdFile {
-    let Ok(text) = std::str::from_utf8(mf.data) else {
+    let Ok(text): Result<&'static str, _> = std::str::from_utf8(mf.data) else {
         fatal!(diag, "{}: invalid UTF-8 in .tbd file", mf.name);
     };
 
@@ -108,7 +147,7 @@ pub fn parse(diag: &Diagnostics, mf: &MappedFile) -> TbdFile {
     for (i, doc) in text.split("\n---").enumerate() {
         for line in doc.lines() {
             if let Some(val) = line.strip_prefix("install-name:") {
-                doc_names.push(unquote(val).to_string());
+                doc_names.push(unquote(val));
                 if i == 0 {
                     tbd.install_name = unquote(val).to_string();
                 }

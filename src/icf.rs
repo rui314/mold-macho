@@ -15,7 +15,7 @@
 //! final hashes are then verified structurally and folded onto their
 //! first member.
 
-use std::collections::HashMap;
+use hashbrown::HashMap;
 use std::hash::{Hash, Hasher};
 
 use crate::arch::Arch;

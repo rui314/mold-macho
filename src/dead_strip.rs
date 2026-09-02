@@ -82,8 +82,8 @@ pub fn dead_strip<E: Arch>(ctx: &mut Context<E>) {
 
     // Unwind records for a live function keep its LSDA and personality
     // alive; index them by function subsection.
-    let mut unwind_by_isec: std::collections::HashMap<usize, Vec<usize>> =
-        std::collections::HashMap::new();
+    let mut unwind_by_isec: hashbrown::HashMap<usize, Vec<usize>> =
+        hashbrown::HashMap::new();
     for (i, rec) in ctx.unwind_records.iter().enumerate() {
         unwind_by_isec.entry(rec.isec).or_default().push(i);
     }

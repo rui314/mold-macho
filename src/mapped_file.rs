@@ -22,8 +22,22 @@ pub struct MappedFile {
 }
 
 impl MappedFile {
-    /// Maps a file, or returns None if it doesn't exist.
+    /// Maps a file, or returns None if it doesn't exist. Opens are
+    /// memoized by path: a file named twice (a library on the command
+    /// line and in a prefetch, an archive listed repeatedly) gets one
+    /// mapping, which also lets downstream caches key by data address.
     pub fn open(diag: &Diagnostics, path: &Path) -> Option<&'static MappedFile> {
+        static CACHE: std::sync::Mutex<
+            Option<std::collections::HashMap<std::path::PathBuf, &'static MappedFile>>,
+        > = std::sync::Mutex::new(None);
+        if let Some(&mf) = CACHE
+            .lock()
+            .unwrap()
+            .get_or_insert_with(std::collections::HashMap::new)
+            .get(path)
+        {
+            return Some(mf);
+        }
         if !path.is_file() {
             return None;
         }
@@ -48,11 +62,17 @@ impl MappedFile {
                 Err(_) => fatal!(diag, "cannot mmap {}: {}", path.display(), errno_string()),
             }
         };
-        Some(Box::leak(Box::new(MappedFile {
+        let mf: &'static MappedFile = Box::leak(Box::new(MappedFile {
             name: path.to_string_lossy().into_owned(),
             data,
             parent: None,
-        })))
+        }));
+        CACHE
+            .lock()
+            .unwrap()
+            .get_or_insert_with(std::collections::HashMap::new)
+            .insert(path.to_path_buf(), mf);
+        Some(mf)
     }
 
     /// Reads a file, failing if it doesn't exist.

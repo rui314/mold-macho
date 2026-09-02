@@ -100,9 +100,9 @@ pub struct DylibFile {
     pub sub_framework: Option<String>,
     /// LC_SUB_CLIENT: clients allowed to link this subframework.
     pub sub_clients: Vec<String>,
-    pub exports: std::collections::HashSet<String>,
+    pub exports: hashbrown::HashSet<&'static str>,
     /// The subset of exports that are thread-local variables.
-    pub tlv_exports: std::collections::HashSet<String>,
+    pub tlv_exports: hashbrown::HashSet<&'static str>,
 }
 
 /// Returns true for sections that don't become part of the output image.
@@ -1385,8 +1385,8 @@ pub fn parse_dylib_binary<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile
         fatal!(ctx, "{}: dylib has no LC_ID_DYLIB", mf.name);
     }
 
-    let mut exports = std::collections::HashSet::new();
-    let mut tlv_exports = std::collections::HashSet::new();
+    let mut exports: hashbrown::HashSet<&'static str> = hashbrown::HashSet::new();
+    let mut tlv_exports: hashbrown::HashSet<&'static str> = hashbrown::HashSet::new();
     if let (Some(sym), Some(dysym)) = (symtab_cmd, dysymtab_cmd) {
         let nlists: Vec<NList> = read_array(data, sym.symoff as usize, sym.nsyms as usize);
         let strtab = &data[sym.stroff as usize..(sym.stroff + sym.strsize) as usize];
@@ -1399,9 +1399,9 @@ pub fn parse_dylib_binary<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile
         let tlv_sects = thread_local_section_ordinals(data, &hdr);
         let range = dysym.iextdefsym as usize..(dysym.iextdefsym + dysym.nextdefsym) as usize;
         for nlist in &nlists[range] {
-            let name = symbol_name(strtab, nlist).to_string();
+            let name = symbol_name(strtab, nlist);
             if tlv_sects.contains(&nlist.n_sect) {
-                tlv_exports.insert(name.clone());
+                tlv_exports.insert(name);
             }
             exports.insert(name);
         }
@@ -1426,14 +1426,14 @@ pub fn parse_dylib_binary<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile
         };
         match crate::filetype::get_file_type(dep) {
             crate::filetype::FileType::Tapi => {
-                let mut dep_tbd = tapi::parse(&ctx.diag, dep);
+                let mut dep_tbd = tapi::parse_cached(&ctx.diag, dep);
                 interpret_ld_symbols(ctx, &mut dep_tbd);
-                tlv_exports.extend(dep_tbd.tlv_exports.iter().cloned());
+                tlv_exports.extend(dep_tbd.tlv_exports.iter().copied());
                 exports.extend(dep_tbd.tlv_exports);
                 exports.extend(dep_tbd.exports);
                 exports.extend(dep_tbd.weak_exports);
                 for dep_name in dep_tbd.external_reexports {
-                    queue.push((dep_name, dir_of(&dep.name), Vec::new()));
+                    queue.push((dep_name.to_string(), dir_of(&dep.name), Vec::new()));
                 }
             }
             crate::filetype::FileType::Dylib => {
@@ -1502,7 +1502,7 @@ fn thread_local_section_ordinals(data: &[u8], hdr: &MachHeader) -> Vec<u8> {
 fn dylib_binary_exports(
     _diag: &crate::error::Diagnostics,
     mf: &'static MappedFile,
-) -> (Vec<String>, Vec<String>, Vec<String>, Vec<String>) {
+) -> (Vec<&'static str>, Vec<&'static str>, Vec<String>, Vec<String>) {
     let data = mf.data;
     let hdr = MachHeader::read_from(data);
     let mut symtab_cmd = None;
@@ -1537,8 +1537,8 @@ fn dylib_binary_exports(
         off += lc.cmdsize as usize;
     }
 
-    let mut exports = Vec::new();
-    let mut tlv_exports = Vec::new();
+    let mut exports: Vec<&'static str> = Vec::new();
+    let mut tlv_exports: Vec<&'static str> = Vec::new();
     if let (Some(sym), Some(dysym)) = (symtab_cmd, dysymtab_cmd) {
         let nlists: Vec<NList> = read_array(data, sym.symoff as usize, sym.nsyms as usize);
         let strtab = &data[sym.stroff as usize..(sym.stroff + sym.strsize) as usize];
@@ -1548,9 +1548,9 @@ fn dylib_binary_exports(
         let tlv_sects = thread_local_section_ordinals(data, &hdr);
         let range = dysym.iextdefsym as usize..(dysym.iextdefsym + dysym.nextdefsym) as usize;
         for nlist in &nlists[range] {
-            let name = symbol_name(strtab, nlist).to_string();
+            let name = symbol_name(strtab, nlist);
             if tlv_sects.contains(&nlist.n_sect) {
-                tlv_exports.push(name.clone());
+                tlv_exports.push(name);
             }
             exports.push(name);
         }
@@ -1600,7 +1600,7 @@ fn resolve_dylib_ref<E: Arch>(
 
 /// Locates the stub or binary for a reexported library's install name
 /// under the syslibroot.
-fn find_reexport_file<E: Arch>(
+pub fn find_reexport_file<E: Arch>(
     ctx: &Context<E>,
     install_name: &str,
 ) -> Option<&'static MappedFile> {
@@ -1640,8 +1640,8 @@ fn find_reexport_file<E: Arch>(
 /// old targets keep binding it where it used to live.
 fn interpret_ld_symbols<E: Arch>(ctx: &Context<E>, tbd: &mut tapi::TbdFile) {
     let minos = ctx.args.platform_minos;
-    let mut added: Vec<String> = Vec::new();
-    let mut hidden: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut added: Vec<&'static str> = Vec::new();
+    let mut hidden: hashbrown::HashSet<&'static str> = hashbrown::HashSet::new();
     let mut install_name: Option<String> = None;
 
     for name in &tbd.exports {
@@ -1659,13 +1659,13 @@ fn interpret_ld_symbols<E: Arch>(ctx: &Context<E>, tbd: &mut tapi::TbdFile) {
         } else if let Some(rest) = name.strip_prefix("$ld$add$os") {
             if let Some((ver, sym)) = rest.split_once('$') {
                 if tapi::parse_version(ver) == minos {
-                    added.push(sym.to_string());
+                    added.push(sym);
                 }
             }
         } else if let Some(rest) = name.strip_prefix("$ld$hide$os") {
             if let Some((ver, sym)) = rest.split_once('$') {
                 if tapi::parse_version(ver) == minos {
-                    hidden.insert(sym.to_string());
+                    hidden.insert(sym);
                 }
             }
         } else if let Some(rest) = name.strip_prefix("$ld$install_name$os") {
@@ -1687,15 +1687,15 @@ fn interpret_ld_symbols<E: Arch>(ctx: &Context<E>, tbd: &mut tapi::TbdFile) {
 }
 
 pub fn parse_dylib<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile) -> usize {
-    let mut tbd = tapi::parse(&ctx.diag, mf);
+    let mut tbd = tapi::parse_cached(&ctx.diag, mf);
     interpret_ld_symbols(ctx, &mut tbd);
     let idx = ctx.dylibs.len();
-    let mut exports: std::collections::HashSet<String> =
+    let mut exports: hashbrown::HashSet<&'static str> =
         tbd.exports.into_iter().collect();
     exports.extend(tbd.weak_exports);
-    let mut tlv_exports: std::collections::HashSet<String> =
+    let mut tlv_exports: hashbrown::HashSet<&'static str> =
         tbd.tlv_exports.into_iter().collect();
-    exports.extend(tlv_exports.iter().cloned());
+    exports.extend(tlv_exports.iter().copied());
 
     // A dylib's reexported libraries resolve through it in the two-level
     // namespace, so their exports count as this dylib's. Reexports not
@@ -1704,7 +1704,7 @@ pub fn parse_dylib<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile) -> us
     let mut queue: Vec<(String, String)> = tbd
         .external_reexports
         .into_iter()
-        .map(|name| (name, dir_of(&mf.name)))
+        .map(|name| (name.to_string(), dir_of(&mf.name)))
         .collect();
     let mut visited = std::collections::HashSet::new();
     while let Some((name, loader_dir)) = queue.pop() {
@@ -1715,14 +1715,14 @@ pub fn parse_dylib<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile) -> us
             crate::warn!(ctx, "{}: reexported library not found: {}", mf.name, name);
             continue;
         };
-        let mut dep_tbd = tapi::parse(&ctx.diag, dep);
+        let mut dep_tbd = tapi::parse_cached(&ctx.diag, dep);
         interpret_ld_symbols(ctx, &mut dep_tbd);
         exports.extend(dep_tbd.exports);
         exports.extend(dep_tbd.weak_exports);
-        tlv_exports.extend(dep_tbd.tlv_exports.iter().cloned());
+        tlv_exports.extend(dep_tbd.tlv_exports.iter().copied());
         exports.extend(dep_tbd.tlv_exports);
         for dep_name in dep_tbd.external_reexports {
-            queue.push((dep_name, dir_of(&dep.name)));
+            queue.push((dep_name.to_string(), dir_of(&dep.name)));
         }
     }
 

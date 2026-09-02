@@ -18,6 +18,7 @@ use crate::output_chunks::{
 };
 use crate::arch::RelocClass;
 use crate::symbol::Origin;
+use crate::tapi;
 use crate::util::{align_to, write_uleb};
 
 /// Times a sub-phase to stderr when MOLD_TIMING is set - the
@@ -279,6 +280,53 @@ pub fn read_input_files<E: Arch>(ctx: &mut Context<E>) {
         }
     }
     let inputs = std::mem::take(&mut ctx.args.inputs);
+
+    // Warm the .tbd parse cache: resolve every input that will land
+    // on a stub library and parse them all on all cores, then do the
+    // same for the stubs they reexport - two waves cover an SDK's
+    // umbrella trees. The serial loop below then finds every parse
+    // already done.
+    {
+        let mut stubs: Vec<&'static MappedFile> = Vec::new();
+        let consider = |path: &std::path::Path, stubs: &mut Vec<&'static MappedFile>| {
+            if let Some(mf) = MappedFile::open(&ctx.diag, path) {
+                if get_file_type(mf) == FileType::Tapi {
+                    stubs.push(mf);
+                }
+            }
+        };
+        for arg in &inputs {
+            match arg {
+                InputArg::File(path) | InputArg::WeakFile(path) | InputArg::ReexportFile(path) => {
+                    consider(Path::new(path), &mut stubs)
+                }
+                InputArg::Lib(name, _) | InputArg::ReexportLib(name) | InputArg::NeededLib(name) => {
+                    if let Some(path) = find_library(ctx, name) {
+                        consider(&path, &mut stubs);
+                    }
+                }
+                InputArg::Framework(name, _) | InputArg::NeededFramework(name) => {
+                    if let Some(path) = find_framework(ctx, name) {
+                        consider(&path, &mut stubs);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let wave1 = tapi::prefetch(&ctx.diag, &stubs);
+        let mut deps: Vec<&'static MappedFile> = Vec::new();
+        for tbd in &wave1 {
+            for name in &tbd.external_reexports {
+                if let Some(dep) = crate::input_files::find_reexport_file(ctx, name) {
+                    if get_file_type(dep) == FileType::Tapi {
+                        deps.push(dep);
+                    }
+                }
+            }
+        }
+        tapi::prefetch(&ctx.diag, &deps);
+    }
+
     let mut queue: Vec<PendingObject> = Vec::new();
     for arg in &inputs {
         match arg {
@@ -1618,8 +1666,8 @@ pub fn create_output_sections<E: Arch>(ctx: &mut Context<E>) {
     // hot loop does no allocation and no linear scans; chunks are
     // still created in first-encounter order.
     let attr_mask = if ctx.args.relocatable { !0 } else { !S_ATTR_DEBUG };
-    let mut by_name: std::collections::HashMap<([u8; 16], [u8; 16]), usize> =
-        std::collections::HashMap::new();
+    let mut by_name: hashbrown::HashMap<([u8; 16], [u8; 16]), usize> =
+        hashbrown::HashMap::new();
     for i in 0..ctx.isecs.len() {
         if !ctx.isecs[i].is_alive || ctx.isecs[i].replacement.is_some() {
             continue;
