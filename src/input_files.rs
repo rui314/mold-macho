@@ -308,11 +308,14 @@ pub fn stage_object<E: Arch>(
                     let mut start = 0;
                     while start < contents.len() {
                         points.push(sect.addr + start as u64);
-                        let Some(len) = contents[start..].iter().position(|&b| b == 0)
-                        else {
-                            fatal!(diag, "{}: malformed __cstring section", mf.name);
+                        let rest = &contents[start..];
+                        let p = unsafe {
+                            libc::memchr(rest.as_ptr() as *const _, 0, rest.len())
                         };
-                        start += len + 1;
+                        if p.is_null() {
+                            fatal!(diag, "{}: malformed __cstring section", mf.name);
+                        }
+                        start += (p as usize - rest.as_ptr() as usize) + 1;
                     }
                 }
                 S_4BYTE_LITERALS => points.extend((0..sect.size).step_by(4).map(|o| sect.addr + o)),
