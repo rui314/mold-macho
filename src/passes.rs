@@ -2588,7 +2588,7 @@ pub fn create_output_symtab<E: Arch>(
         .filter(|&(_, &c)| c == Class::Undef)
         .map(|(i, _)| i)
         .collect();
-    undefs.par_sort_by_key(|&i| crate::util::name_sort_key(ctx.symtab[i].name));
+    undefs.par_sort_unstable_by_key(|&i| crate::util::name_sort_key(ctx.symtab[i].name));
 
     for &i in &undefs {
         let sym = &ctx.symtab[i];
@@ -2834,7 +2834,7 @@ pub fn set_osec_offsets<E: Arch>(ctx: &mut Context<E>) {
                             })
                     })
                     .collect();
-                v.par_sort_by_key(|&i| crate::util::name_sort_key(shared.symtab[i].name));
+                v.par_sort_unstable_by_key(|&i| crate::util::name_sort_key(shared.symtab[i].name));
                 v
             })};
             let ((symtab, trie), (streams, (starts, dice))) = rayon::join(
