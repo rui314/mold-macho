@@ -1820,12 +1820,25 @@ pub fn create_output_sections<E: Arch>(ctx: &mut Context<E>) {
     let attr_mask = if ctx.args.relocatable { !0 } else { !S_ATTR_DEBUG };
     let mut by_name: hashbrown::HashMap<([u8; 16], [u8; 16]), usize> =
         hashbrown::HashMap::new();
+    // All subsections of one input section share the exact same leaked
+    // header pointer and are contiguous in the arena, and a header
+    // uniquely names one (object, section) - so a section's whole run
+    // of subsections maps to the same output chunk. Cache the last
+    // header pointer to skip the 32-byte name hash for all but the
+    // first subsection of each section; on a debug link this turns
+    // millions of hash lookups into a handful of thousands.
+    let mut last_hdr: *const crate::macho::MachSection = std::ptr::null();
+    let mut last_chunk: usize = 0;
     for i in 0..ctx.isecs.len() {
         if !ctx.isecs[i].is_alive || ctx.isecs[i].replacement.is_some() {
             continue;
         }
+        let hdr_ptr = ctx.isecs[i].hdr as *const crate::macho::MachSection;
+        let chunk_idx = if hdr_ptr == last_hdr {
+            last_chunk
+        } else {
         let key = (ctx.isecs[i].hdr.segname, ctx.isecs[i].hdr.sectname);
-        let chunk_idx = match by_name.get(&key) {
+        let idx = match by_name.get(&key) {
             Some(&idx) => idx,
             None => {
                 let segname: &'static str = match ctx.isecs[i].hdr.segname() {
@@ -1851,6 +1864,10 @@ pub fn create_output_sections<E: Arch>(ctx: &mut Context<E>) {
                 by_name.insert(key, ctx.chunks.len() - 1);
                 ctx.chunks.len() - 1
             }
+        };
+        last_hdr = hdr_ptr;
+        last_chunk = idx;
+        idx
         };
 
         let chunk = &mut ctx.chunks[chunk_idx];
