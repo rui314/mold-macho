@@ -2192,118 +2192,138 @@ pub fn create_output_symtab<E: Arch>(
         let cwd = std::env::current_dir()
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_default();
+        let cwd = &cwd;
 
-        for (obj_idx, obj) in ctx.objs.iter().enumerate() {
-            if !obj.has_debug_info || !obj.is_alive {
-                continue;
+        // Each object's stab run is independent; plan them in
+        // parallel and append in object order, the same shape as the
+        // per-object locals planning below.
+        use rayon::prelude::*;
+        let planned: Vec<Vec<(&'static str, NList, Option<crate::symbol::SymbolId>)>> = ctx
+            .objs
+            .par_iter()
+            .enumerate()
+            .map(|(obj_idx, obj)| {
+                let mut out: Vec<(&'static str, NList, Option<crate::symbol::SymbolId>)> =
+                    Vec::new();
+                if !obj.has_debug_info || !obj.is_alive {
+                    return out;
+                }
+
+                // The source-file N_SO's name is unused by debuggers; "-"
+                // stands in. N_OSO points at the object (or
+                // "archive(member)"), as an absolute path.
+                out.push((
+                    "",
+                    NList {
+                        n_strx: 2,
+                        n_type: N_SO,
+                        ..Default::default()
+                    },
+                    None,
+                ));
+                let mut oso_name = match obj.mf.parent {
+                    Some(parent) if parent.name.starts_with('/') => obj.mf.name.clone(),
+                    Some(_) | None if obj.mf.name.starts_with('/') => obj.mf.name.clone(),
+                    _ => format!("{cwd}/{}", obj.mf.name),
+                };
+                // -oso_prefix strips a leading path from every N_OSO, so
+                // debug builds relocated to another machine (or built in a
+                // sandbox) can still find their objects relative to a
+                // debugger's source map. "." means the current directory.
+                if let Some(prefix) = &ctx.args.oso_prefix {
+                    let prefix: &str =
+                        if prefix == "." { &format!("{cwd}/") } else { prefix };
+                    if let Some(rest) = oso_name.strip_prefix(prefix) {
+                        oso_name = rest.to_string();
+                    }
+                }
+                out.push((
+                    String::leak(std::mem::take(&mut oso_name)),
+                    NList {
+                        n_strx: 0,
+                        n_type: N_OSO,
+                        n_sect: E::CPUSUBTYPE as u8,
+                        n_desc: 1,
+                        n_value: 0,
+                    },
+                    None,
+                ));
+
+                for (nlist, &sym_id) in obj.nlists.iter().zip(&obj.syms) {
+                    let sym = &ctx.symtab[sym_id];
+                    if nlist.is_stab()
+                        || !matches!(sym.origin, Origin::Obj(o) if o == obj_idx)
+                        || (!nlist.is_extern() && !keep_local_symbol(sym.name))
+                    {
+                        continue;
+                    }
+                    let Some(isec) = sym.isec else { continue };
+                    let isec_id = ctx.resolve_isec(isec);
+                    let isec = &ctx.isecs[isec_id];
+                    if !isec.is_alive {
+                        continue;
+                    }
+
+                    let stab_name = sym.name;
+                    let is_text = isec.hdr.segname() == "__TEXT"
+                        && isec.hdr.flags
+                            & (S_ATTR_PURE_INSTRUCTIONS | S_ATTR_SOME_INSTRUCTIONS)
+                            != 0;
+                    if is_text {
+                        // A pair: the function's address, then its size.
+                        out.push((
+                            stab_name,
+                            NList {
+                                n_strx: 0,
+                                n_type: N_FUN,
+                                n_sect: ordinals[isec.osec],
+                                ..Default::default()
+                            },
+                            Some(sym_id),
+                        ));
+                        out.push((
+                            "",
+                            NList {
+                                n_strx: 1,
+                                n_type: N_FUN,
+                                n_value: isec.size,
+                                ..Default::default()
+                            },
+                            None,
+                        ));
+                    } else {
+                        out.push((
+                            stab_name,
+                            NList {
+                                n_strx: 0,
+                                n_type: if nlist.is_extern() { N_GSYM } else { N_STSYM },
+                                n_sect: ordinals[isec.osec],
+                                ..Default::default()
+                            },
+                            Some(sym_id),
+                        ));
+                    }
+                }
+
+                // An N_SO with an empty name closes the object's stabs.
+                out.push((
+                    "",
+                    NList {
+                        n_strx: 1,
+                        n_type: N_SO,
+                        n_sect: 1,
+                        ..Default::default()
+                    },
+                    None,
+                ));
+                out
+            })
+            .collect();
+        for plan in planned {
+            for (name, ent, sym) in plan {
+                names.push(name);
+                data.entries.push((ent, sym));
             }
-
-            // The source-file N_SO's name is unused by debuggers; "-"
-            // stands in. N_OSO points at the object (or "archive(member)"),
-            // as an absolute path.
-            names.push("");
-            data.entries.push((
-                NList {
-                    n_strx: 2,
-                    n_type: N_SO,
-                    ..Default::default()
-                },
-                None,
-            ));
-            let mut oso_name = match obj.mf.parent {
-                Some(parent) if parent.name.starts_with('/') => obj.mf.name.clone(),
-                Some(_) | None if obj.mf.name.starts_with('/') => obj.mf.name.clone(),
-                _ => format!("{cwd}/{}", obj.mf.name),
-            };
-            // -oso_prefix strips a leading path from every N_OSO, so
-            // debug builds relocated to another machine (or built in a
-            // sandbox) can still find their objects relative to a
-            // debugger's source map. "." means the current directory.
-            if let Some(prefix) = &ctx.args.oso_prefix {
-                let prefix: &str = if prefix == "." { &format!("{cwd}/") } else { prefix };
-                if let Some(rest) = oso_name.strip_prefix(prefix) {
-                    oso_name = rest.to_string();
-                }
-            }
-            names.push(String::leak(std::mem::take(&mut oso_name)));
-            data.entries.push((
-                NList {
-                    n_strx: 0,
-                    n_type: N_OSO,
-                    n_sect: E::CPUSUBTYPE as u8,
-                    n_desc: 1,
-                    n_value: 0,
-                },
-                None,
-            ));
-
-            for (nlist, &sym_id) in obj.nlists.iter().zip(&obj.syms) {
-                let sym = &ctx.symtab[sym_id];
-                if nlist.is_stab()
-                    || !matches!(sym.origin, Origin::Obj(o) if o == obj_idx)
-                    || (!nlist.is_extern() && !keep_local_symbol(sym.name))
-                {
-                    continue;
-                }
-                let Some(isec) = sym.isec else { continue };
-                let isec_id = ctx.resolve_isec(isec);
-                let isec = &ctx.isecs[isec_id];
-                if !isec.is_alive {
-                    continue;
-                }
-
-                let n_strx = 0;
-                let stab_name = sym.name;
-                let is_text = isec.hdr.segname() == "__TEXT"
-                    && isec.hdr.flags & (S_ATTR_PURE_INSTRUCTIONS | S_ATTR_SOME_INSTRUCTIONS)
-                        != 0;
-                if is_text {
-                    // A pair: the function's address, then its size.
-                    names.push(stab_name);
-                    names.push("");
-                    data.entries.push((
-                        NList {
-                            n_strx,
-                            n_type: N_FUN,
-                            n_sect: ordinals[isec.osec],
-                            ..Default::default()
-                        },
-                        Some(sym_id),
-                    ));
-                    data.entries.push((
-                        NList {
-                            n_strx: 1,
-                            n_type: N_FUN,
-                            n_value: isec.size,
-                            ..Default::default()
-                        },
-                        None,
-                    ));
-                } else {
-                    names.push(stab_name);
-                    data.entries.push((
-                        NList {
-                            n_strx,
-                            n_type: if nlist.is_extern() { N_GSYM } else { N_STSYM },
-                            n_sect: ordinals[isec.osec],
-                            ..Default::default()
-                        },
-                        Some(sym_id),
-                    ));
-                }
-            }
-
-            // An N_SO with an empty name closes the object's stabs.
-            names.push("");
-            data.entries.push((
-                NList {
-                    n_strx: 1,
-                    n_type: N_SO,
-                    n_sect: 1,
-                    ..Default::default()
-                },
-                None,
-            ));
         }
     }
 
