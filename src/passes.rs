@@ -1180,7 +1180,7 @@ pub fn create_objc_msgsend_stubs<E: Arch>(ctx: &mut Context<E>) {
         let idx = ctx.objc_stubs.len() as u32;
         let sym = &mut ctx.symtab[i];
         sym.origin = Origin::Synthetic;
-        sym.objc_stub_idx = Some(idx);
+        sym.objc_stub_idx = idx;
         ctx.objc_stubs.push((i, sel));
     }
 
@@ -1615,22 +1615,22 @@ pub fn scan_unwind_personalities<E: Arch>(ctx: &mut Context<E>) {
 }
 
 fn add_thread_ptr<E: Arch>(ctx: &mut Context<E>, id: crate::symbol::SymbolId) {
-    if ctx.symtab[id].tlv_idx.is_none() {
-        ctx.symtab[id].tlv_idx = Some(ctx.thread_ptr_syms.len() as u32);
+    if ctx.symtab[id].tlv_idx == crate::symbol::NO_IDX {
+        ctx.symtab[id].tlv_idx = ctx.thread_ptr_syms.len() as u32;
         ctx.thread_ptr_syms.push(id);
     }
 }
 
 fn add_stub<E: Arch>(ctx: &mut Context<E>, id: crate::symbol::SymbolId) {
-    if ctx.symtab[id].stub_idx.is_none() {
-        ctx.symtab[id].stub_idx = Some(ctx.stub_syms.len() as u32);
+    if ctx.symtab[id].stub_idx == crate::symbol::NO_IDX {
+        ctx.symtab[id].stub_idx = ctx.stub_syms.len() as u32;
         ctx.stub_syms.push(id);
     }
 }
 
 fn add_got<E: Arch>(ctx: &mut Context<E>, id: crate::symbol::SymbolId) {
-    if ctx.symtab[id].got_idx.is_none() {
-        ctx.symtab[id].got_idx = Some(ctx.got_syms.len() as u32);
+    if ctx.symtab[id].got_idx == crate::symbol::NO_IDX {
+        ctx.symtab[id].got_idx = ctx.got_syms.len() as u32;
         ctx.got_syms.push(id);
     }
 }

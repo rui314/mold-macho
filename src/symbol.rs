@@ -48,17 +48,23 @@ pub struct Symbol {
     /// converted to a real one; `value` holds its size.
     pub is_common: bool,
     pub common_p2align: u8,
+    /// Synthetic-slot indices, `NO_IDX` when the symbol has no such
+    /// slot. Plain `u32`s rather than `Option<u32>` (which would be 8
+    /// bytes each) to keep Symbol small - it is loaded in every scan.
     /// The symbol's entry in __stubs, if branches to it need one.
-    pub stub_idx: Option<u32>,
+    pub stub_idx: u32,
     /// The symbol's entry in __got, if it is address-taken through the
     /// GOT.
-    pub got_idx: Option<u32>,
+    pub got_idx: u32,
     /// The symbol's slot in __thread_ptrs, for thread-local variables.
-    pub tlv_idx: Option<u32>,
+    pub tlv_idx: u32,
     /// The symbol's entry in __objc_stubs, for linker-synthesized
     /// _objc_msgSend$selector stubs.
-    pub objc_stub_idx: Option<u32>,
+    pub objc_stub_idx: u32,
 }
+
+/// Sentinel for a synthetic-slot index a symbol does not have.
+pub const NO_IDX: u32 = u32::MAX;
 
 impl Symbol {
     pub(crate) fn new(name: &'static str) -> Symbol {
@@ -76,10 +82,10 @@ impl Symbol {
             no_dead_strip: false,
             is_common: false,
             common_p2align: 0,
-            stub_idx: None,
-            got_idx: None,
-            tlv_idx: None,
-            objc_stub_idx: None,
+            stub_idx: NO_IDX,
+            got_idx: NO_IDX,
+            tlv_idx: NO_IDX,
+            objc_stub_idx: NO_IDX,
         }
     }
 

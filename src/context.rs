@@ -239,38 +239,44 @@ impl<E: Arch> Context<E> {
                 error!(self, "undefined symbol: {}", sym.name);
                 0
             }
-            Origin::Obj(_) | Origin::Synthetic => match (sym.isec, sym.objc_stub_idx) {
-                (Some(isec), _) => self.isec_addr(isec) + sym.value,
-                (None, Some(idx)) => {
-                    self.chunks[self.objc_stubs_chunk].hdr.addr + idx as u64 * E::OBJC_STUB_SIZE
+            Origin::Obj(_) | Origin::Synthetic => {
+                if let Some(isec) = sym.isec {
+                    self.isec_addr(isec) + sym.value
+                } else if sym.objc_stub_idx != crate::symbol::NO_IDX {
+                    self.chunks[self.objc_stubs_chunk].hdr.addr
+                        + sym.objc_stub_idx as u64 * E::OBJC_STUB_SIZE
+                } else {
+                    sym.value
                 }
-                (None, None) => sym.value,
-            },
+            }
             // A branch to a dylib symbol goes through its stub. Other
             // references to dylib symbols are filled in by dyld; the
             // relocation scan has already validated them.
-            Origin::Dylib(_) => match sym.stub_idx {
-                Some(_) => self.sym_stub_addr(id),
-                None => 0,
-            },
+            Origin::Dylib(_) => {
+                if sym.stub_idx != crate::symbol::NO_IDX {
+                    self.sym_stub_addr(id)
+                } else {
+                    0
+                }
+            }
         }
     }
 
     /// Returns the address of a symbol's __stubs entry.
     pub fn sym_stub_addr(&self, id: SymbolId) -> u64 {
         self.chunks[self.stubs_chunk].hdr.addr
-            + self.symtab[id].stub_idx.unwrap() as u64 * E::STUB_SIZE
+            + self.symtab[id].stub_idx as u64 * E::STUB_SIZE
     }
 
     /// Returns the address of a symbol's __got slot.
     pub fn sym_got_addr(&self, id: SymbolId) -> u64 {
-        self.chunks[self.got_chunk].hdr.addr + self.symtab[id].got_idx.unwrap() as u64 * 8
+        self.chunks[self.got_chunk].hdr.addr + self.symtab[id].got_idx as u64 * 8
     }
 
     /// Returns the address of a symbol's __thread_ptrs slot.
     pub fn sym_tlv_ptr_addr(&self, id: SymbolId) -> u64 {
         self.chunks[self.thread_ptrs_chunk].hdr.addr
-            + self.symtab[id].tlv_idx.unwrap() as u64 * 8
+            + self.symtab[id].tlv_idx as u64 * 8
     }
 
     /// Returns the symbol a relocation refers to, if it refers to one.
