@@ -152,6 +152,116 @@ impl SipHash13_128 {
     }
 }
 
+/// A lock-free digest -> leader map, ported from mold-rust. It counts
+/// the distinct digests in a propagation round and, as a side effect,
+/// records the lowest-index candidate for each digest as its class
+/// leader - so counting classes and electing leaders is one pass, no
+/// sort. Slots are stamped with the round they were written in and the
+/// table is reused across rounds without clearing (a slot from an
+/// earlier round reads as vacant).
+struct DigestSlot {
+    hi: std::sync::atomic::AtomicU64,
+    lo: std::sync::atomic::AtomicU64,
+    leader: std::sync::atomic::AtomicU32,
+}
+struct DigestMap {
+    round: u64,
+    mask: usize,
+    slots: Vec<DigestSlot>,
+}
+impl DigestMap {
+    fn new(n: usize) -> DigestMap {
+        let len = n.saturating_mul(2).next_power_of_two();
+        DigestMap {
+            round: 1,
+            mask: len - 1,
+            slots: (0..len)
+                .map(|_| DigestSlot {
+                    hi: std::sync::atomic::AtomicU64::new(0),
+                    lo: std::sync::atomic::AtomicU64::new(0),
+                    leader: std::sync::atomic::AtomicU32::new(0),
+                })
+                .collect(),
+        }
+    }
+
+    fn next_round(&mut self) {
+        self.round += 1;
+    }
+
+    /// Inserts (digest -> candidate), keeping the lowest candidate index
+    /// as the leader. Returns true if the digest was not already present
+    /// this round.
+    fn insert(&self, digest: Digest, cand: u32) -> bool {
+        use std::sync::atomic::Ordering;
+        const BUSY_BIT: u64 = 1 << 48;
+        let tag = digest.hi >> 16;
+        let value = (self.round << 49) | tag;
+        let mut i = digest.hi as usize & self.mask;
+        loop {
+            let slot = &self.slots[i];
+            let mut x = slot.hi.load(Ordering::Acquire);
+            while x >> 49 != self.round {
+                match slot.hi.compare_exchange_weak(
+                    x,
+                    value | BUSY_BIT,
+                    Ordering::Acquire,
+                    Ordering::Relaxed,
+                ) {
+                    Ok(_) => {
+                        slot.lo.store(digest.lo, Ordering::Relaxed);
+                        slot.leader.store(cand, Ordering::Relaxed);
+                        slot.hi.store(value, Ordering::Release);
+                        return true;
+                    }
+                    Err(actual) => x = actual,
+                }
+            }
+            if x & 0xffff_ffff_ffff != tag {
+                i = (i + 1) & self.mask;
+                continue;
+            }
+            while x & BUSY_BIT != 0 {
+                std::hint::spin_loop();
+                x = slot.hi.load(Ordering::Acquire);
+            }
+            if slot.lo.load(Ordering::Relaxed) != digest.lo {
+                i = (i + 1) & self.mask;
+                continue;
+            }
+            // Already present; keep the lowest candidate index as leader.
+            let mut cur = slot.leader.load(Ordering::Relaxed);
+            while cand < cur {
+                match slot.leader.compare_exchange_weak(
+                    cur,
+                    cand,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                ) {
+                    Ok(_) => break,
+                    Err(actual) => cur = actual,
+                }
+            }
+            return false;
+        }
+    }
+
+    fn find(&self, digest: Digest) -> u32 {
+        use std::sync::atomic::Ordering;
+        let value = (self.round << 49) | (digest.hi >> 16);
+        let mut i = digest.hi as usize & self.mask;
+        loop {
+            let slot = &self.slots[i];
+            if slot.hi.load(Ordering::Relaxed) == value
+                && slot.lo.load(Ordering::Relaxed) == digest.lo
+            {
+                return slot.leader.load(Ordering::Relaxed);
+            }
+            i = (i + 1) & self.mask;
+        }
+    }
+}
+
 pub fn icf_sections<E: Arch>(ctx: &mut Context<E>) {
     use rayon::prelude::*;
 
@@ -351,16 +461,18 @@ pub fn icf_sections<E: Arch>(ctx: &mut Context<E>) {
         });
     }
 
-    // Refine until the number of equivalence classes stops growing,
-    // as mold does. Counting classes costs about as much as a
+    // Refine until the number of equivalence classes stops growing, as
+    // mold does. Counting the classes costs about as much as a
     // propagation, so propagate three times per count (mold's ratio),
-    // ping-ponging between two buffers instead of allocating a fresh
-    // vector every round. Classes only ever split, so the count is
+    // ping-ponging between two buffers. count_classes inserts every
+    // digest into the reused DigestMap - which counts distinct digests
+    // and elects each class's leader in one pass - so no sort is needed
+    // here or afterward. Classes only ever split, so the count is
     // monotone and the loop terminates.
     let mut hashes = base;
     let mut scratch = vec![Digest::default(); hashes.len()];
-    let mut sorted: Vec<Digest> = Vec::new();
-    let mut prev_classes = 0usize;
+    let mut map = DigestMap::new(candidates.len());
+    let mut prev_classes = usize::MAX;
     loop {
         for _ in 0..3 {
             let cur = &hashes;
@@ -382,83 +494,66 @@ pub fn icf_sections<E: Arch>(ctx: &mut Context<E>) {
                 .collect_into_vec(&mut scratch);
             std::mem::swap(&mut hashes, &mut scratch);
         }
-        sorted.clone_from(&hashes);
-        sorted.par_sort_unstable();
-        sorted.dedup();
-        if sorted.len() == prev_classes {
+        map.next_round();
+        let n: usize = (0..candidates.len())
+            .into_par_iter()
+            .map(|i| map.insert(hashes[i], i as u32) as usize)
+            .sum();
+        if n == prev_classes {
             break;
         }
-        prev_classes = sorted.len();
+        prev_classes = n;
     }
 
-    // Group by final hash and fold each group onto its first member,
-    // after verifying literal equality to rule out collisions.
     if std::env::var_os("MOLD_TIMING").is_some() {
         eprintln!("      icf-rounds {:?}", __t.elapsed());
     }
     let __t = std::time::Instant::now();
-    // Group by sorting (digest, id) pairs; equal digests become
-    // contiguous runs and the smallest member leads each class.
-    let mut pairs: Vec<(Digest, u32)> = hashes
-        .iter()
-        .zip(&candidates)
-        .map(|(&h, &id)| (h, id as u32))
+
+    // The final counting round elected a leader (lowest candidate index)
+    // for every digest; look each candidate's leader up and fold the
+    // non-leaders onto it. The converged 128-bit digests are the
+    // equivalence classes, folded directly, as mold does; debug builds
+    // re-verify byte equality as an assertion.
+    let leaders: Vec<u32> = (0..candidates.len())
+        .into_par_iter()
+        .map(|i| map.find(hashes[i]))
         .collect();
-    pairs.par_sort_unstable();
 
-    let equal = |ctx: &Context<E>, a: usize, b: usize| -> bool {
-        let (x, y) = (&ctx.isecs[a], &ctx.isecs[b]);
-        if x.data != y.data || x.hdr.flags != y.hdr.flags || x.relocs.len() != y.relocs.len() {
-            return false;
+    #[cfg(debug_assertions)]
+    {
+        let equal = |a: usize, b: usize| -> bool {
+            let (x, y) = (&ctx.isecs[a], &ctx.isecs[b]);
+            x.data == y.data
+                && x.hdr.flags == y.hdr.flags
+                && x.relocs.len() == y.relocs.len()
+                && x.relocs.iter().zip(&y.relocs).all(|(r, s)| {
+                    r.offset == s.offset
+                        && r.r_type == s.r_type
+                        && r.size == s.size
+                        && r.is_pcrel == s.is_pcrel
+                        && edge_of(ctx, x.obj, r.target, r.addend)
+                            == edge_of(ctx, y.obj, s.target, s.addend)
+                })
+        };
+        for (i, &l) in leaders.iter().enumerate() {
+            debug_assert!(equal(candidates[i], candidates[l as usize]));
         }
-        x.relocs.iter().zip(&y.relocs).all(|(r, s)| {
-            r.offset == s.offset
-                && r.r_type == s.r_type
-                && r.size == s.size
-                && r.is_pcrel == s.is_pcrel
-                && edge_of(ctx, x.obj, r.target, r.addend)
-                    == edge_of(ctx, y.obj, s.target, s.addend)
-        })
-    };
+    }
 
-    // The converged 128-bit digests are the equivalence classes; fold
-    // each run onto its first member in one pass, as mold folds its
-    // groups directly. (The old byte-verifying fixpoint re-walked
-    // every group until stable - hundreds of milliseconds on a link
-    // with 840k candidates.) debug builds keep the byte check as an
-    // assertion.
-    if std::env::var_os("MOLD_TIMING").is_some() {
-        eprintln!("      icf-group {:?}", __t.elapsed());
-    }
-    let __t = std::time::Instant::now();
-    let mut i = 0;
-    while i < pairs.len() {
-        let digest = pairs[i].0;
-        let mut j = i + 1;
-        while j < pairs.len() && pairs[j].0 == digest {
-            j += 1;
+    // Fold members onto leaders and give each leader the strongest
+    // alignment among its members (mold's update_alignment): the leader
+    // is laid out for every folded reference.
+    for (i, &l) in leaders.iter().enumerate() {
+        let l = l as usize;
+        if l != i {
+            let member = candidates[i];
+            let leader = candidates[l];
+            ctx.isecs[member].replacement = Some(leader);
+            let a = ctx.isecs[member].hdr.p2align;
+            ctx.isecs[leader].hdr.p2align = ctx.isecs[leader].hdr.p2align.max(a);
         }
-        if j - i >= 2 {
-            let leader = pairs[i].1 as usize;
-            if ctx.isecs[leader].replacement.is_none() {
-                let mut align = ctx.isecs[leader].hdr.p2align;
-                for k in i + 1..j {
-                    let id = pairs[k].1 as usize;
-                    if ctx.isecs[id].replacement.is_none() {
-                        debug_assert!(equal(ctx, leader, id));
-                        ctx.isecs[id].replacement = Some(leader);
-                        align = align.max(ctx.isecs[id].hdr.p2align);
-                    }
-                }
-                // The leader is laid out for every folded member, so it
-                // must carry the strongest alignment among them - mold's
-                // update_alignment.
-                ctx.isecs[leader].hdr.p2align = align;
-            }
-        }
-        i = j;
     }
-    let _ = &equal;
     if std::env::var_os("MOLD_TIMING").is_some() {
         eprintln!("      icf-fold {:?}", __t.elapsed());
     }
