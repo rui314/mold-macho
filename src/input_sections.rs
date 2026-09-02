@@ -72,8 +72,10 @@ pub struct InputSection {
     /// The output section chunk this section is appended to (u32 index;
     /// `u32::MAX` until assigned).
     pub osec: u32,
-    /// Offset from the start of the output section.
-    pub output_offset: u64,
+    /// Offset from the start of the output section (u32::MAX marks a
+    /// subsection not yet placed, during thunk layout). An output
+    /// section stays well under 4 GiB, so a u32 suffices.
+    pub output_offset: u32,
     /// The final output address. Layout visits one output section at a
     /// time and assigns its contents global addresses on the spot;
     /// everything that depends on code or data addresses (the trie,
@@ -95,4 +97,4 @@ pub struct InputSection {
 // InputSection is the highest-count struct in a link (millions on a
 // debug build), so it is kept compact - mold-rust's is 64 bytes; ours
 // carries a few Mach-O-specific fields more.
-const _: () = assert!(std::mem::size_of::<InputSection>() == 96);
+const _: () = assert!(std::mem::size_of::<InputSection>() == 88);

@@ -1977,7 +1977,7 @@ pub fn create_output_sections<E: Arch>(ctx: &mut Context<E>) {
                 unreachable!()
             };
             for (&id, off) in isecs.clone().iter().zip(offs) {
-                ctx.isecs[id].output_offset = off;
+                ctx.isecs[id].output_offset = off as u32;
             }
             ctx.chunks[chunk_idx].hdr.size = size;
         }
@@ -1994,7 +1994,7 @@ pub fn create_output_sections<E: Arch>(ctx: &mut Context<E>) {
             };
             let data_end = isecs
                 .last()
-                .map(|&id| ctx.isecs[id].output_offset + ctx.isecs[id].size)
+                .map(|&id| ctx.isecs[id].output_offset as u64 + ctx.isecs[id].size)
                 .unwrap_or(0);
             let chunk = &mut ctx.chunks[chunk_idx];
             chunk.hdr.size = end.max(data_end);
@@ -2779,7 +2779,7 @@ fn assign_isec_addrs<E: Arch>(ctx: &mut Context<E>, chunk_idx: usize) {
     use rayon::prelude::*;
     members.par_iter().for_each(|&id| unsafe {
         let isec = &mut *ptr.0.add(id);
-        isec.addr = base + isec.output_offset;
+        isec.addr = base + isec.output_offset as u64;
     });
 }
 
@@ -3064,7 +3064,7 @@ fn build_rebase_info<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
         if !isec.is_alive || isec.replacement != crate::input_sections::NO_REPLACEMENT {
             continue;
         }
-        let base = ctx.chunks[isec.osec as usize].hdr.addr + isec.output_offset;
+        let base = ctx.chunks[isec.osec as usize].hdr.addr + isec.output_offset as u64;
         for rel in crate::input_files::isec_relocs_of(&ctx.objs, isec) {
             if E::classify_reloc(rel.r_type) != RelocClass::Plain
                 || rel.size != 8
@@ -3198,7 +3198,7 @@ fn build_bind_info<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
         if !isec.is_alive || isec.replacement != crate::input_sections::NO_REPLACEMENT {
             continue;
         }
-        let base = ctx.chunks[isec.osec as usize].hdr.addr + isec.output_offset;
+        let base = ctx.chunks[isec.osec as usize].hdr.addr + isec.output_offset as u64;
         for rel in crate::input_files::isec_relocs_of(&ctx.objs, isec) {
             if E::classify_reloc(rel.r_type) != RelocClass::Plain
                 || rel.size != 8
@@ -3282,7 +3282,7 @@ fn collect_fixups<E: Arch>(ctx: &Context<E>) -> Vec<(u64, Option<crate::symbol::
         .par_iter()
         .filter(|isec| isec.is_alive && isec.replacement == crate::input_sections::NO_REPLACEMENT)
         .flat_map_iter(|isec| {
-            let base = ctx.chunks[isec.osec as usize].hdr.addr + isec.output_offset;
+            let base = ctx.chunks[isec.osec as usize].hdr.addr + isec.output_offset as u64;
             crate::input_files::isec_relocs_of(&ctx.objs, isec).iter().filter_map(move |rel| {
                 if E::classify_reloc(rel.r_type) != RelocClass::Plain
                     || rel.size != 8
@@ -3668,7 +3668,7 @@ fn build_data_in_code<E: Arch>(ctx: &Context<E>) -> Vec<(u32, u16, u16)> {
             };
             let isec = &ctx.isecs[ctx.resolve_isec(isec as usize)];
             if isec.is_alive {
-                let fileoff = ctx.chunks[isec.osec as usize].hdr.fileoff + isec.output_offset + off_in;
+                let fileoff = ctx.chunks[isec.osec as usize].hdr.fileoff + isec.output_offset as u64 + off_in;
                 out.push((fileoff as u32, len, kind));
             }
         }
@@ -3695,7 +3695,7 @@ fn build_function_starts<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
                 && isec.hdr.segname() == "__TEXT"
                 && isec.hdr.sectname() == "__text"
             {
-                Some(ctx.chunks[isec.osec as usize].hdr.addr + isec.output_offset + sym.value)
+                Some(ctx.chunks[isec.osec as usize].hdr.addr + isec.output_offset as u64 + sym.value)
             } else {
                 None
             }
@@ -3767,7 +3767,7 @@ fn copy_chunk<E: Arch>(ctx: &Context<E>, chunk: &Chunk, buf: &mut [u8]) {
                     std::slice::from_raw_parts_mut(bufp.0.add(off), isec.data.len())
                 };
                 slice.copy_from_slice(isec.data);
-                let base = chunk.hdr.addr + isec.output_offset;
+                let base = chunk.hdr.addr + isec.output_offset as u64;
                 E::apply_relocs(ctx, ctx.isec_relocs(id), id, base, slice);
             });
         }

@@ -68,7 +68,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
         match sym.isec {
             Some(isec) => {
                 let isec = &ctx.isecs[ctx.resolve_isec(isec as usize)];
-                ctx.chunks[isec.osec as usize].hdr.addr + isec.output_offset + sym.value
+                ctx.chunks[isec.osec as usize].hdr.addr + isec.output_offset as u64 + sym.value
             }
             None => sym.value,
         }
@@ -197,7 +197,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
             continue;
         }
         let entry = cu_data.len() as u32;
-        let func_addr = ctx.chunks[isec.osec as usize].hdr.addr + isec.output_offset
+        let func_addr = ctx.chunks[isec.osec as usize].hdr.addr + isec.output_offset as u64
             + rec.input_offset as u64;
         cu_data.extend_from_slice(&func_addr.to_le_bytes());
         cu_data.extend_from_slice(&rec.code_len.to_le_bytes());
@@ -224,7 +224,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
         match rec.lsda {
             Some((lsda, off)) => {
                 let l = &ctx.isecs[ctx.resolve_isec(lsda)];
-                let lsda_addr = ctx.chunks[l.osec as usize].hdr.addr + l.output_offset + off as u64;
+                let lsda_addr = ctx.chunks[l.osec as usize].hdr.addr + l.output_offset as u64 + off as u64;
                 cu_data.extend_from_slice(&lsda_addr.to_le_bytes());
                 cu_relocs.push(MachRel {
                     r_address: entry + 24,
@@ -299,7 +299,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
 
             let isec = &ctx.isecs[ctx.resolve_isec(fde.isec)];
             let func_addr =
-                ctx.chunks[isec.osec as usize].hdr.addr + isec.output_offset + fde.func_offset as u64;
+                ctx.chunks[isec.osec as usize].hdr.addr + isec.output_offset as u64 + fde.func_offset as u64;
             eh_patches.push((off + 8, func_addr, 8));
 
             if let Some((lsda, lsda_off)) = fde.lsda {
@@ -310,7 +310,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
                 pos += 1;
                 let l = &ctx.isecs[ctx.resolve_isec(lsda)];
                 let lsda_addr =
-                    ctx.chunks[l.osec as usize].hdr.addr + l.output_offset + lsda_off as u64;
+                    ctx.chunks[l.osec as usize].hdr.addr + l.output_offset as u64 + lsda_off as u64;
                 eh_patches.push((off + pos, lsda_addr, ctx.cies[fde.cie].lsda_size));
             }
         }
@@ -341,7 +341,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
         for &id in isecs {
             let isec = &ctx.isecs[id];
             for rel in crate::input_files::isec_relocs_of(&ctx.objs, isec) {
-                let r_address = (isec.output_offset + rel.offset as u64) as u32;
+                let r_address = (isec.output_offset as u64 + rel.offset as u64) as u32;
                 let length = rel.size.trailing_zeros();
 
                 match rel.target {
@@ -593,7 +593,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
                 let target = ctx.resolve_isec(target as usize);
                 let t = &ctx.isecs[target];
                 let target_addr =
-                    ctx.chunks[t.osec as usize].hdr.addr + t.output_offset + rel.addend as u64;
+                    ctx.chunks[t.osec as usize].hdr.addr + t.output_offset as u64 + rel.addend as u64;
                 let loc = dst + rel.offset as usize;
                 if rel.r_type == E::RELOC_UNSIGNED && !rel.is_pcrel {
                     match rel.size {
@@ -605,7 +605,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
                 } else if rel.is_pcrel {
                     // Pcrel non-external fields embed target - (P + 4).
                     let here = ctx.chunks[chunk_idx].hdr.addr
-                        + isec.output_offset
+                        + isec.output_offset as u64
                         + rel.offset as u64;
                     let val = target_addr.wrapping_sub(here + 4) as u32;
                     if rel.size == 4 {

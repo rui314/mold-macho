@@ -154,13 +154,13 @@ impl Arch for Arm64 {
                         continue 'hint;
                     };
                     let isec = &ctx.isecs[ctx.resolve_isec(isec)];
-                    if !isec.is_alive || isec.output_offset == u64::MAX {
+                    if !isec.is_alive || isec.output_offset == u32::MAX {
                         continue 'hint;
                     }
                     let chunk = &ctx.chunks[isec.osec as usize];
                     locs.push((
-                        (chunk.hdr.fileoff + isec.output_offset + off) as usize,
-                        chunk.hdr.addr + isec.output_offset + off,
+                        (chunk.hdr.fileoff + isec.output_offset as u64 + off) as usize,
+                        chunk.hdr.addr + isec.output_offset as u64 + off,
                     ));
                 }
                 let insn =
