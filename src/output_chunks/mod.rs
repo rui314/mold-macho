@@ -636,16 +636,25 @@ pub fn copy_mach_header<E: Arch>(ctx: &Context<E>, buf: &mut [u8]) {
 }
 
 pub fn copy_symtab<E: Arch>(ctx: &Context<E>, buf: &mut [u8]) {
+    use rayon::prelude::*;
     let chunk = &ctx.chunks[find_chunk(ctx, |k| matches!(k, ChunkKind::Symtab)).unwrap()];
-    let mut off = chunk.hdr.fileoff as usize;
-    for (nlist, sym) in &ctx.symtab_data.entries {
-        let mut nlist = *nlist;
-        if let Some(id) = sym {
-            nlist.n_value = ctx.sym_addr(*id);
-        }
-        nlist.write_to(&mut buf[off..]);
-        off += size_of::<NList>();
-    }
+    let off = chunk.hdr.fileoff as usize;
+    let entries = &ctx.symtab_data.entries;
+    // Millions of entries, each wanting a sym_addr lookup for its
+    // n_value: emit them in parallel blocks.
+    const BLOCK: usize = 4096;
+    buf[off..off + entries.len() * size_of::<NList>()]
+        .par_chunks_mut(BLOCK * size_of::<NList>())
+        .zip(entries.par_chunks(BLOCK))
+        .for_each(|(out, ents)| {
+            for (i, (nlist, sym)) in ents.iter().enumerate() {
+                let mut nlist = *nlist;
+                if let Some(id) = sym {
+                    nlist.n_value = ctx.sym_addr(*id);
+                }
+                nlist.write_to(&mut out[i * size_of::<NList>()..]);
+            }
+        });
 
     let chunk = &ctx.chunks[find_chunk(ctx, |k| matches!(k, ChunkKind::Strtab)).unwrap()];
     let off = chunk.hdr.fileoff as usize;
