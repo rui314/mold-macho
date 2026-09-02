@@ -2304,23 +2304,60 @@ pub fn create_output_symtab<E: Arch>(ctx: &mut Context<E>) {
         eprintln!("      symtab-locals {:?}", __t.elapsed());
     }
     let __t = std::time::Instant::now();
+    // One parallel pass classifies the whole symbol table - private
+    // externals (emitted among the locals), defined globals and
+    // undefineds - instead of three full scans over millions of
+    // slots.
+    #[derive(Clone, Copy, PartialEq)]
+    enum Class {
+        No,
+        Pext,
+        Global,
+        Undef,
+    }
+    let classes: Vec<Class> = {
+        use rayon::prelude::*;
+        (0..ctx.symtab.syms.len())
+            .into_par_iter()
+            .map(|i| {
+                let sym = &ctx.symtab[i];
+                if matches!(sym.origin, Origin::Dylib(_)) {
+                    return Class::Undef;
+                }
+                if sym.is_extern
+                    && sym.is_private_extern
+                    && matches!(sym.origin, Origin::Obj(_))
+                    && sym
+                        .isec
+                        .is_some_and(|isec| ctx.isecs[ctx.resolve_isec(isec)].is_alive)
+                {
+                    return Class::Pext;
+                }
+                if sym.is_extern
+                    && !sym.is_private_extern
+                    && matches!(sym.origin, Origin::Obj(_) | Origin::Synthetic)
+                    && sym
+                        .isec
+                        .is_none_or(|isec| ctx.isecs[ctx.resolve_isec(isec)].is_alive)
+                {
+                    return Class::Global;
+                }
+                Class::No
+            })
+            .collect()
+    };
+
     // Private external symbols resolve globally but appear as locals
     // (with N_PEXT still set) in the output.
-    for i in 0..ctx.symtab.syms.len() {
+    for (i, &class) in classes.iter().enumerate() {
+        if class != Class::Pext {
+            continue;
+        }
         let sym = &ctx.symtab[i];
-        if !sym.is_extern || !sym.is_private_extern {
-            continue;
-        }
-        let Origin::Obj(_) = sym.origin else { continue };
-        let Some(isec) = sym.isec else { continue };
-        let isec = ctx.resolve_isec(isec);
-        if !ctx.isecs[isec].is_alive {
-            continue;
-        }
-        let n_strx = 0;
+        let isec = ctx.resolve_isec(sym.isec.unwrap());
         names.push(sym.name);
         let ent = NList {
-            n_strx,
+            n_strx: 0,
             n_type: N_SECT | N_PEXT,
             n_sect: ordinals[ctx.isecs[isec].osec],
             n_desc: 0,
@@ -2330,21 +2367,13 @@ pub fn create_output_symtab<E: Arch>(ctx: &mut Context<E>) {
     }
     data.nlocal = data.entries.len() as u32;
 
-    // Defined global symbols, sorted by name. The filter walks
-    // millions of slots (every local symbol has one), so it runs on
-    // all cores, as does the sort.
+    // Defined global symbols, sorted by name.
     use rayon::prelude::*;
-    let mut globals: Vec<usize> = (0..ctx.symtab.syms.len())
-        .into_par_iter()
-        .filter(|&i| {
-            let sym = &ctx.symtab[i];
-            sym.is_extern
-                && !sym.is_private_extern
-                && matches!(sym.origin, Origin::Obj(_) | Origin::Synthetic)
-                && sym
-                    .isec
-                    .is_none_or(|isec| ctx.isecs[ctx.resolve_isec(isec)].is_alive)
-        })
+    let mut globals: Vec<usize> = classes
+        .par_iter()
+        .enumerate()
+        .filter(|&(_, &c)| c == Class::Global)
+        .map(|(i, _)| i)
         .collect();
     globals.par_sort_by_key(|&i| ctx.symtab[i].name);
 
@@ -2377,9 +2406,11 @@ pub fn create_output_symtab<E: Arch>(ctx: &mut Context<E>) {
 
     // Undefined (imported) symbols, sorted by name. The library ordinal
     // lives in the high byte of n_desc.
-    let mut undefs: Vec<usize> = (0..ctx.symtab.syms.len())
-        .into_par_iter()
-        .filter(|&i| matches!(ctx.symtab[i].origin, Origin::Dylib(_)))
+    let mut undefs: Vec<usize> = classes
+        .par_iter()
+        .enumerate()
+        .filter(|&(_, &c)| c == Class::Undef)
+        .map(|(i, _)| i)
         .collect();
     undefs.par_sort_by_key(|&i| ctx.symtab[i].name);
 
