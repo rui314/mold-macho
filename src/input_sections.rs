@@ -68,4 +68,9 @@ pub struct InputSection {
     pub is_alive: bool,
     /// For a literal merged with an identical one, the surviving copy.
     pub replacement: Option<usize>,
+    /// This subsection's compact-unwind records: a range in
+    /// ctx.unwind_records, as sold keeps unwind_offset/nunwind on each
+    /// subsection (records arrive grouped by function).
+    pub unwind_offset: u32,
+    pub nunwind: u32,
 }

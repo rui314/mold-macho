@@ -105,14 +105,6 @@ pub fn dead_strip<E: Arch>(ctx: &mut Context<E>) {
         }
     }
 
-    // Unwind records for a live function keep its LSDA and personality
-    // alive; index them by function subsection.
-    let mut unwind_by_isec: hashbrown::HashMap<usize, Vec<usize>> =
-        hashbrown::HashMap::new();
-    for (i, rec) in ctx.unwind_records.iter().enumerate() {
-        unwind_by_isec.entry(rec.isec).or_default().push(i);
-    }
-
     // Propagate liveness. mold's gc-sections walks the graph in
     // parallel rounds: the frontier's out-edges are computed on all
     // cores, and an atomic visited bit decides which targets extend
@@ -132,8 +124,11 @@ pub fn dead_strip<E: Arch>(ctx: &mut Context<E>) {
                 RelocTarget::Section(isec) => out.push(isec),
             }
         }
-        for &rec_idx in unwind_by_isec.get(&id).map(Vec::as_slice).unwrap_or(&[]) {
-            let rec = &ctx.unwind_records[rec_idx];
+        // A live function keeps its LSDA and personality alive, via
+        // the subsection's compact-unwind record range.
+        let isec = &ctx.isecs[id];
+        let recs = isec.unwind_offset as usize..(isec.unwind_offset + isec.nunwind) as usize;
+        for rec in &ctx.unwind_records[recs] {
             if let Some((lsda, _)) = rec.lsda {
                 out.push(lsda);
             }
@@ -168,7 +163,6 @@ pub fn dead_strip<E: Arch>(ctx: &mut Context<E>) {
         const GC_BATCH: usize = 16;
         struct Gc<'a, E: Arch> {
             ctx: &'a Context<E>,
-            unwind_by_isec: &'a hashbrown::HashMap<usize, Vec<usize>>,
             visited: &'a [AtomicBool],
             redirects: &'a [usize],
         }
@@ -192,13 +186,10 @@ pub fn dead_strip<E: Arch>(ctx: &mut Context<E>) {
                     RelocTarget::Section(isec) => targets.push(isec),
                 }
             }
-            for &rec_idx in gc
-                .unwind_by_isec
-                .get(&id)
-                .map(Vec::as_slice)
-                .unwrap_or(&[])
-            {
-                let rec = &gc.ctx.unwind_records[rec_idx];
+            let isec = &gc.ctx.isecs[id];
+            let recs =
+                isec.unwind_offset as usize..(isec.unwind_offset + isec.nunwind) as usize;
+            for rec in &gc.ctx.unwind_records[recs] {
                 if let Some((lsda, _)) = rec.lsda {
                     targets.push(lsda);
                 }
@@ -247,7 +238,6 @@ pub fn dead_strip<E: Arch>(ctx: &mut Context<E>) {
         }
         let gc = Gc {
             ctx,
-            unwind_by_isec: &unwind_by_isec,
             visited: &visited,
             redirects,
         };
@@ -300,6 +290,9 @@ pub fn dead_strip<E: Arch>(ctx: &mut Context<E>) {
         }
         true
     });
+
+    // The compaction moved the surviving records; refresh the ranges.
+    crate::passes::refresh_unwind_ranges(ctx);
 }
 
 

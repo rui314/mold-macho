@@ -991,6 +991,8 @@ pub fn convert_common_symbols<E: Arch>(ctx: &mut Context<E>) {
             addr: 0,
             is_alive: true,
             replacement: None,
+            unwind_offset: 0,
+            nunwind: 0,
         });
 
         let sym = &mut ctx.symtab[i];
@@ -1076,6 +1078,23 @@ pub fn remove_unreachable_files<E: Arch>(ctx: &mut Context<E>) {
         }
         true
     });
+    refresh_unwind_ranges(ctx);
+}
+
+/// Rebuilds each subsection's compact-unwind record range after the
+/// records vector was compacted; the records stay grouped by
+/// subsection, so one walk over runs restores every range.
+pub fn refresh_unwind_ranges<E: Arch>(ctx: &mut Context<E>) {
+    let mut i = 0;
+    while i < ctx.unwind_records.len() {
+        let isec = ctx.unwind_records[i].isec;
+        let start = i;
+        while i < ctx.unwind_records.len() && ctx.unwind_records[i].isec == isec {
+            i += 1;
+        }
+        ctx.isecs[isec].unwind_offset = start as u32;
+        ctx.isecs[isec].nunwind = (i - start) as u32;
+    }
 }
 
 /// Merges identical literal elements across all live inputs: the first
@@ -2770,15 +2789,7 @@ pub fn set_osec_offsets<E: Arch>(ctx: &mut Context<E>) {
                         || {
                             rayon::join(
                                 || t!("function_starts", build_function_starts(shared)),
-                                || {
-                                    t!(
-                                        "trie_encode",
-                                        output_chunks::encode_export_trie(
-                                            shared,
-                                            sorted_globals
-                                        )
-                                    )
-                                },
+                                || t!("data_in_code", build_data_in_code(shared)),
                             )
                         },
                     )

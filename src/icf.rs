@@ -15,8 +15,7 @@
 //! final hashes are then verified structurally and folded onto their
 //! first member.
 
-use hashbrown::HashMap;
-use std::hash::{Hash, Hasher};
+use std::hash::Hash;
 
 use crate::arch::Arch;
 use crate::context::Context;
@@ -102,13 +101,6 @@ pub fn icf_sections<E: Arch>(ctx: &mut Context<E>) {
         cand_index[id] = i;
     }
 
-    // Unwind records per candidate, since unwinding is part of a
-    // function's identity.
-    let mut unwind_of: HashMap<usize, Vec<usize>> = HashMap::new();
-    for (i, rec) in ctx.unwind_records.iter().enumerate() {
-        unwind_of.entry(rec.isec).or_default().push(i);
-    }
-
     let edge_of = |ctx: &Context<E>, obj: usize, target: RelocTarget, addend: i64| -> (Edge, i64) {
         match target {
             RelocTarget::Sym(idx) => {
@@ -154,17 +146,17 @@ pub fn icf_sections<E: Arch>(ctx: &mut Context<E>) {
                 (e, _) => e.hash(&mut h),
             }
         }
-        if let Some(recs) = unwind_of.get(&id) {
-            for &r in recs {
-                let rec = &ctx.unwind_records[r];
-                (rec.input_offset, rec.code_len, rec.encoding, rec.personality, rec.fde)
-                    .hash(&mut h);
-                if let Some((lsda, off)) = rec.lsda {
-                    (ctx.resolve_isec(lsda), off).hash(&mut h);
-                }
+        // Unwinding is part of a function's identity; the subsection
+        // holds its record range.
+        let recs = isec.unwind_offset as usize..(isec.unwind_offset + isec.nunwind) as usize;
+        for rec in &ctx.unwind_records[recs] {
+            (rec.input_offset, rec.code_len, rec.encoding, rec.personality, rec.fde)
+                .hash(&mut h);
+            if let Some((lsda, off)) = rec.lsda {
+                (ctx.resolve_isec(lsda), off).hash(&mut h);
             }
         }
-        h.finish()
+        h.digest128()
     };
 
     // Refinement rounds propagate hashes along edges; log2(n) rounds
@@ -241,10 +233,14 @@ pub fn icf_sections<E: Arch>(ctx: &mut Context<E>) {
         eprintln!("      icf-rounds {:?}", __t.elapsed());
     }
     let __t = std::time::Instant::now();
-    let mut groups: HashMap<u64, Vec<usize>> = HashMap::new();
-    for (i, &id) in candidates.iter().enumerate() {
-        groups.entry(hashes[i]).or_default().push(id);
-    }
+    // Group by sorting (digest, id) pairs; equal digests become
+    // contiguous runs and the smallest member leads each class.
+    let mut pairs: Vec<(u128, u32)> = hashes
+        .iter()
+        .zip(&candidates)
+        .map(|(&h, &id)| (h, id as u32))
+        .collect();
+    pairs.par_sort_unstable();
 
     let equal = |ctx: &Context<E>, a: usize, b: usize| -> bool {
         let (x, y) = (&ctx.isecs[a], &ctx.isecs[b]);

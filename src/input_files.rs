@@ -353,6 +353,8 @@ pub fn stage_object<E: Arch>(
                 addr: 0,
                 is_alive: true,
                 replacement: None,
+                unwind_offset: 0,
+                nunwind: 0,
             });
             by_ordinal[i].push(isecs.len() - 1);
             subsecs.push(isecs.len() - 1);
@@ -569,6 +571,18 @@ pub fn integrate_objects<E: Arch>(
             for sub in &mut st.subsecs {
                 *sub += base.isec;
             }
+            // Hand each subsection its compact-unwind range (records
+            // arrive grouped by function), before the indices rebase.
+            let mut run = 0;
+            while run < st.unwind.len() {
+                let isec = st.unwind[run].isec;
+                let start = run;
+                while run < st.unwind.len() && st.unwind[run].isec == isec {
+                    run += 1;
+                }
+                st.isecs[isec].unwind_offset = (base.unwind + start) as u32;
+                st.isecs[isec].nunwind = (run - start) as u32;
+            }
             for rec in &mut st.unwind {
                 rec.isec += base.isec;
                 if let Some((lsda, _)) = &mut rec.lsda {
@@ -739,6 +753,12 @@ pub fn integrate_object_with<E: Arch>(
         if let Some(p) = &mut rec.personality {
             *p = syms[*p];
         }
+        // Extend or open the subsection's record range (grouped input).
+        let isec = &mut ctx.isecs[rec.isec];
+        if isec.nunwind == 0 {
+            isec.unwind_offset = ctx.unwind_records.len() as u32;
+        }
+        isec.nunwind += 1;
         ctx.unwind_records.push(rec);
     }
     for mut cie in staged.cies {
