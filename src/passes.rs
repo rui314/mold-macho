@@ -248,18 +248,25 @@ fn load_pending<E: Arch>(ctx: &mut Context<E>, pending: Vec<PendingObject>) {
     // (mold's sharded symbol table), so the serial integration loop
     // below does no hashing. Names carry the xxh3 hashes staging
     // computed alongside them, so nothing here touches their bytes.
-    let mut batch: Vec<(&'static str, u64)> = Vec::new();
-    let mut counts: Vec<usize> = Vec::with_capacity(staged.len());
-    for st in &staged {
-        let before = batch.len();
-        for ((name, &hash), nlist) in
-            st.sym_names.iter().zip(&st.sym_hashes).zip(&st.nlists)
-        {
-            if !nlist.is_stab() && nlist.is_extern() {
-                batch.push((name, hash));
-            }
-        }
-        counts.push(batch.len() - before);
+    // Each object's extern (name, hash) list is filtered in parallel -
+    // a debug link scans millions of nlists here - then concatenated in
+    // object order into the batch the sharded intern resolves at once.
+    let per_obj: Vec<Vec<(&'static str, u64)>> = staged
+        .par_iter()
+        .map(|st| {
+            st.sym_names
+                .iter()
+                .zip(&st.sym_hashes)
+                .zip(&st.nlists)
+                .filter(|((_, _), nlist)| !nlist.is_stab() && nlist.is_extern())
+                .map(|((&name, &hash), _)| (name, hash))
+                .collect()
+        })
+        .collect();
+    let counts: Vec<usize> = per_obj.iter().map(Vec::len).collect();
+    let mut batch: Vec<(&'static str, u64)> = Vec::with_capacity(counts.iter().sum());
+    for v in per_obj {
+        batch.extend(v);
     }
     let ids = t!("gather", ctx.symtab.gather(&batch));
 

@@ -545,13 +545,21 @@ pub fn integrate_objects<E: Arch>(
         locals: usize,
         ids: usize,
     }
+    // The per-object local-symbol counts drive the prefix sum below.
+    // Counting scans every nlist of every object, so on a debug link
+    // (millions of nlists) it runs in parallel; the prefix sum itself
+    // stays a cheap serial arithmetic walk.
+    let n_locals_all: Vec<usize> = staged
+        .par_iter()
+        .map(|st| {
+            st.nlists
+                .iter()
+                .filter(|n| n.is_stab() || !n.is_extern())
+                .count()
+        })
+        .collect();
     let mut bases = Vec::with_capacity(staged.len());
-    for (st, &nids) in staged.iter().zip(&counts) {
-        let n_locals = st
-            .nlists
-            .iter()
-            .filter(|n| n.is_stab() || !n.is_extern())
-            .count();
+    for (i, (st, &nids)) in staged.iter().zip(&counts).enumerate() {
         bases.push(Bases {
             isec: isec_base,
             cie: cie_base,
@@ -564,7 +572,7 @@ pub fn integrate_objects<E: Arch>(
         cie_base += st.cies.len();
         fde_base += st.fdes.len();
         unwind_base += st.unwind.len();
-        locals_base += n_locals;
+        locals_base += n_locals_all[i];
         id_base += nids;
     }
 
