@@ -71,6 +71,7 @@ pub fn icf_sections<E: Arch>(ctx: &mut Context<E>) {
             && weak_only[id] == Some(true)
     };
 
+    let __t = std::time::Instant::now();
     let candidates: Vec<usize> = (0..ctx.isecs.len())
         .filter(|&i| is_candidate(ctx, i))
         .collect();
@@ -117,7 +118,10 @@ pub fn icf_sections<E: Arch>(ctx: &mut Context<E>) {
     // at.
     let base_hash = |ctx: &Context<E>, id: usize, prev: Option<&Vec<u64>>| -> u64 {
         let isec = &ctx.isecs[id];
-        let mut h = std::collections::hash_map::DefaultHasher::new();
+        // xxh3, as elsewhere: the refinement rounds hash every
+        // candidate's bytes and relocations log2(n) times, and SipHash
+        // was half of ICF's runtime.
+        let mut h = xxhash_rust::xxh3::Xxh3::new();
         isec.hdr.flags.hash(&mut h);
         isec.size.hash(&mut h);
         isec.data.hash(&mut h);
@@ -146,20 +150,59 @@ pub fn icf_sections<E: Arch>(ctx: &mut Context<E>) {
 
     // Refinement rounds propagate hashes along edges; log2(n) rounds
     // reach across any chain of distinct shapes.
+    if std::env::var_os("MOLD_TIMING").is_some() {
+        eprintln!("      icf-prep {:?} candidates {}", __t.elapsed(), candidates.len());
+    }
+    let __t = std::time::Instant::now();
     let rounds = (usize::BITS - candidates.len().leading_zeros()) as usize + 1;
-    let mut hashes: Vec<u64> = candidates
+
+    // Content is hashed exactly once; the refinement rounds mix only
+    // fixed-size digests - each candidate's base digest plus its
+    // candidate-edge targets' previous-round digests - so a round
+    // costs microseconds instead of rehashing every candidate's bytes
+    // and relocations, which is how mold keeps log2(n) rounds cheap.
+    let base: Vec<u64> = candidates
         .par_iter()
         .map(|&id| base_hash(ctx, id, None))
         .collect();
+    let cand_edges: Vec<Vec<u32>> = candidates
+        .par_iter()
+        .map(|&id| {
+            let isec = &ctx.isecs[id];
+            isec.relocs
+                .iter()
+                .filter_map(|rel| {
+                    match edge_of(ctx, isec.obj, rel.target, rel.addend).0 {
+                        Edge::Candidate(c) => Some(c as u32),
+                        _ => None,
+                    }
+                })
+                .collect()
+        })
+        .collect();
+
+    let mut hashes = base.clone();
     for _ in 0..rounds {
-        hashes = candidates
-            .par_iter()
-            .map(|&id| base_hash(ctx, id, Some(&hashes)))
+        hashes = (0..candidates.len())
+            .into_par_iter()
+            .map(|i| {
+                use std::hash::Hasher;
+                let mut h = xxhash_rust::xxh3::Xxh3::new();
+                h.write_u64(base[i]);
+                for &c in &cand_edges[i] {
+                    h.write_u64(hashes[c as usize]);
+                }
+                h.finish()
+            })
             .collect();
     }
 
     // Group by final hash and fold each group onto its first member,
     // after verifying literal equality to rule out collisions.
+    if std::env::var_os("MOLD_TIMING").is_some() {
+        eprintln!("      icf-rounds {:?}", __t.elapsed());
+    }
+    let __t = std::time::Instant::now();
     let mut groups: HashMap<u64, Vec<usize>> = HashMap::new();
     for (i, &id) in candidates.iter().enumerate() {
         groups.entry(hashes[i]).or_default().push(id);
@@ -182,6 +225,10 @@ pub fn icf_sections<E: Arch>(ctx: &mut Context<E>) {
 
     // Folding makes more edges coincide (references to the folded
     // copies now resolve to one leader), so repeat until stable.
+    if std::env::var_os("MOLD_TIMING").is_some() {
+        eprintln!("      icf-group {:?}", __t.elapsed());
+    }
+    let __t = std::time::Instant::now();
     loop {
         let mut folded = 0usize;
         for group in groups.values() {
@@ -207,5 +254,8 @@ pub fn icf_sections<E: Arch>(ctx: &mut Context<E>) {
         if folded == 0 {
             break;
         }
+    }
+    if std::env::var_os("MOLD_TIMING").is_some() {
+        eprintln!("      icf-fold {:?}", __t.elapsed());
     }
 }
