@@ -33,6 +33,125 @@ enum Edge {
     Sym(usize),
 }
 
+/// A 128-bit digest. Ordered so equivalence classes group by sorting.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+struct Digest {
+    hi: u64,
+    lo: u64,
+}
+
+struct SipHash13_128 {
+    v0: u64,
+    v1: u64,
+    v2: u64,
+    v3: u64,
+    buf: [u8; 8],
+    buflen: u8,
+    sum: u8,
+}
+
+impl SipHash13_128 {
+    #[inline]
+    fn new(key: &[u8; 16]) -> SipHash13_128 {
+        let k0 = u64::from_le_bytes(key[..8].try_into().unwrap());
+        let k1 = u64::from_le_bytes(key[8..].try_into().unwrap());
+        SipHash13_128 {
+            v0: 0x736f_6d65_7073_6575 ^ k0,
+            v1: 0x646f_7261_6e64_6f6d ^ k1 ^ 0xee,
+            v2: 0x6c79_6765_6e65_7261 ^ k0,
+            v3: 0x7465_6462_7974_6573 ^ k1,
+            buf: [0; 8],
+            buflen: 0,
+            sum: 0,
+        }
+    }
+
+    #[inline]
+    fn update(&mut self, mut msg: &[u8]) {
+        self.sum = self.sum.wrapping_add(msg.len() as u8);
+
+        if self.buflen != 0 {
+            let buflen = self.buflen as usize;
+            if buflen + msg.len() < 8 {
+                self.buf[buflen..buflen + msg.len()].copy_from_slice(msg);
+                self.buflen += msg.len() as u8;
+                return;
+            }
+
+            let n = 8 - buflen;
+            self.buf[buflen..].copy_from_slice(&msg[..n]);
+            self.compress(u64::from_le_bytes(self.buf));
+            msg = &msg[n..];
+            self.buflen = 0;
+        }
+
+        while msg.len() >= 8 {
+            self.compress(u64::from_le_bytes(msg[..8].try_into().unwrap()));
+            msg = &msg[8..];
+        }
+
+        self.buf[..msg.len()].copy_from_slice(msg);
+        self.buflen = msg.len() as u8;
+    }
+
+    /// Updates the hash with an in-memory `Digest`. Propagation hashes only
+    /// complete digests, so this is the aligned 16-byte path through `update`.
+    #[inline(always)]
+    fn update_digest(&mut self, digest: Digest) {
+        debug_assert_eq!(self.buflen, 0);
+        self.sum = self.sum.wrapping_add(16);
+        self.compress(u64::from_le_bytes(digest.hi.to_ne_bytes()));
+        self.compress(u64::from_le_bytes(digest.lo.to_ne_bytes()));
+    }
+
+    #[inline]
+    fn finish(mut self) -> Digest {
+        self.buf[self.buflen as usize..].fill(0);
+        self.compress((u64::from(self.sum) << 56) | u64::from_le_bytes(self.buf));
+
+        self.v2 ^= 0xee;
+        self.finalize();
+        let hi = self.v0 ^ self.v1 ^ self.v2 ^ self.v3;
+
+        self.v1 ^= 0xdd;
+        self.finalize();
+        let lo = self.v0 ^ self.v1 ^ self.v2 ^ self.v3;
+        Digest { hi, lo }
+    }
+
+    #[inline(always)]
+    fn round(&mut self) {
+        self.v0 = self.v0.wrapping_add(self.v1);
+        self.v1 = self.v1.rotate_left(13);
+        self.v1 ^= self.v0;
+        self.v0 = self.v0.rotate_left(32);
+        self.v2 = self.v2.wrapping_add(self.v3);
+        self.v3 = self.v3.rotate_left(16);
+        self.v3 ^= self.v2;
+        self.v0 = self.v0.wrapping_add(self.v3);
+        self.v3 = self.v3.rotate_left(21);
+        self.v3 ^= self.v0;
+        self.v2 = self.v2.wrapping_add(self.v1);
+        self.v1 = self.v1.rotate_left(17);
+        self.v1 ^= self.v2;
+        self.v2 = self.v2.rotate_left(32);
+    }
+
+    #[inline(always)]
+    fn compress(&mut self, m: u64) {
+        self.v3 ^= m;
+        self.round();
+        self.v0 ^= m;
+    }
+
+    #[inline(always)]
+    fn finalize(&mut self) {
+        self.round();
+        self.round();
+        self.round();
+    }
+}
+
 pub fn icf_sections<E: Arch>(ctx: &mut Context<E>) {
     use rayon::prelude::*;
 
@@ -125,38 +244,55 @@ pub fn icf_sections<E: Arch>(ctx: &mut Context<E>) {
         }
     };
 
-    // Initial hashes: everything except which candidate an edge points
-    // at.
-    let base_hash = |ctx: &Context<E>, id: usize, prev: Option<&Vec<u64>>| -> u64 {
+    // The base digest of a candidate: its bytes and the non-candidate
+    // parts of its edges, hashed with SipHash13-128 exactly as
+    // mold-rust's compute_digest does (candidate edges are mixed in
+    // during the rounds instead). A fixed key keeps the link
+    // reproducible; the digest is used only to group, never emitted.
+    const KEY: [u8; 16] = *b"mold-macho-icf!!";
+    let base_hash = |ctx: &Context<E>, id: usize| -> Digest {
         let isec = &ctx.isecs[id];
-        // xxh3, as elsewhere: the refinement rounds hash every
-        // candidate's bytes and relocations log2(n) times, and SipHash
-        // was half of ICF's runtime.
-        let mut h = xxhash_rust::xxh3::Xxh3::new();
-        isec.hdr.flags.hash(&mut h);
-        isec.size.hash(&mut h);
-        isec.data.hash(&mut h);
+        let mut h = SipHash13_128::new(&KEY);
+        h.update(&isec.hdr.flags.to_ne_bytes());
+        h.update(&isec.size.to_ne_bytes());
+        h.update(&isec.data.len().to_ne_bytes());
+        h.update(isec.data);
         for rel in &isec.relocs {
-            (rel.offset, rel.r_type, rel.size, rel.is_pcrel, rel.is_subtracted).hash(&mut h);
+            h.update(&rel.offset.to_ne_bytes());
+            h.update(&rel.r_type.to_ne_bytes());
+            h.update(&[rel.size, rel.is_pcrel as u8, rel.is_subtracted as u8]);
             let (edge, addend) = edge_of(ctx, isec.obj, rel.target, rel.addend);
-            addend.hash(&mut h);
-            match (edge, prev) {
-                (Edge::Candidate(c), Some(prev)) => prev[c].hash(&mut h),
-                (Edge::Candidate(_), None) => 0u8.hash(&mut h),
-                (e, _) => e.hash(&mut h),
+            h.update(&addend.to_ne_bytes());
+            // A candidate edge contributes nothing to the base; the
+            // rounds fold in the target's evolving digest.
+            match edge {
+                Edge::Candidate(_) => h.update(b"c"),
+                Edge::Isec(i, v) => {
+                    h.update(b"i");
+                    h.update(&i.to_ne_bytes());
+                    h.update(&v.to_ne_bytes());
+                }
+                Edge::Sym(s) => {
+                    h.update(b"s");
+                    h.update(&s.to_ne_bytes());
+                }
             }
         }
         // Unwinding is part of a function's identity; the subsection
         // holds its record range.
         let recs = isec.unwind_offset as usize..(isec.unwind_offset + isec.nunwind) as usize;
         for rec in &ctx.unwind_records[recs] {
-            (rec.input_offset, rec.code_len, rec.encoding, rec.personality, rec.fde)
-                .hash(&mut h);
+            h.update(&rec.input_offset.to_ne_bytes());
+            h.update(&rec.code_len.to_ne_bytes());
+            h.update(&rec.encoding.to_ne_bytes());
+            h.update(&rec.personality.map_or(u64::MAX, |p| p as u64).to_ne_bytes());
+            h.update(&rec.fde.map_or(u64::MAX, |f| f as u64).to_ne_bytes());
             if let Some((lsda, off)) = rec.lsda {
-                (ctx.resolve_isec(lsda), off).hash(&mut h);
+                h.update(&ctx.resolve_isec(lsda).to_ne_bytes());
+                h.update(&off.to_ne_bytes());
             }
         }
-        h.digest128()
+        h.finish()
     };
 
     // Refinement rounds propagate hashes along edges; log2(n) rounds
@@ -168,28 +304,52 @@ pub fn icf_sections<E: Arch>(ctx: &mut Context<E>) {
 
     // Content is hashed exactly once; the refinement rounds mix only
     // fixed-size digests - each candidate's base digest plus its
-    // candidate-edge targets' previous-round digests - so a round
-    // costs microseconds instead of rehashing every candidate's bytes
-    // and relocations, which is how mold keeps log2(n) rounds cheap.
-    let base: Vec<u64> = candidates
-        .par_iter()
-        .map(|&id| base_hash(ctx, id, None))
-        .collect();
-    let cand_edges: Vec<Vec<u32>> = candidates
+    // candidate-edge targets' previous-round digests - via
+    // update_digest, mold-rust's aligned 16-byte fast path, so a round
+    // is cheap however many rounds log2(n) requires.
+    let base: Vec<Digest> = candidates.par_iter().map(|&id| base_hash(ctx, id)).collect();
+
+    // Candidate edges in CSR form - one flat values array indexed by a
+    // per-candidate prefix-summed offset, exactly mold-rust's Edges
+    // (gather_edges). The propagation loop is the hot path; a single
+    // contiguous array keeps it cache-friendly, where a Vec<Vec<u32>>
+    // would chase one heap allocation per candidate.
+    let counts: Vec<u32> = candidates
         .par_iter()
         .map(|&id| {
             let isec = &ctx.isecs[id];
             isec.relocs
                 .iter()
-                .filter_map(|rel| {
-                    match edge_of(ctx, isec.obj, rel.target, rel.addend).0 {
-                        Edge::Candidate(c) => Some(c as u32),
-                        _ => None,
-                    }
+                .filter(|rel| {
+                    matches!(edge_of(ctx, isec.obj, rel.target, rel.addend).0, Edge::Candidate(_))
                 })
-                .collect()
+                .count() as u32
         })
         .collect();
+    let mut edge_indices: Vec<u32> = Vec::with_capacity(candidates.len() + 1);
+    edge_indices.push(0);
+    for c in &counts {
+        edge_indices.push(edge_indices.last().unwrap() + c);
+    }
+    let mut edge_values: Vec<u32> = vec![0; *edge_indices.last().unwrap() as usize];
+    {
+        struct EdgeBuf(*mut u32);
+        unsafe impl Sync for EdgeBuf {}
+        let out = EdgeBuf(edge_values.as_mut_ptr());
+        let out = &out;
+        let edge_indices = &edge_indices;
+        candidates.par_iter().enumerate().for_each(|(vertex, &id)| {
+            let isec = &ctx.isecs[id];
+            let mut i = edge_indices[vertex] as usize;
+            for rel in &isec.relocs {
+                if let Edge::Candidate(c) = edge_of(ctx, isec.obj, rel.target, rel.addend).0 {
+                    // SAFETY: this vertex alone owns its prefix-sum range.
+                    unsafe { *out.0.add(i) = c as u32 };
+                    i += 1;
+                }
+            }
+        });
+    }
 
     // Refine until the number of equivalence classes stops growing,
     // as mold does. Counting classes costs about as much as a
@@ -197,9 +357,9 @@ pub fn icf_sections<E: Arch>(ctx: &mut Context<E>) {
     // ping-ponging between two buffers instead of allocating a fresh
     // vector every round. Classes only ever split, so the count is
     // monotone and the loop terminates.
-    let mut hashes = base.clone();
-    let mut scratch = vec![0u64; hashes.len()];
-    let mut sorted = Vec::new();
+    let mut hashes = base;
+    let mut scratch = vec![Digest::default(); hashes.len()];
+    let mut sorted: Vec<Digest> = Vec::new();
     let mut prev_classes = 0usize;
     loop {
         for _ in 0..3 {
@@ -207,11 +367,15 @@ pub fn icf_sections<E: Arch>(ctx: &mut Context<E>) {
             (0..candidates.len())
                 .into_par_iter()
                 .map(|i| {
-                    use std::hash::Hasher;
-                    let mut h = xxhash_rust::xxh3::Xxh3::new();
-                    h.write_u64(base[i]);
-                    for &c in &cand_edges[i] {
-                        h.write_u64(cur[c as usize]);
+                    // next[i] = H(cur[i], cur[neighbors]) - mold-rust's
+                    // propagate hashes the vertex's own current digest,
+                    // so its nth-round digest is a hash of its unfolding
+                    // into a tree of depth n.
+                    let mut h = SipHash13_128::new(&KEY);
+                    h.update_digest(cur[i]);
+                    for &c in &edge_values[edge_indices[i] as usize..edge_indices[i + 1] as usize]
+                    {
+                        h.update_digest(cur[c as usize]);
                     }
                     h.finish()
                 })
@@ -235,7 +399,7 @@ pub fn icf_sections<E: Arch>(ctx: &mut Context<E>) {
     let __t = std::time::Instant::now();
     // Group by sorting (digest, id) pairs; equal digests become
     // contiguous runs and the smallest member leads each class.
-    let mut pairs: Vec<(u128, u32)> = hashes
+    let mut pairs: Vec<(Digest, u32)> = hashes
         .iter()
         .zip(&candidates)
         .map(|(&h, &id)| (h, id as u32))
@@ -257,38 +421,44 @@ pub fn icf_sections<E: Arch>(ctx: &mut Context<E>) {
         })
     };
 
-    // Folding makes more edges coincide (references to the folded
-    // copies now resolve to one leader), so repeat until stable.
+    // The converged 128-bit digests are the equivalence classes; fold
+    // each run onto its first member in one pass, as mold folds its
+    // groups directly. (The old byte-verifying fixpoint re-walked
+    // every group until stable - hundreds of milliseconds on a link
+    // with 840k candidates.) debug builds keep the byte check as an
+    // assertion.
     if std::env::var_os("MOLD_TIMING").is_some() {
         eprintln!("      icf-group {:?}", __t.elapsed());
     }
     let __t = std::time::Instant::now();
-    loop {
-        let mut folded = 0usize;
-        for group in groups.values() {
-            if group.len() < 2 {
-                continue;
-            }
-            let mut leader = None;
-            for &id in group {
-                if ctx.isecs[id].replacement.is_some() {
-                    continue;
-                }
-                match leader {
-                    None => leader = Some(id),
-                    Some(lead) => {
-                        if equal(ctx, lead, id) {
-                            ctx.isecs[id].replacement = Some(lead);
-                            folded += 1;
-                        }
+    let mut i = 0;
+    while i < pairs.len() {
+        let digest = pairs[i].0;
+        let mut j = i + 1;
+        while j < pairs.len() && pairs[j].0 == digest {
+            j += 1;
+        }
+        if j - i >= 2 {
+            let leader = pairs[i].1 as usize;
+            if ctx.isecs[leader].replacement.is_none() {
+                let mut align = ctx.isecs[leader].hdr.p2align;
+                for k in i + 1..j {
+                    let id = pairs[k].1 as usize;
+                    if ctx.isecs[id].replacement.is_none() {
+                        debug_assert!(equal(ctx, leader, id));
+                        ctx.isecs[id].replacement = Some(leader);
+                        align = align.max(ctx.isecs[id].hdr.p2align);
                     }
                 }
+                // The leader is laid out for every folded member, so it
+                // must carry the strongest alignment among them - mold's
+                // update_alignment.
+                ctx.isecs[leader].hdr.p2align = align;
             }
         }
-        if folded == 0 {
-            break;
-        }
+        i = j;
     }
+    let _ = &equal;
     if std::env::var_os("MOLD_TIMING").is_some() {
         eprintln!("      icf-fold {:?}", __t.elapsed());
     }
