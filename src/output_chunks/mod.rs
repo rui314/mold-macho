@@ -929,51 +929,66 @@ pub fn encode_unwind_info<E: Arch>(ctx: &Context<E>) -> (Vec<u8>, Vec<SymbolId>)
         push32(&mut buf, 0);
     }
 
-    // First-level pages, second-level pages and the LSDA table are
-    // interdependent, so build the second-level pages and the LSDA table
-    // in side buffers.
+    // Each second-level page's blob and LSDA rows depend only on its
+    // own records, so the pages build in parallel; the first-level
+    // index is then a serial walk over the blob lengths.
+    struct PageOut {
+        page2: Vec<u8>,
+        lsda: Vec<u8>,
+        first: u32,
+    }
+    let outs: Vec<PageOut> = pages
+        .par_iter()
+        .map(|span| {
+            let mut page2 = Vec::new();
+            let mut lsda = Vec::new();
+            for rec in *span {
+                if let Some((isec, off)) = rec.lsda {
+                    push32(&mut lsda, (func_addr(rec) - base) as u32);
+                    push32(&mut lsda, (ctx.isec_addr(isec) + off as u64 - base) as u32);
+                }
+            }
+
+            // The page's encoding table, indexed by the entries.
+            let mut encodings: Vec<u32> = Vec::new();
+            for rec in *span {
+                if !encodings.contains(&rec.encoding) {
+                    encodings.push(rec.encoding);
+                }
+            }
+
+            push32(&mut page2, UNWIND_SECOND_LEVEL_COMPRESSED);
+            push16(&mut page2, 12); // entries offset within the page
+            push16(&mut page2, span.len() as u16);
+            push16(&mut page2, (12 + span.len() * 4) as u16); // encodings offset
+            push16(&mut page2, encodings.len() as u16);
+
+            let page_base = func_addr(&span[0]);
+            for rec in *span {
+                let enc_idx = encodings.iter().position(|&e| e == rec.encoding).unwrap();
+                let entry = (func_addr(rec) - page_base) as u32 | (enc_idx as u32) << 24;
+                push32(&mut page2, entry);
+            }
+            for enc in &encodings {
+                push32(&mut page2, *enc);
+            }
+            PageOut {
+                page2,
+                lsda,
+                first: (func_addr(&span[0]) - base) as u32,
+            }
+        })
+        .collect();
+
     let mut page1 = Vec::new();
     let mut lsda = Vec::new();
     let mut page2 = Vec::new();
-
-    for span in &pages {
-        push32(&mut page1, (func_addr(&span[0]) - base) as u32);
+    for out in &outs {
+        push32(&mut page1, out.first);
         push32(&mut page1, (page2_off + page2.len()) as u32);
         push32(&mut page1, (lsda_off + lsda.len()) as u32);
-
-        for rec in *span {
-            if let Some((isec, off)) = rec.lsda {
-                push32(&mut lsda, (func_addr(rec) - base) as u32);
-                push32(
-                    &mut lsda,
-                    (ctx.isec_addr(isec) + off as u64 - base) as u32,
-                );
-            }
-        }
-
-        // The page's encoding table, indexed by the entries.
-        let mut encodings: Vec<u32> = Vec::new();
-        for rec in *span {
-            if !encodings.contains(&rec.encoding) {
-                encodings.push(rec.encoding);
-            }
-        }
-
-        push32(&mut page2, UNWIND_SECOND_LEVEL_COMPRESSED);
-        push16(&mut page2, 12); // entries offset within the page
-        push16(&mut page2, span.len() as u16);
-        push16(&mut page2, (12 + span.len() * 4) as u16); // encodings offset
-        push16(&mut page2, encodings.len() as u16);
-
-        let page_base = func_addr(&span[0]);
-        for rec in *span {
-            let enc_idx = encodings.iter().position(|&e| e == rec.encoding).unwrap();
-            let entry = (func_addr(rec) - page_base) as u32 | (enc_idx as u32) << 24;
-            push32(&mut page2, entry);
-        }
-        for enc in &encodings {
-            push32(&mut page2, *enc);
-        }
+        lsda.extend_from_slice(&out.lsda);
+        page2.extend_from_slice(&out.page2);
     }
 
     // The terminating first-level entry.
