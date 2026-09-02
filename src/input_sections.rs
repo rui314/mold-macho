@@ -8,12 +8,12 @@ pub type InputSectionId = usize;
 #[derive(Clone, Copy, Debug)]
 pub enum RelocTarget {
     /// An index into the owning object's symbol list.
-    Sym(usize),
+    Sym(u32),
     /// A subsection. During target-specific relocation reading this is
     /// an index into the object's section header list; input file
     /// parsing rewrites it to an index into the global subsection
     /// arena.
-    Section(usize),
+    Section(u32),
 }
 
 /// A relocation in a form independent of the raw Mach-O records: the
@@ -32,8 +32,8 @@ pub struct Reloc {
     pub addend: i64,
     /// For a branch that may be out of range: the offset of a
     /// range-extension thunk entry within the output section, assigned
-    /// during layout. u64::MAX when the branch needs no thunk.
-    pub thunk_off: u64,
+    /// during layout. u32::MAX when the branch needs no thunk.
+    pub thunk_off: u32,
 }
 
 /// A subsection of an input object file's section.

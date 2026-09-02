@@ -407,11 +407,11 @@ pub fn stage_object<E: Arch>(
 
         for rel in &mut rels {
             if let crate::input_sections::RelocTarget::Section(sect_pos) = rel.target {
-                let taddr = (sect_hdrs[sect_pos].addr as i64 + rel.addend) as u64;
+                let taddr = (sect_hdrs[sect_pos as usize].addr as i64 + rel.addend) as u64;
                 let Some((tsub, toff)) = find_subsec(&isecs, &subsecs, taddr) else {
                     fatal!(diag, "{}: relocation against a discarded section", mf.name);
                 };
-                rel.target = crate::input_sections::RelocTarget::Section(tsub);
+                rel.target = crate::input_sections::RelocTarget::Section(tsub as u32);
                 rel.addend = toff as i64;
             }
         }
@@ -599,7 +599,7 @@ pub fn integrate_objects<E: Arch>(
             for rel in &mut st.relocs {
                 if let crate::input_sections::RelocTarget::Section(local) = rel.target {
                     rel.target =
-                        crate::input_sections::RelocTarget::Section(base.isec + local);
+                        crate::input_sections::RelocTarget::Section(base.isec as u32 + local);
                 }
             }
             for sub in &mut st.subsecs {
@@ -759,7 +759,7 @@ pub fn integrate_object_with<E: Arch>(
     let mut obj_relocs = staged.relocs;
     for rel in &mut obj_relocs {
         if let crate::input_sections::RelocTarget::Section(local) = rel.target {
-            rel.target = crate::input_sections::RelocTarget::Section(isec_base + local);
+            rel.target = crate::input_sections::RelocTarget::Section(isec_base as u32 + local);
         }
     }
 

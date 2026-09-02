@@ -139,7 +139,7 @@ impl Arch for X86_64 {
                 i > 0 && rels[i - 1].r_type() == X86_64_RELOC_SUBTRACTOR;
 
             let (target, addend) = if r.is_extern() {
-                (RelocTarget::Sym(r.r_symbolnum() as usize), addend)
+                (RelocTarget::Sym(r.r_symbolnum() as u32), addend)
             } else {
                 let addr = if r.is_pcrel() {
                     (hdr.addr + r.r_address as u64 + 4).wrapping_add_signed(addend)
@@ -152,7 +152,7 @@ impl Arch for X86_64 {
                 else {
                     fatal!(diag, "{file_name}: bad relocation: {}", r.r_address);
                 };
-                (RelocTarget::Section(idx), (addr - sections[idx].addr) as i64)
+                (RelocTarget::Section(idx as u32), (addr - sections[idx].addr) as i64)
             };
 
             vec.push(Reloc {
@@ -163,7 +163,7 @@ impl Arch for X86_64 {
                 is_subtracted,
                 target,
                 addend,
-                thunk_off: u64::MAX,
+                thunk_off: u32::MAX,
             });
         }
         vec

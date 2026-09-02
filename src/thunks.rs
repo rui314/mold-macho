@@ -164,7 +164,7 @@ fn scan_relocs_into_thunk<E: Arch>(
                 nsyms += 1;
                 e
             });
-            ctx.objs[obj].relocs[ro + r].thunk_off = entry;
+            ctx.objs[obj].relocs[ro + r].thunk_off = entry as u32;
         }
     }
 

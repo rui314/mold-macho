@@ -366,7 +366,7 @@ impl Arch for Arm64 {
 
             // A relocation refers to either a symbol or a section.
             let (target, addend) = if r.is_extern() {
-                (RelocTarget::Sym(r.r_symbolnum() as usize), addend)
+                (RelocTarget::Sym(r.r_symbolnum() as u32), addend)
             } else {
                 let addr = if r.is_pcrel() {
                     (hdr.addr + r.r_address as u64).wrapping_add_signed(addend)
@@ -379,7 +379,7 @@ impl Arch for Arm64 {
                 else {
                     fatal!(diag, "{file_name}: bad relocation: {}", r.r_address);
                 };
-                let target = RelocTarget::Section(idx);
+                let target = RelocTarget::Section(idx as u32);
                 (target, (addr - sections[idx].addr) as i64)
             };
 
@@ -391,7 +391,7 @@ impl Arch for Arm64 {
                 is_subtracted,
                 target,
                 addend,
-                thunk_off: u64::MAX,
+                thunk_off: u32::MAX,
             });
             i += 1;
         }
@@ -454,12 +454,12 @@ impl Arch for Arm64 {
                     if !(-(1 << 27)..1 << 27).contains(&val) {
                         // Out of reach: branch through the thunk entry
                         // assigned during layout.
-                        if r.thunk_off == u64::MAX {
+                        if r.thunk_off == u32::MAX {
                             error!(ctx, "branch target out of range: {val:x}");
                         } else {
                             let isec = &ctx.isecs[isec_id];
                             let thunk_addr =
-                                ctx.chunks[isec.osec].hdr.addr + r.thunk_off;
+                                ctx.chunks[isec.osec].hdr.addr + r.thunk_off as u64;
                             val = thunk_addr.wrapping_sub(p) as i64;
                         }
                     }

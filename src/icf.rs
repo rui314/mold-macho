@@ -338,7 +338,7 @@ pub fn icf_sections<E: Arch>(ctx: &mut Context<E>) {
     let edge_of = |ctx: &Context<E>, obj: usize, target: RelocTarget, addend: i64| -> (Edge, i64) {
         match target {
             RelocTarget::Sym(idx) => {
-                let sym_id = ctx.objs[obj].syms[idx];
+                let sym_id = ctx.objs[obj].syms[idx as usize];
                 let sym = &ctx.symtab[sym_id];
                 if let (Origin::Obj(_), Some(isec)) = (sym.origin, sym.isec) {
                     let isec = ctx.resolve_isec(isec as usize);
@@ -350,7 +350,7 @@ pub fn icf_sections<E: Arch>(ctx: &mut Context<E>) {
                 (Edge::Sym(sym_id), addend)
             }
             RelocTarget::Section(isec) => {
-                let isec = ctx.resolve_isec(isec);
+                let isec = ctx.resolve_isec(isec as usize);
                 if cand_index[isec] != usize::MAX {
                     return (Edge::Candidate(cand_index[isec]), addend);
                 }

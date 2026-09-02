@@ -346,7 +346,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
 
                 match rel.target {
                     RelocTarget::Sym(idx) => {
-                        let sym_id = ctx.objs[isec.obj].syms[idx];
+                        let sym_id = ctx.objs[isec.obj].syms[idx as usize];
                         let Some(&symnum) = index_of_sym.get(&sym_id) else {
                             fatal!(
                                 ctx,
@@ -374,7 +374,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
                         });
                     }
                     RelocTarget::Section(target) => {
-                        let target = ctx.resolve_isec(target);
+                        let target = ctx.resolve_isec(target as usize);
                         let t = &ctx.isecs[target];
                         let ord = ordinals[t.osec] as u32;
                         rels.push(MachRel {
@@ -590,7 +590,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
                 let RelocTarget::Section(target) = rel.target else {
                     continue;
                 };
-                let target = ctx.resolve_isec(target);
+                let target = ctx.resolve_isec(target as usize);
                 let t = &ctx.isecs[target];
                 let target_addr =
                     ctx.chunks[t.osec].hdr.addr + t.output_offset + rel.addend as u64;

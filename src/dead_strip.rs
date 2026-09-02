@@ -116,12 +116,12 @@ pub fn dead_strip<E: Arch>(ctx: &mut Context<E>) {
         for rel in ctx.isec_relocs(id) {
             match rel.target {
                 RelocTarget::Sym(idx) => {
-                    let sym = &ctx.symtab[ctx.objs[ctx.isecs[id].obj].syms[idx]];
+                    let sym = &ctx.symtab[ctx.objs[ctx.isecs[id].obj].syms[idx as usize]];
                     if let Some(isec) = sym.isec.map(|i| i as usize) {
                         out.push(isec);
                     }
                 }
-                RelocTarget::Section(isec) => out.push(isec),
+                RelocTarget::Section(isec) => out.push(isec as usize),
             }
         }
         // A live function keeps its LSDA and personality alive, via
@@ -178,12 +178,12 @@ pub fn dead_strip<E: Arch>(ctx: &mut Context<E>) {
                 match rel.target {
                     RelocTarget::Sym(idx) => {
                         let sym =
-                            &gc.ctx.symtab[gc.ctx.objs[gc.ctx.isecs[id].obj].syms[idx]];
+                            &gc.ctx.symtab[gc.ctx.objs[gc.ctx.isecs[id].obj].syms[idx as usize]];
                         if let Some(isec) = sym.isec.map(|i| i as usize) {
                             targets.push(isec);
                         }
                     }
-                    RelocTarget::Section(isec) => targets.push(isec),
+                    RelocTarget::Section(isec) => targets.push(isec as usize),
                 }
             }
             let isec = &gc.ctx.isecs[id];

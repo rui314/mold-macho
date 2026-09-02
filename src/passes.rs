@@ -1039,7 +1039,7 @@ pub fn convert_init_offsets<E: Arch>(ctx: &mut Context<E>) {
                 }
                 None => match rel.target {
                     crate::input_sections::RelocTarget::Section(isec) => {
-                        (ctx.resolve_isec(isec), rel.addend as u64)
+                        (ctx.resolve_isec(isec as usize), rel.addend as u64)
                     }
                     _ => continue,
                 },
@@ -2301,7 +2301,7 @@ pub fn create_output_symtab<E: Arch>(
                         continue;
                     }
                     let Some(isec) = sym.isec.map(|i| i as usize) else { continue };
-                    let isec_id = ctx.resolve_isec(isec);
+                    let isec_id = ctx.resolve_isec(isec as usize);
                     let isec = &ctx.isecs[isec_id];
                     if !isec.is_alive {
                         continue;
@@ -3584,7 +3584,7 @@ fn order_file_ranks<E: Arch>(ctx: &Context<E>) -> Option<Vec<u64>> {
                 None => true,
             };
             if applies {
-                let isec = ctx.resolve_isec(isec);
+                let isec = ctx.resolve_isec(isec as usize);
                 ranks[isec] = ranks[isec].min(*r);
             }
         }
@@ -3613,7 +3613,7 @@ fn build_data_in_code<E: Arch>(ctx: &Context<E>) -> Vec<(u32, u16, u16)> {
             else {
                 continue;
             };
-            let isec = &ctx.isecs[ctx.resolve_isec(isec)];
+            let isec = &ctx.isecs[ctx.resolve_isec(isec as usize)];
             if isec.is_alive {
                 let fileoff = ctx.chunks[isec.osec].hdr.fileoff + isec.output_offset + off_in;
                 out.push((fileoff as u32, len, kind));
