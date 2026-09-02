@@ -2435,7 +2435,7 @@ pub fn create_output_symtab<E: Arch>(ctx: &mut Context<E>) {
         .filter(|&(_, &c)| c == Class::Global)
         .map(|(i, _)| i)
         .collect();
-    globals.par_sort_by_key(|&i| ctx.symtab[i].name);
+    globals.par_sort_by_key(|&i| crate::util::name_sort_key(ctx.symtab[i].name));
 
     for &i in &globals {
         let sym = &ctx.symtab[i];
@@ -2472,7 +2472,7 @@ pub fn create_output_symtab<E: Arch>(ctx: &mut Context<E>) {
         .filter(|&(_, &c)| c == Class::Undef)
         .map(|(i, _)| i)
         .collect();
-    undefs.par_sort_by_key(|&i| ctx.symtab[i].name);
+    undefs.par_sort_by_key(|&i| crate::util::name_sort_key(ctx.symtab[i].name));
 
     for &i in &undefs {
         let sym = &ctx.symtab[i];

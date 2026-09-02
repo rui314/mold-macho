@@ -18,6 +18,21 @@ pub fn sign_extend(val: u64, n: u32) -> i64 {
     ((val << (63 - n)) as i64) >> (63 - n)
 }
 
+/// A sort key that orders strings like the strings themselves but
+/// settles most comparisons on one integer: the first eight bytes,
+/// big-endian, zero-padded. Symbol names cannot contain NULs, so
+/// (prefix, name) order equals plain name order. Mach-O sorts its
+/// global symbols and export-trie input by name (ELF mold never
+/// name-sorts), and mangled names share long prefixes, which makes
+/// plain str comparison the sort's bottleneck.
+pub fn name_sort_key(name: &str) -> (u64, &str) {
+    let b = name.as_bytes();
+    let mut p = [0u8; 8];
+    let n = b.len().min(8);
+    p[..n].copy_from_slice(&b[..n]);
+    (u64::from_be_bytes(p), name)
+}
+
 /// Appends a ULEB128-encoded value.
 /// Matches a symbol-list pattern: literal text with `*` wildcards,
 /// the dialect ld64 uses in its various symbol list files.
