@@ -135,7 +135,11 @@ fn scan_relocs_into_thunk<E: Arch>(
             let sym = &ctx.symtab[sym_id];
             if let (Origin::Obj(_), Some(target)) = (sym.origin, sym.isec) {
                 let t = &ctx.isecs[ctx.resolve_isec(target)];
-                if t.output_offset != u64::MAX {
+                // A target in another output section has no offset in
+                // this section's space; reserve an entry.
+                if t.osec != ctx.isecs[isec_id].osec {
+                    // conservative: fall through to the entry below
+                } else if t.output_offset != u64::MAX {
                     let target_off = t.output_offset + sym.value;
                     if thunk_off.saturating_sub(target_off) < E::BRANCH_RANGE / 2 - 1024 * 1024
                     {

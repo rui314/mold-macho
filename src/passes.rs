@@ -1866,17 +1866,35 @@ pub fn create_output_sections<E: Arch>(ctx: &mut Context<E>) {
     // stay on the serial path.
     {
         use rayon::prelude::*;
+        // Branches are not confined to their own section: __text,
+        // __StaticInit, the stubs and every other executable section
+        // share the __TEXT segment's address space, so once their
+        // combined size comes near the branch reach, a branch from any
+        // of them can be out of range. One gate over the total decides
+        // for all of them (a small late section like __StaticInit is
+        // exactly the one whose backward branches span the farthest).
+        let mut exec_total: u64 = 0;
+        for chunk in &ctx.chunks {
+            if let ChunkKind::Output { isecs, .. } = &chunk.kind {
+                if chunk.hdr.flags & (S_ATTR_PURE_INSTRUCTIONS | S_ATTR_SOME_INSTRUCTIONS)
+                    != 0
+                {
+                    exec_total += isecs.iter().map(|&id| ctx.isecs[id].size + 16).sum::<u64>();
+                }
+            }
+        }
+        let need_thunks = exec_total > E::BRANCH_RANGE / 2 - 64 * 1024 * 1024;
+
         let mut thunked: Vec<usize> = Vec::new();
         let mut plain: Vec<(usize, Vec<usize>)> = Vec::new();
         for chunk_idx in 0..ctx.chunks.len() {
             let ChunkKind::Output { isecs, .. } = &ctx.chunks[chunk_idx].kind else {
                 continue;
             };
-            let total: u64 = isecs.iter().map(|&id| ctx.isecs[id].size + 16).sum();
             let is_exec = ctx.chunks[chunk_idx].hdr.flags
                 & (S_ATTR_PURE_INSTRUCTIONS | S_ATTR_SOME_INSTRUCTIONS)
                 != 0;
-            if is_exec && total > E::BRANCH_RANGE / 2 {
+            if is_exec && need_thunks {
                 thunked.push(chunk_idx);
             } else {
                 plain.push((chunk_idx, isecs.clone()));
