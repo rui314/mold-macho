@@ -36,21 +36,34 @@ pub fn dead_strip<E: Arch>(ctx: &mut Context<E>) {
             }
         };
 
-    // Section-level roots. Sections of dead archive members are not
-    // part of the link at all and must not be resurrected here.
-    for (id, isec) in ctx.isecs.iter().enumerate() {
-        if !isec.is_alive {
-            continue;
-        }
-        let keep_type = matches!(
-            isec.hdr.section_type(),
-            S_MOD_INIT_FUNC_POINTERS | S_INIT_FUNC_OFFSETS | S_THREAD_LOCAL_VARIABLES
-        );
-        let keep_attr =
-            isec.hdr.flags & (S_ATTR_NO_DEAD_STRIP | S_ATTR_LIVE_SUPPORT) != 0;
-        if keep_type || keep_attr || isec.hdr.sectname() == "__objc_imageinfo" {
-            mark(&mut live, &mut pred, &mut stack, id, usize::MAX);
-        }
+    // Section-level roots, found on all cores; marking stays serial
+    // (it is a handful of sections). Sections of dead archive members
+    // are not part of the link at all and must not be resurrected.
+    let root_ids: Vec<usize> = {
+        use rayon::prelude::*;
+        ctx.isecs
+            .par_iter()
+            .enumerate()
+            .filter_map(|(id, isec)| {
+                if !isec.is_alive {
+                    return None;
+                }
+                let keep_type = matches!(
+                    isec.hdr.section_type(),
+                    S_MOD_INIT_FUNC_POINTERS | S_INIT_FUNC_OFFSETS | S_THREAD_LOCAL_VARIABLES
+                );
+                let keep_attr =
+                    isec.hdr.flags & (S_ATTR_NO_DEAD_STRIP | S_ATTR_LIVE_SUPPORT) != 0;
+                if keep_type || keep_attr || isec.hdr.sectname() == "__objc_imageinfo" {
+                    Some(id)
+                } else {
+                    None
+                }
+            })
+            .collect()
+    };
+    for id in root_ids {
+        mark(&mut live, &mut pred, &mut stack, id, usize::MAX);
     }
 
     // Initializers converted to __init_offsets are roots; their source

@@ -2302,49 +2302,61 @@ pub fn create_output_symtab<E: Arch>(ctx: &mut Context<E>) {
     }
     let __t = std::time::Instant::now();
 
-    // Local symbols (-x drops them)
-    for obj in &ctx.objs {
-        if ctx.args.strip_locals {
-            break;
-        }
-        if !obj.is_alive {
-            continue;
-        }
-        for (nlist, &sym_id) in obj.nlists.iter().zip(&obj.syms) {
-            let sym = &ctx.symtab[sym_id];
-            if nlist.is_stab() || nlist.is_extern() || !keep_local_symbol(sym.name) {
-                continue;
-            }
-            // -non_global_symbols_keep_list / _strip_list filter the
-            // local symbols by name; stabs are unaffected.
-            if let Some(keep) = &ctx.args.local_keep_list {
-                if !keep.iter().any(|p| crate::util::glob_match(p, sym.name)) {
-                    continue;
+    // Local symbols (-x drops them), planned per object in parallel
+    // - mold's plan_symtab per file - and appended in object order.
+    if !ctx.args.strip_locals {
+        use rayon::prelude::*;
+        let ctx_ref: &Context<E> = ctx;
+        let per_obj: Vec<Vec<(&'static str, NList, crate::symbol::SymbolId)>> = ctx_ref
+            .objs
+            .par_iter()
+            .map(|obj| {
+                let mut out = Vec::new();
+                if !obj.is_alive {
+                    return out;
                 }
+                for (nlist, &sym_id) in obj.nlists.iter().zip(&obj.syms) {
+                    let sym = &ctx_ref.symtab[sym_id];
+                    if nlist.is_stab() || nlist.is_extern() || !keep_local_symbol(sym.name) {
+                        continue;
+                    }
+                    // -non_global_symbols_keep_list / _strip_list
+                    // filter local symbols by name; stabs unaffected.
+                    if let Some(keep) = &ctx_ref.args.local_keep_list {
+                        if !keep.iter().any(|p| crate::util::glob_match(p, sym.name)) {
+                            continue;
+                        }
+                    }
+                    if ctx_ref
+                        .args
+                        .local_strip_list
+                        .iter()
+                        .any(|p| crate::util::glob_match(p, sym.name))
+                    {
+                        continue;
+                    }
+                    let Some(isec) = sym.isec else { continue };
+                    let isec = ctx_ref.resolve_isec(isec);
+                    if !matches!(sym.origin, Origin::Obj(_)) || !ctx_ref.isecs[isec].is_alive {
+                        continue;
+                    }
+                    let ent = NList {
+                        n_strx: 0,
+                        n_type: N_SECT,
+                        n_sect: ordinals[ctx_ref.isecs[isec].osec],
+                        n_desc: 0,
+                        n_value: 0,
+                    };
+                    out.push((sym.name, ent, sym_id));
+                }
+                out
+            })
+            .collect();
+        for group in per_obj {
+            for (name, ent, sym_id) in group {
+                names.push(name);
+                data.entries.push((ent, Some(sym_id)));
             }
-            if ctx
-                .args
-                .local_strip_list
-                .iter()
-                .any(|p| crate::util::glob_match(p, sym.name))
-            {
-                continue;
-            }
-            let Some(isec) = sym.isec else { continue };
-            let isec = ctx.resolve_isec(isec);
-            if !matches!(sym.origin, Origin::Obj(_)) || !ctx.isecs[isec].is_alive {
-                continue;
-            }
-            let n_strx = 0;
-        names.push(sym.name);
-            let ent = NList {
-                n_strx,
-                n_type: N_SECT,
-                n_sect: ordinals[ctx.isecs[isec].osec],
-                n_desc: 0,
-                n_value: 0,
-            };
-            data.entries.push((ent, Some(sym_id)));
         }
     }
     if std::env::var_os("MOLD_TIMING").is_some() {

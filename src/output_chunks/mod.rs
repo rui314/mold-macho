@@ -795,30 +795,55 @@ pub fn encode_export_trie<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
     let mut nodes = Vec::new();
     flatten(&mut root, &mut nodes);
 
-    // Assign node offsets until they stop moving.
+    // Assign node offsets until they stop moving. Everything except
+    // the width of the child-offset ULEBs is invariant, so the
+    // fixpoint (a couple of passes: offsets only grow as their ULEBs
+    // widen) runs over precomputed per-node fixed sizes and child
+    // index lists, no pointer chasing.
+    let node_index: hashbrown::HashMap<*mut TrieNode, u32> = nodes
+        .iter()
+        .enumerate()
+        .map(|(i, &p)| (p, i as u32))
+        .collect();
+    let mut fixed = Vec::with_capacity(nodes.len());
+    let mut kids: Vec<Vec<u32>> = Vec::with_capacity(nodes.len());
+    for &node in &nodes {
+        // SAFETY: nodes live in `root`, which outlives this function.
+        let node = unsafe { &*node };
+        let terminal_size = match node.export {
+            Some((flags, addr)) => uleb_len(flags as u64) + uleb_len(addr),
+            None => 0,
+        };
+        let mut f = uleb_len(terminal_size as u64) + terminal_size + 1;
+        let mut k = Vec::with_capacity(node.children.len());
+        for (label, child) in &node.children {
+            f += label.len() + 1;
+            k.push(node_index[&(child as *const TrieNode as *mut TrieNode)]);
+        }
+        fixed.push(f);
+        kids.push(k);
+    }
+    let mut offs = vec![0u32; nodes.len()];
     loop {
         let mut changed = false;
-        let mut off = 0;
-        for &node in &nodes {
-            // SAFETY: the nodes all live in `root`, which outlives this
-            // loop, and each is visited once per iteration.
-            let node = unsafe { &mut *node };
-            if node.offset != off {
-                node.offset = off;
+        let mut off = 0u32;
+        for i in 0..nodes.len() {
+            if offs[i] != off {
+                offs[i] = off;
                 changed = true;
             }
-            let terminal_size = match node.export {
-                Some((flags, addr)) => uleb_len(flags as u64) + uleb_len(addr),
-                None => 0,
-            };
-            off += uleb_len(terminal_size as u64) + terminal_size + 1;
-            for (label, child) in &node.children {
-                off += label.len() + 1 + uleb_len(child.offset as u64);
+            off += fixed[i] as u32;
+            for &c in &kids[i] {
+                off += uleb_len(offs[c as usize] as u64) as u32;
             }
         }
         if !changed {
             break;
         }
+    }
+    for (i, &node) in nodes.iter().enumerate() {
+        // SAFETY: as above; each node written once.
+        unsafe { (*node).offset = offs[i] as usize };
     }
 
     let mut buf = Vec::new();
