@@ -253,6 +253,18 @@ fn load_pending<E: Arch>(ctx: &mut Context<E>, pending: Vec<PendingObject>) {
 }
 
 pub fn read_input_files<E: Arch>(ctx: &mut Context<E>) {
+    // ld64 warns when a library is named twice; build systems that
+    // knowingly repeat -l flags pass -no_warn_duplicate_libraries.
+    if ctx.args.warn_duplicate_libraries {
+        let mut seen = std::collections::HashSet::new();
+        for arg in &ctx.args.inputs {
+            if let InputArg::Lib(name, _) = arg {
+                if !seen.insert(name.clone()) {
+                    crate::warn!(ctx, "ignoring duplicate libraries: '-l{name}'");
+                }
+            }
+        }
+    }
     let inputs = std::mem::take(&mut ctx.args.inputs);
     let mut queue: Vec<PendingObject> = Vec::new();
     for arg in &inputs {

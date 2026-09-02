@@ -182,6 +182,9 @@ pub struct Args {
     pub ignore_optimization_hints: bool,
     /// -print_statistics: report phase timings and sizes to stderr.
     pub print_statistics: bool,
+    /// -warn_duplicate_libraries (default): warn when one library is
+    /// named more than once.
+    pub warn_duplicate_libraries: bool,
     /// -non_global_symbols_strip_list: local symbols to drop from the
     /// output symbol table (glob patterns).
     pub local_strip_list: Vec<String>,
@@ -264,6 +267,7 @@ impl Default for Args {
             trace: false,
             ignore_optimization_hints: false,
             print_statistics: false,
+            warn_duplicate_libraries: true,
             local_strip_list: Vec::new(),
             local_keep_list: None,
             pagezero_size: 0x1_0000_0000,
@@ -550,6 +554,8 @@ pub fn parse_args(diag: &Diagnostics, cmdline: &[String]) -> Args {
             "-t" => args.trace = true,
             "-ignore_optimization_hints" => args.ignore_optimization_hints = true,
             "-print_statistics" => args.print_statistics = true,
+            "-warn_duplicate_libraries" => args.warn_duplicate_libraries = true,
+            "-no_warn_duplicate_libraries" => args.warn_duplicate_libraries = false,
             "-non_global_symbols_strip_list" => {
                 let path = next_arg(&mut i);
                 args.local_strip_list.extend(read_symbol_list(diag, path));
