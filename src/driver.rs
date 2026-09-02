@@ -147,16 +147,21 @@ pub fn link<E: Arch>(cmdline: &[String], diag: &Diagnostics) -> Result<i32, Stri
             eprintln!("    merge_literals {:?}", tt.elapsed());
         }
     }
-    passes::add_synthetic_symbols(&mut ctx);
-    passes::convert_common_symbols(&mut ctx);
-    passes::create_objc_msgsend_stubs(&mut ctx);
-    passes::auto_hide_weak_defs(&mut ctx);
-    passes::coalesce_weak_defs(&mut ctx);
-    passes::check_undefined_symbols(&mut ctx);
+    macro_rules! tp { ($name:expr, $e:expr) => {{
+        let tt = std::time::Instant::now();
+        $e;
+        if std::env::var_os("MOLD_TIMING").is_some() { eprintln!("    {} {:?}", $name, tt.elapsed()); }
+    }}; }
+    tp!("add_synthetic_symbols", passes::add_synthetic_symbols(&mut ctx));
+    tp!("convert_common_symbols", passes::convert_common_symbols(&mut ctx));
+    tp!("create_objc_msgsend_stubs", passes::create_objc_msgsend_stubs(&mut ctx));
+    tp!("auto_hide_weak_defs", passes::auto_hide_weak_defs(&mut ctx));
+    tp!("coalesce_weak_defs", passes::coalesce_weak_defs(&mut ctx));
+    tp!("check_undefined_symbols", passes::check_undefined_symbols(&mut ctx));
     passes::print_dependencies(&ctx);
     passes::print_why_load(&ctx);
     passes::print_trace(&ctx);
-    passes::dead_strip_dylibs(&mut ctx);
+    tp!("dead_strip_dylibs", passes::dead_strip_dylibs(&mut ctx));
     ctx.diag.checkpoint();
     if ctx.args.dead_strip {
         let tt = std::time::Instant::now();

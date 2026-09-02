@@ -1234,12 +1234,22 @@ pub fn auto_hide_weak_defs<E: Arch>(ctx: &mut Context<E>) {
         return;
     }
 
-    // sym -> "every live weak definition may be hidden".
-    let mut can_hide: std::collections::HashMap<crate::symbol::SymbolId, bool> =
-        std::collections::HashMap::new();
-    for obj in &ctx.objs {
+    // For each symbol, "seen a live weak def" and "every live weak def
+    // may be hidden". A C++ debug link has millions of weak-def nlists
+    // (every inline and template instance), so this reduces over them
+    // in parallel into a dense array keyed by the symbol's id - mold's
+    // pattern - rather than a serial fold into a hash map. Bit 0 marks
+    // a symbol seen; bit 1 marks it as having a def that cannot hide.
+    // Both bits are monotonic (only ever set), so racing relaxed
+    // stores are safe.
+    use rayon::prelude::*;
+    use std::sync::atomic::{AtomicU8, Ordering};
+    const SEEN: u8 = 1;
+    const NOT_HIDABLE: u8 = 2;
+    let flags: Vec<AtomicU8> = (0..ctx.symtab.syms.len()).map(|_| AtomicU8::new(0)).collect();
+    ctx.objs.par_iter().for_each(|obj| {
         if !obj.is_alive {
-            continue;
+            return;
         }
         for (nlist, &sym_id) in obj.nlists.iter().zip(&obj.syms) {
             if nlist.is_stab()
@@ -1249,29 +1259,28 @@ pub fn auto_hide_weak_defs<E: Arch>(ctx: &mut Context<E>) {
             {
                 continue;
             }
-            let hidable = nlist.n_desc & N_WEAK_REF != 0;
-            can_hide
-                .entry(sym_id)
-                .and_modify(|h| *h &= hidable)
-                .or_insert(hidable);
+            let bits = if nlist.n_desc & N_WEAK_REF != 0 { SEEN } else { SEEN | NOT_HIDABLE };
+            flags[sym_id].fetch_or(bits, Ordering::Relaxed);
         }
-    }
+    });
 
-    for (id, hidable) in can_hide {
-        let sym = &mut ctx.symtab[id];
-        if hidable
-            && sym.is_weak_def
-            && sym.is_extern
-            && matches!(sym.origin, Origin::Obj(_))
-            && !ctx
-                .args
-                .exported_symbols
-                .as_ref()
-                .is_some_and(|list| list.iter().any(|n| n == sym.name))
-        {
-            sym.is_private_extern = true;
-        }
-    }
+    let exported = ctx.args.exported_symbols.as_ref();
+    ctx.symtab
+        .syms
+        .par_iter_mut()
+        .zip(&flags)
+        .for_each(|(sym, f)| {
+            let f = f.load(Ordering::Relaxed);
+            if f & SEEN != 0
+                && f & NOT_HIDABLE == 0
+                && sym.is_weak_def
+                && sym.is_extern
+                && matches!(sym.origin, Origin::Obj(_))
+                && !exported.is_some_and(|list| list.iter().any(|n| n == sym.name))
+            {
+                sym.is_private_extern = true;
+            }
+        });
 }
 
 /// Discards the losing copies of coalesced weak definitions. Symbol
@@ -1287,39 +1296,61 @@ pub fn auto_hide_weak_defs<E: Arch>(ctx: &mut Context<E>) {
 /// same size - C++ guarantees identical weak instantiations, but a
 /// mismatch means something odd, and keeping the copy is safe.
 pub fn coalesce_weak_defs<E: Arch>(ctx: &mut Context<E>) {
-    for obj_idx in 0..ctx.objs.len() {
-        if !ctx.objs[obj_idx].is_alive {
-            continue;
-        }
-        for i in 0..ctx.objs[obj_idx].nlists.len() {
-            let nlist = ctx.objs[obj_idx].nlists[i];
-            if nlist.is_stab()
-                || !nlist.is_extern()
-                || nlist.n_type() != N_SECT
-                || nlist.n_desc & N_WEAK_DEF == 0
-            {
-                continue;
+    // A C++ debug link has millions of weak-def nlists (every inline
+    // and template instance), so the scan that finds each losing copy
+    // - filtering, and a find_subsec binary search per weak def - runs
+    // in parallel per object. Only pure reads happen here (resolution
+    // has already set origins, and find_subsec reads stable subsection
+    // extents), so each object independently emits its candidate
+    // (loser, winner) subsection pairs, unresolved, in nlist order.
+    use rayon::prelude::*;
+    let shared = &*ctx;
+    let candidates: Vec<Vec<(usize, usize, u64, u64)>> = ctx
+        .objs
+        .par_iter()
+        .enumerate()
+        .map(|(obj_idx, obj)| {
+            let mut out = Vec::new();
+            if !obj.is_alive {
+                return out;
             }
-            let sym_id = ctx.objs[obj_idx].syms[i];
-            let sym = &ctx.symtab[sym_id];
-            let Origin::Obj(owner) = sym.origin else {
-                continue;
-            };
-            if owner as usize == obj_idx {
-                continue;
+            for (nlist, &sym_id) in obj.nlists.iter().zip(&obj.syms) {
+                if nlist.is_stab()
+                    || !nlist.is_extern()
+                    || nlist.n_type() != N_SECT
+                    || nlist.n_desc & N_WEAK_DEF == 0
+                {
+                    continue;
+                }
+                let sym = &shared.symtab[sym_id];
+                let Origin::Obj(owner) = sym.origin else { continue };
+                if owner as usize == obj_idx {
+                    continue;
+                }
+                let Some(winner) = sym.isec.map(|i| i as usize) else { continue };
+                let Some((loser, off)) = crate::input_files::find_subsec(
+                    &shared.isecs,
+                    &obj.subsecs,
+                    nlist.n_value,
+                ) else {
+                    continue;
+                };
+                out.push((loser, winner, off, sym.value));
             }
-            let Some(winner) = sym.isec.map(|i| i as usize) else { continue };
+            out
+        })
+        .collect();
+
+    // Applying the replacements is serial and order-dependent (a later
+    // loser may resolve through an earlier one), so it stays a single
+    // walk in object order - the same order and the same resolve/size
+    // checks as the original loop, over only the qualifying weak defs.
+    for list in candidates {
+        for (loser, winner, off, sym_value) in list {
             let winner = ctx.resolve_isec(winner);
-            let Some((loser, off)) = crate::input_files::find_subsec(
-                &ctx.isecs,
-                &ctx.objs[obj_idx].subsecs,
-                nlist.n_value,
-            ) else {
-                continue;
-            };
             let loser = ctx.resolve_isec(loser);
             if loser == winner
-                || off != sym.value
+                || off != sym_value
                 || ctx.isecs[loser].size != ctx.isecs[winner].size
                 || ctx.isecs[loser].replacement.is_some()
             {
