@@ -11,6 +11,9 @@ name = "mold_macho"
 # The linker is generic over the target. Each target is instantiated in a
 # crate of its own under targets/, and the executable in cli/ dispatches to
 # them, mirroring mold's ELF port.
+[profile.release]
+debug = 1
+
 [workspace]
 members = ["cli", "targets/*", "tests"]
 default-members = [".", "cli", "targets/*", "tests"]

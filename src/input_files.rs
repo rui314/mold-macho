@@ -245,7 +245,7 @@ pub fn stage_object<E: Arch>(
     let mut strtab: &'static [u8] = &[];
     if let Some(cmd) = symtab_cmd {
         nlists = read_array(data, cmd.symoff as usize, cmd.nsyms as usize);
-        strtab = &data[cmd.stroff as usize..(cmd.stroff + cmd.strsize) as usize];
+        strtab = validate_strtab(&data[cmd.stroff as usize..(cmd.stroff + cmd.strsize) as usize]);
     }
 
     // Split each section into subsections at its symbols, the Mach-O
@@ -765,11 +765,40 @@ pub fn parse_bitcode<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile, ali
     obj_idx
 }
 
+/// Extracts one NUL-terminated name from a string table already
+/// validated as UTF-8 by validate_strtab. The NUL scan goes through
+/// libc's memchr, which is vectorized; a per-name from_utf8 was a
+/// quarter of all staging time on big links.
 fn symbol_name(strtab: &'static [u8], nlist: &NList) -> &'static str {
     let off = nlist.n_strx as usize;
+    if off >= strtab.len() {
+        return "";
+    }
     let rest = &strtab[off..];
-    let len = rest.iter().position(|&b| b == 0).unwrap_or(rest.len());
-    std::str::from_utf8(&rest[..len]).unwrap_or("")
+    // SAFETY: memchr reads within `rest`; the result is bounded by
+    // its length.
+    let len = unsafe {
+        let p = libc::memchr(rest.as_ptr() as *const _, 0, rest.len());
+        if p.is_null() {
+            rest.len()
+        } else {
+            (p as usize) - (rest.as_ptr() as usize)
+        }
+    };
+    // SAFETY: the whole table was checked as UTF-8 up front; any
+    // slice of it on a codepoint boundary is valid, and a NUL
+    // boundary always is.
+    unsafe { std::str::from_utf8_unchecked(&rest[..len]) }
+}
+
+/// Checks a whole string table as UTF-8 once - vastly cheaper than
+/// validating millions of short names one by one. Returns an empty
+/// table (degrading names to "") for the pathological non-UTF-8 case.
+fn validate_strtab(strtab: &'static [u8]) -> &'static [u8] {
+    match std::str::from_utf8(strtab) {
+        Ok(_) => strtab,
+        Err(e) => &strtab[..e.valid_up_to()],
+    }
 }
 
 
@@ -1250,7 +1279,7 @@ pub fn defined_symbol_names(mf: &MappedFile) -> Vec<&'static str> {
                 &data[cmd.stroff as usize..(cmd.stroff + cmd.strsize) as usize];
             // SAFETY: input files are leaked, so the string table lives
             // for the rest of the process.
-            let strtab: &'static [u8] = unsafe { std::mem::transmute(strtab) };
+            let strtab: &'static [u8] = validate_strtab(unsafe { std::mem::transmute(strtab) });
             for nlist in &nlists {
                 if !nlist.is_stab()
                     && nlist.is_extern()
@@ -1363,7 +1392,7 @@ pub fn parse_dylib_binary<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile
         let strtab = &data[sym.stroff as usize..(sym.stroff + sym.strsize) as usize];
         // SAFETY: input files are leaked, so the string table lives for
         // the rest of the process.
-        let strtab: &'static [u8] = unsafe { std::mem::transmute(strtab) };
+        let strtab: &'static [u8] = validate_strtab(unsafe { std::mem::transmute(strtab) });
         // A TLV export is recognizable by its section: n_sect names a
         // S_THREAD_LOCAL_VARIABLES section (the __thread_vars
         // descriptors).
@@ -1515,7 +1544,7 @@ fn dylib_binary_exports(
         let strtab = &data[sym.stroff as usize..(sym.stroff + sym.strsize) as usize];
         // SAFETY: input files are leaked, so the string table lives for
         // the rest of the process.
-        let strtab: &'static [u8] = unsafe { std::mem::transmute(strtab) };
+        let strtab: &'static [u8] = validate_strtab(unsafe { std::mem::transmute(strtab) });
         let tlv_sects = thread_local_section_ordinals(data, &hdr);
         let range = dysym.iextdefsym as usize..(dysym.iextdefsym + dysym.nextdefsym) as usize;
         for nlist in &nlists[range] {
