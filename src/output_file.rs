@@ -40,7 +40,26 @@ pub fn write(diag: &Diagnostics, path: &str, buf: &[u8]) {
     let _ = std::fs::remove_file(path);
     *OUTPUT_PATH.lock().unwrap() = Some(PathBuf::from(path));
 
-    if let Err(_) = std::fs::write(path, buf) {
+    // One serial write() of a large output is a single-threaded copy
+    // into the page cache; disjoint pwrite()s of 8MiB blocks do the
+    // same copy on all cores. (Writing through a shared mapping would
+    // be faster still, but macOS kills ad-hoc-signed binaries written
+    // that way; see "Document why the output is not written through
+    // mmap".)
+    use std::os::unix::fs::FileExt;
+    let file = match std::fs::File::create(path) {
+        Ok(f) => f,
+        Err(_) => fatal!(diag, "cannot write {path}: {}", errno_string()),
+    };
+    let _ = file.set_len(buf.len() as u64);
+    use rayon::prelude::*;
+    let failed = std::sync::atomic::AtomicBool::new(false);
+    buf.par_chunks(8 << 20).enumerate().for_each(|(i, block)| {
+        if file.write_all_at(block, (i as u64) << 23).is_err() {
+            failed.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    });
+    if failed.load(std::sync::atomic::Ordering::Relaxed) {
         fatal!(diag, "cannot write {path}: {}", errno_string());
     }
     if let Err(_) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)) {

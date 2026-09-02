@@ -1614,27 +1614,27 @@ pub fn create_output_sections<E: Arch>(ctx: &mut Context<E>) {
     ctx.chunks.push(Chunk::new("__TEXT", "", ChunkKind::MachHeader));
 
     // Assign each input section to an output section, creating output
-    // sections as needed.
+    // sections as needed. Keyed by the raw 16-byte name pairs, so the
+    // hot loop does no allocation and no linear scans; chunks are
+    // still created in first-encounter order.
+    let attr_mask = if ctx.args.relocatable { !0 } else { !S_ATTR_DEBUG };
+    let mut by_name: std::collections::HashMap<([u8; 16], [u8; 16]), usize> =
+        std::collections::HashMap::new();
     for i in 0..ctx.isecs.len() {
         if !ctx.isecs[i].is_alive || ctx.isecs[i].replacement.is_some() {
             continue;
         }
-        let segname = ctx.isecs[i].hdr.segname().to_string();
-        let sectname = ctx.isecs[i].hdr.sectname().to_string();
-
-        let chunk_idx = match ctx.chunks.iter().position(|c| {
-            matches!(c.kind, ChunkKind::Output { .. })
-                && c.hdr.segname == segname
-                && c.hdr.sectname == sectname
-        }) {
-            Some(idx) => idx,
+        let key = (ctx.isecs[i].hdr.segname, ctx.isecs[i].hdr.sectname);
+        let chunk_idx = match by_name.get(&key) {
+            Some(&idx) => idx,
             None => {
-                let segname: &'static str = match segname.as_str() {
+                let segname: &'static str = match ctx.isecs[i].hdr.segname() {
                     "__TEXT" => "__TEXT",
                     "__DATA_CONST" => "__DATA_CONST",
                     "__DATA" => "__DATA",
                     other => String::leak(other.to_string()),
                 };
+                let sectname = ctx.isecs[i].hdr.sectname().to_string();
                 let mut chunk = Chunk::new(
                     segname,
                     &sectname,
@@ -1646,14 +1646,13 @@ pub fn create_output_sections<E: Arch>(ctx: &mut Context<E>) {
                 // A final image never contains debug sections, so the
                 // attribute is dropped; a relocatable output keeps it,
                 // marking the carried DWARF for the next link.
-                let attr_mask = if ctx.args.relocatable { !0 } else { !S_ATTR_DEBUG };
                 chunk.hdr.flags = ctx.isecs[i].hdr.flags & attr_mask;
                 ctx.chunks.push(chunk);
+                by_name.insert(key, ctx.chunks.len() - 1);
                 ctx.chunks.len() - 1
             }
         };
 
-        let attr_mask = if ctx.args.relocatable { !0 } else { !S_ATTR_DEBUG };
         let chunk = &mut ctx.chunks[chunk_idx];
         chunk.hdr.p2align = chunk.hdr.p2align.max(ctx.isecs[i].hdr.p2align);
         // __thread_vars contains pointers but clang emits it with an
