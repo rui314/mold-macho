@@ -108,15 +108,25 @@ pub fn link<E: Arch>(cmdline: &[String], diag: &Diagnostics) -> Result<i32, Stri
     lap(&mut phases, "parse");
     loop {
         passes::resolve_symbols(&mut ctx);
-        if !passes::load_autolink_deps(&mut ctx) {
-            break;
+        match passes::load_autolink_deps(&mut ctx) {
+            passes::Autolinked::Nothing => break,
+            passes::Autolinked::DylibsOnly(first) => {
+                passes::claim_new_dylibs(&mut ctx, first);
+                break;
+            }
+            passes::Autolinked::Objects => {}
         }
     }
     if passes::run_lto(&mut ctx) {
         loop {
             passes::resolve_symbols(&mut ctx);
-            if !passes::load_autolink_deps(&mut ctx) {
-                break;
+            match passes::load_autolink_deps(&mut ctx) {
+                passes::Autolinked::Nothing => break,
+                passes::Autolinked::DylibsOnly(first) => {
+                    passes::claim_new_dylibs(&mut ctx, first);
+                    break;
+                }
+                passes::Autolinked::Objects => {}
             }
         }
     }

@@ -406,7 +406,18 @@ pub fn read_input_files<E: Arch>(ctx: &mut Context<E>) {
 /// names a library or framework the object needs, as if it had been on
 /// the command line. Swift objects rely on this entirely. Returns true
 /// if new inputs were loaded, in which case resolution must run again.
-pub fn load_autolink_deps<E: Arch>(ctx: &mut Context<E>) -> bool {
+/// What a round of auto-linking added to the link.
+pub enum Autolinked {
+    Nothing,
+    /// Only dylibs, starting at this index. A dylib addition cannot
+    /// change object-vs-object resolution (autolinked files get later
+    /// priorities than everything already loaded), so a light claim
+    /// pass replaces a full re-resolution.
+    DylibsOnly(usize),
+    Objects,
+}
+
+pub fn load_autolink_deps<E: Arch>(ctx: &mut Context<E>) -> Autolinked {
     let mut pending: Vec<Vec<String>> = Vec::new();
     for obj in &ctx.objs {
         if !obj.is_alive {
@@ -448,7 +459,43 @@ pub fn load_autolink_deps<E: Arch>(ctx: &mut Context<E>) -> bool {
         }
     }
     load_pending(ctx, queue);
-    (ctx.objs.len(), ctx.dylibs.len()) != before
+    if ctx.objs.len() != before.0 {
+        Autolinked::Objects
+    } else if ctx.dylibs.len() != before.1 {
+        Autolinked::DylibsOnly(before.1)
+    } else {
+        Autolinked::Nothing
+    }
+}
+
+/// Lets newly auto-linked dylibs claim still-unresolved symbols. They
+/// carry later priorities than every file already resolved, so they
+/// can steal nothing - a full re-resolution would reach exactly this
+/// outcome, at many times the cost.
+pub fn claim_new_dylibs<E: Arch>(ctx: &mut Context<E>, first: usize) {
+    use rayon::prelude::*;
+    struct SymsPtr(*mut crate::symbol::Symbol);
+    unsafe impl Sync for SymsPtr {}
+    let syms_ptr = SymsPtr(ctx.symtab.syms.as_mut_ptr());
+    let syms_ptr = &syms_ptr;
+    let dylibs = &ctx.dylibs;
+    (0..ctx.symtab.syms.len()).into_par_iter().for_each(|i| {
+        // SAFETY: each index is written only by its own iteration.
+        let sym = unsafe { &mut *syms_ptr.0.add(i) };
+        if !sym.is_used || sym.is_defined() {
+            return;
+        }
+        for (dylib_idx, dylib) in dylibs.iter().enumerate().skip(first) {
+            if dylib.exports.contains(sym.name) {
+                sym.origin = Origin::Dylib(dylib_idx);
+                sym.is_imported = true;
+                sym.is_extern = true;
+                sym.isec = None;
+                sym.is_common = false;
+                break;
+            }
+        }
+    });
 }
 
 /// Resolves all symbols, following mold's model: every input including

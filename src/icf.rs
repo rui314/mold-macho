@@ -200,7 +200,11 @@ pub fn icf_sections<E: Arch>(ctx: &mut Context<E>) {
         })
         .collect();
 
+    // Stop refining once the number of equivalence classes stops
+    // growing, as mold does - most graphs settle in a handful of
+    // rounds, far under the log2(n) worst case.
     let mut hashes = base.clone();
+    let mut prev_classes = 0usize;
     for _ in 0..rounds {
         hashes = (0..candidates.len())
             .into_par_iter()
@@ -214,6 +218,13 @@ pub fn icf_sections<E: Arch>(ctx: &mut Context<E>) {
                 h.finish()
             })
             .collect();
+        let mut sorted = hashes.clone();
+        sorted.par_sort_unstable();
+        sorted.dedup();
+        if sorted.len() == prev_classes {
+            break;
+        }
+        prev_classes = sorted.len();
     }
 
     // Group by final hash and fold each group onto its first member,
