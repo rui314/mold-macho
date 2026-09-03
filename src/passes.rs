@@ -174,6 +174,15 @@ fn collect_file<E: Arch>(
                 priority,
             });
         }
+        // A relocatable output keeps every reference undefined for the
+        // final link, so a dylib named on its command line is ignored
+        // with ld64's warning.
+        FileType::Tapi if ctx.args.relocatable => {
+            crate::warn!(ctx, "{}, ignoring unexpected dylib text stub file", mf.name);
+        }
+        FileType::Dylib if ctx.args.relocatable => {
+            crate::warn!(ctx, "{}, ignoring unexpected dylib file", mf.name);
+        }
         FileType::Tapi => {
             let idx = t!("parse_dylib(tbd)", input_files::parse_dylib(ctx, mf));
             ctx.dylibs[idx].is_weak |= weak;
@@ -426,6 +435,15 @@ pub enum Autolinked {
 }
 
 pub fn load_autolink_deps<E: Arch>(ctx: &mut Context<E>) -> Autolinked {
+    // ld64 does not act on auto-link options in a -r link: the
+    // LC_LINKER_OPTION commands are copied into the output object and
+    // the final link resolves them. Loading them here would let the
+    // libraries claim symbols that the output must leave undefined
+    // (Xcode's prelink of a Swift package auto-linked libc++ this way
+    // and the -r symbol table then lacked operator new).
+    if ctx.args.relocatable {
+        return Autolinked::Nothing;
+    }
     let mut pending: Vec<Vec<String>> = Vec::new();
     for obj in &ctx.objs {
         if !obj.is_alive {

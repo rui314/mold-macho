@@ -392,14 +392,34 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
         sect_relocs.push(rels);
     }
 
+    // Auto-link requests are not acted on in a -r link; each distinct
+    // one is carried into the output as an LC_LINKER_OPTION command,
+    // in first-seen order, for the final link to resolve.
+    let mut linker_options: Vec<&Vec<String>> = Vec::new();
+    for obj in &ctx.objs {
+        if !obj.is_alive {
+            continue;
+        }
+        for opt in &obj.linker_options {
+            if !linker_options.contains(&opt) {
+                linker_options.push(opt);
+            }
+        }
+    }
+    // cmd, cmdsize, count, then the NUL-terminated strings, padded to 8.
+    let linker_option_cmdsize = |opt: &Vec<String>| -> usize {
+        align_to(12 + opt.iter().map(|s| s.len() + 1).sum::<usize>() as u64, 8) as usize
+    };
+
     // File layout: header, one segment command with all sections,
-    // symtab commands; then section contents, relocations, symbols and
-    // strings.
-    let ncmds = 4;
+    // build version, linker options, symtab commands; then section
+    // contents, relocations, symbols and strings.
+    let ncmds = 4 + linker_options.len() as u32;
     let num_sections = section_chunks.len() + extras.len();
     let seg_cmd_size = size_of::<SegmentCommand>() + num_sections * size_of::<MachSection>();
     let sizeofcmds = seg_cmd_size
         + size_of::<BuildVersionCommand>()
+        + linker_options.iter().map(|o| linker_option_cmdsize(o)).sum::<usize>()
         + size_of::<SymtabCommand>()
         + size_of::<DysymtabCommand>();
     let mut off = (size_of::<MachHeader>() + sizeofcmds) as u64;
@@ -544,6 +564,19 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
     };
     bv.write_to(&mut buf[p..]);
     p += size_of::<BuildVersionCommand>();
+
+    for opt in &linker_options {
+        let cmdsize = linker_option_cmdsize(opt);
+        buf[p..p + 4].copy_from_slice(&LC_LINKER_OPTION.to_le_bytes());
+        buf[p + 4..p + 8].copy_from_slice(&(cmdsize as u32).to_le_bytes());
+        buf[p + 8..p + 12].copy_from_slice(&(opt.len() as u32).to_le_bytes());
+        let mut q = p + 12;
+        for s in opt.iter() {
+            buf[q..q + s.len()].copy_from_slice(s.as_bytes());
+            q += s.len() + 1;
+        }
+        p += cmdsize;
+    }
 
     let st = SymtabCommand {
         cmd: LC_SYMTAB,

@@ -137,6 +137,10 @@ pub fn link<E: Arch>(cmdline: &[String], diag: &Diagnostics) -> Result<i32, Stri
         passes::create_output_sections(&mut ctx);
         crate::relocatable::link(&mut ctx);
         ctx.diag.checkpoint();
+        // Xcode asks every link, its single-object prelinks included,
+        // for -dependency_info and fails the build if the file is
+        // missing.
+        crate::mapfile::write_dependency_info(&ctx);
         return Ok(0);
     }
     passes::convert_init_offsets(&mut ctx);
