@@ -15,8 +15,10 @@ Objective-C selector stubs.
 
 ## Usage
 
-Build with `cargo build --release`, then point your compiler driver at
-the linker:
+Build with `cargo build --release`. The binary is `target/release/mold`;
+`./install.sh` (PREFIX=/usr/local by default) installs it as
+`mold` with an `ld64.mold` symlink, the same arrangement as mold's
+`ld.mold`. Then point your compiler driver at the linker:
 
     clang -o hello hello.c --ld-path=path/to/ld64.mold
     swiftc -o hello hello.swift -use-ld=path/to/ld64.mold
