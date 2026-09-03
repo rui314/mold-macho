@@ -235,12 +235,12 @@ impl<E: Arch> Context<E> {
     /// A symbol's synthetic-slot indices, from the side table. Returns
     /// the all-absent default for symbols with no slots (the table is
     /// grown lazily by the first setter).
-    pub fn sym_aux(&self, id: SymbolId) -> crate::symbol::SymAux {
+    pub fn sym_aux(&self, id: SymbolId) -> &crate::symbol::SymAux {
         // Sparse, as mold-rust's SymbolAux: the symbol carries an index
         // into the table, NONE for the vast majority that have no slot.
         match self.symtab[id].aux_idx {
-            crate::symbol::NONE => Default::default(),
-            i => self.sym_aux[i as usize],
+            crate::symbol::NONE => &crate::symbol::NONE_AUX,
+            i => &self.sym_aux[i as usize],
         }
     }
 

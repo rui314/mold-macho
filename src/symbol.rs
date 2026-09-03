@@ -19,7 +19,7 @@ pub enum Origin {
     Synthetic,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct Symbol {
     /// The name, as a pointer and a u32 length rather than a 16-byte
     /// &str - mold-rust's name_ptr/name_len. Read through name().
@@ -37,11 +37,12 @@ pub struct Symbol {
     /// symbols with a stub/GOT/TLV/objc slot have an entry - mold-rust's
     /// aux_idx - instead of 16 bytes per symbol whether needed or not.
     pub aux_idx: u32,
-    /// The eight boolean attributes, packed into one byte so the struct
-    /// stays small - mold-rust keeps its Symbol flags in a packed byte
-    /// for the same reason (Symbol is scanned in every resolution and
-    /// layout pass). Accessed only through the is_*/set_* methods.
-    flags: u8,
+    /// The boolean attributes, packed into one atomic word as mold-rust
+    /// keeps its Symbol flags: the eight is_* bits, read with plain
+    /// loads and written through &mut without an atomic operation, plus
+    /// the MARK bit that parallel passes set with a compare-and-swap
+    /// (thunk creation dedups its entries that way, in the scan itself).
+    flags: std::sync::atomic::AtomicU16,
     /// Which of `Origin`'s variants this is (KIND_*); with `file` it
     /// reconstructs the enum, which as a field was 8 bytes plus 8 more
     /// for the Option<u32> section.
@@ -108,28 +109,31 @@ impl Symbol {
     }
 }
 
-const F_EXTERN: u8 = 1 << 0;
-const F_WEAK_DEF: u8 = 1 << 1;
-const F_IMPORTED: u8 = 1 << 2;
-const F_USED: u8 = 1 << 3;
-const F_PRIVATE_EXTERN: u8 = 1 << 4;
-const F_WEAK_REF: u8 = 1 << 5;
-const F_NO_DEAD_STRIP: u8 = 1 << 6;
-const F_COMMON: u8 = 1 << 7;
+const F_EXTERN: u16 = 1 << 0;
+const F_WEAK_DEF: u16 = 1 << 1;
+const F_IMPORTED: u16 = 1 << 2;
+const F_USED: u16 = 1 << 3;
+const F_PRIVATE_EXTERN: u16 = 1 << 4;
+const F_WEAK_REF: u16 = 1 << 5;
+const F_NO_DEAD_STRIP: u16 = 1 << 6;
+const F_COMMON: u16 = 1 << 7;
+/// Set by mark(), a transient per-pass flag (mold-rust's IS_MARKED).
+const F_MARK: u16 = 1 << 8;
 
 macro_rules! sym_flag {
     ($get:ident, $set:ident, $bit:expr, $doc:expr) => {
         #[doc = $doc]
         #[inline]
         pub fn $get(&self) -> bool {
-            self.flags & $bit != 0
+            self.flags.load(std::sync::atomic::Ordering::Relaxed) & $bit != 0
         }
         #[inline]
         pub fn $set(&mut self, v: bool) {
+            let f = self.flags.get_mut();
             if v {
-                self.flags |= $bit;
+                *f |= $bit;
             } else {
-                self.flags &= !$bit;
+                *f &= !$bit;
             }
         }
     };
@@ -150,6 +154,40 @@ impl Symbol {
         "The symbol must survive dead-stripping.");
     sym_flag!(is_common, set_is_common, F_COMMON,
         "A tentative definition (common symbol) not yet converted; `value` holds its size.");
+
+    /// Atomically sets the transient mark; true if it was clear (the
+    /// caller won the race to claim this symbol).
+    #[inline]
+    pub fn mark(&self) -> bool {
+        use std::sync::atomic::Ordering::Relaxed;
+        self.flags.fetch_or(F_MARK, Relaxed) & F_MARK == 0
+    }
+    #[inline]
+    pub fn unmark(&self) {
+        self.flags.fetch_and(!F_MARK, std::sync::atomic::Ordering::Relaxed);
+    }
+    #[inline]
+    pub fn is_marked(&self) -> bool {
+        self.flags.load(std::sync::atomic::Ordering::Relaxed) & F_MARK != 0
+    }
+}
+
+impl Clone for Symbol {
+    fn clone(&self) -> Symbol {
+        Symbol {
+            name_ptr: self.name_ptr,
+            name_len: self.name_len,
+            file: self.file,
+            isec: self.isec,
+            value: self.value,
+            aux_idx: self.aux_idx,
+            flags: std::sync::atomic::AtomicU16::new(
+                self.flags.load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            kind: self.kind,
+            common_p2align: self.common_p2align,
+        }
+    }
 }
 
 /// Sentinel for a synthetic-slot index a symbol does not have.
@@ -160,22 +198,35 @@ pub const NO_IDX: u32 = u32::MAX;
 /// take a slot ever have one, so these live in a side table indexed by
 /// SymbolId - mold-rust's SymbolAux - keeping Symbol itself small, as
 /// it is loaded in every symbol scan.
-#[derive(Clone, Copy)]
+#[derive(Clone, Debug)]
 pub struct SymAux {
     pub stub_idx: u32,
     pub got_idx: u32,
     pub tlv_idx: u32,
     pub objc_stub_idx: u32,
+    /// The addresses of this symbol's range-extension thunk entries,
+    /// sorted, so that applying an out-of-range branch can find the one
+    /// within reach - mold-rust's SymbolAux::thunk_addrs.
+    pub thunk_addrs: Vec<u64>,
 }
+
+impl SymAux {
+    pub const NONE: SymAux = SymAux {
+        stub_idx: NO_IDX,
+        got_idx: NO_IDX,
+        tlv_idx: NO_IDX,
+        objc_stub_idx: NO_IDX,
+        thunk_addrs: Vec::new(),
+    };
+}
+
+/// The shared "no slots" entry that sym_aux() returns for symbols
+/// without an aux entry.
+pub static NONE_AUX: SymAux = SymAux::NONE;
 
 impl Default for SymAux {
     fn default() -> SymAux {
-        SymAux {
-            stub_idx: NO_IDX,
-            got_idx: NO_IDX,
-            tlv_idx: NO_IDX,
-            objc_stub_idx: NO_IDX,
-        }
+        SymAux::NONE
     }
 }
 
@@ -188,7 +239,7 @@ impl Symbol {
             isec: NONE,
             value: 0,
             aux_idx: NONE,
-            flags: 0,
+            flags: std::sync::atomic::AtomicU16::new(0),
             kind: KIND_UNDEF,
             common_p2align: 0,
         }
