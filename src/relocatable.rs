@@ -10,7 +10,9 @@
 //! Section contents are copied raw (relocations stay unapplied), so
 //! fields that embed addends keep them; only non-external relocations
 //! need their embedded target addresses rewritten into the merged
-//! address space. Debug info is not carried over yet.
+//! address space. DWARF is not merged (its section-relative offsets
+//! carry no relocations); like ld64, the output gets debug-note stabs
+//! naming the input objects, which a later link carries through.
 
 use std::collections::HashMap;
 
@@ -119,6 +121,43 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
             });
         }
     }
+    // Private externals (visibility hidden) become plain non-external
+    // symbols in a -r output, as in ld64, unless -keep_private_externs
+    // (which Apple's strip passes to the `ld -r` it runs on each
+    // archive member).
+    let keep_pext = ctx.args.keep_private_externs;
+    if !keep_pext {
+        for (obj_idx, obj) in ctx.objs.iter().enumerate() {
+            if !obj.is_alive {
+                continue;
+            }
+            let r = obj.global_range();
+            for (nlist, &sym_id) in obj.nlists[r.clone()].iter().zip(&obj.syms[r]) {
+                let sym = &ctx.symtab[sym_id];
+                // Only the copy that won resolution is emitted.
+                if nlist.is_stab()
+                    || !nlist.is_extern()
+                    || nlist.n_type & N_PEXT == 0
+                    || !matches!(sym.origin(), Origin::Obj(o) if o as usize == obj_idx)
+                {
+                    continue;
+                }
+                let Some(isec) = sym.isec().map(|i| i as usize) else { continue };
+                let isec = ctx.resolve_isec(isec);
+                if !ctx.isecs[isec].is_alive() {
+                    continue;
+                }
+                index_of_sym.insert(sym_id, nlists_out.len() as u32);
+                nlists_out.push(NList {
+                    n_strx: add_string(&mut strtab, sym.name()),
+                    n_type: N_SECT,
+                    n_sect: ordinals[ctx.isecs[isec].osec as usize],
+                    n_desc: 0,
+                    n_value: sym_addr(ctx, sym_id),
+                });
+            }
+        }
+    }
     let nlocal = nlists_out.len() as u32;
 
     // Defined externals, sorted by name.
@@ -126,6 +165,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
         .filter(|&i| {
             let sym = &ctx.symtab[i];
             sym.is_extern()
+                && (keep_pext || !sym.is_private_extern())
                 && matches!(sym.origin(), Origin::Obj(_))
                 && sym
                     .isec()

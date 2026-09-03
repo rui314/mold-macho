@@ -51,6 +51,9 @@ pub struct Args {
     /// -final_output: the install name a dylib gets when -install_name
     /// is absent (the compiler driver passes it with several -arch).
     pub final_output: Option<String>,
+    /// -keep_private_externs: a -r output keeps private externals as
+    /// such instead of making them non-external.
+    pub keep_private_externs: bool,
     /// -bundle_loader: the executable a bundle's undefined symbols may
     /// resolve to, bound at run time as the main executable.
     pub bundle_loader: Option<String>,
@@ -215,6 +218,7 @@ impl Default for Args {
             output_type: MH_EXECUTE,
             install_name: None,
             final_output: None,
+            keep_private_externs: false,
             bundle_loader: None,
             arch: None,
             entry: "_main".to_string(),
@@ -449,6 +453,7 @@ pub fn parse_args(diag: &Diagnostics, cmdline: &[String]) -> Args {
             "-bundle" => args.output_type = MH_BUNDLE,
             "-bundle_loader" => args.bundle_loader = Some(next_arg(&mut i).to_string()),
             "-final_output" => args.final_output = Some(next_arg(&mut i).to_string()),
+            "-keep_private_externs" => args.keep_private_externs = true,
             "-rpath" => args.rpaths.push(next_arg(&mut i).to_string()),
             "-install_name" | "-dylib_install_name" => {
                 args.install_name = Some(next_arg(&mut i).to_string())
