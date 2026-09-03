@@ -444,7 +444,12 @@ fn create_dylinker_cmd() -> Vec<u8> {
 }
 
 fn create_id_dylib_cmd<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
-    let name = ctx.args.install_name.as_deref().unwrap_or(&ctx.args.output);
+    let name = ctx
+        .args
+        .install_name
+        .as_deref()
+        .or(ctx.args.final_output.as_deref())
+        .unwrap_or(&ctx.args.output);
     let cmd = DylibCommand {
         cmd: LC_ID_DYLIB,
         cmdsize: 0,
