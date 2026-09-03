@@ -1523,7 +1523,13 @@ fn parse_eh_frame<E: Arch>(
 
 
 /// Returns true if an object contains Objective-C class or category
-/// metadata, which -ObjC forces to be linked from archives.
+/// metadata, which -ObjC forces to be linked from archives. ld64 also
+/// counts Swift metadata (any __TEXT section named __swift*): a Swift
+/// type with no Objective-C class list still registers with the
+/// runtime through its type descriptors, and a Swift archive member
+/// nobody references by symbol (iTerm2's libiTerm2SharedARC.a members
+/// exported from the app's debug dylib) is only linked by this rule.
+/// An __objc_imageinfo alone does not qualify.
 pub fn has_objc_sections(mf: &MappedFile) -> bool {
     let data = mf.data;
     if data.len() < size_of::<MachHeader>() {
@@ -1544,7 +1550,8 @@ pub fn has_objc_sections(mf: &MappedFile) -> bool {
                 if matches!(
                     sect.sectname(),
                     "__objc_classlist" | "__objc_catlist" | "__objc_nlclslist" | "__objc_nlcatlist"
-                ) {
+                ) || (sect.segname() == "__TEXT" && sect.sectname().starts_with("__swift"))
+                {
                     return true;
                 }
             }
