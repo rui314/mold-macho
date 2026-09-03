@@ -366,6 +366,7 @@ pub fn expand_response_files(_diag: &Diagnostics, argv: &[String]) -> Vec<String
 pub fn parse_args(diag: &Diagnostics, cmdline: &[String]) -> Args {
     let mut args = Args::default();
     let mut i = 1;
+    let mut version_shown = false;
 
     let next_arg = |i: &mut usize| -> &str {
         *i += 1;
@@ -524,10 +525,13 @@ pub fn parse_args(diag: &Diagnostics, cmdline: &[String]) -> Args {
             }
             // ld64 prints its version banner to stdout and continues
             // with the link.
-            "-v" => println!(
-                "mold-macho {} (compatible with Apple ld64)",
-                env!("CARGO_PKG_VERSION")
-            ),
+            "-v" => {
+                println!(
+                    "mold-macho {} (compatible with Apple ld64)",
+                    env!("CARGO_PKG_VERSION")
+                );
+                version_shown = true;
+            }
             "-noall_load" => args.all_load = false,
             "-ObjC" => args.load_objc = true,
             "-force_load" => args
@@ -673,6 +677,13 @@ pub fn parse_args(diag: &Diagnostics, cmdline: &[String]) -> Args {
             }
         }
         i += 1;
+    }
+
+    // `ld -v` with nothing to link just reports the version; build
+    // systems and configure scripts probe the linker that way. mold
+    // does the same for -v/--version with no inputs.
+    if version_shown && args.inputs.is_empty() {
+        std::process::exit(0);
     }
 
     // A dylib is loaded at an arbitrary address; only a main executable

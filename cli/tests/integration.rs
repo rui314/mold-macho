@@ -6,5 +6,5 @@ fn main() -> ExitCode {
         .parent()
         .unwrap()
         .join("tests/cases");
-    mold_macho_tests::run(&cases, Path::new(env!("CARGO_BIN_EXE_ld64-mold")))
+    mold_macho_tests::run(&cases, Path::new(env!("CARGO_BIN_EXE_mold")))
 }

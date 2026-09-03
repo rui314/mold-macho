@@ -18,9 +18,9 @@ Objective-C selector stubs.
 Build with `cargo build --release`, then point your compiler driver at
 the linker:
 
-    clang -o hello hello.c --ld-path=path/to/ld64-mold
-    swiftc -o hello hello.swift -use-ld=path/to/ld64-mold
-    RUSTFLAGS="-C link-arg=--ld-path=path/to/ld64-mold" cargo build
+    clang -o hello hello.c --ld-path=path/to/ld64.mold
+    swiftc -o hello hello.swift -use-ld=path/to/ld64.mold
+    RUSTFLAGS="-C link-arg=--ld-path=path/to/ld64.mold" cargo build
 
 ## Feature highlights
 

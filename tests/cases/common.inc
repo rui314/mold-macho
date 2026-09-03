@@ -10,7 +10,7 @@ CXX="c++ -arch $ARCH"
 # The runner sets $mold to the linker under test; default to the debug
 # build for running a script by hand.
 if [ -z "$mold" ]; then
-  mold="$(cd "$(dirname "$0")"/../.. && pwd)/target/debug/ld64-mold"
+  mold="$(cd "$(dirname "$0")"/../.. && pwd)/target/debug/mold"
 fi
 
 # Common functions

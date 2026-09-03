@@ -6,7 +6,7 @@ description = "The mold Mach-O linker executable"
 license = "MIT"
 
 [[bin]]
-name = "ld64-mold"
+name = "mold"
 path = "src/main.rs"
 
 [[test]]
