@@ -400,9 +400,9 @@ pub fn icf_sections<E: Arch>(ctx: &mut Context<E>) {
             h.update(&rec.input_offset.to_ne_bytes());
             h.update(&rec.code_len.to_ne_bytes());
             h.update(&rec.encoding.to_ne_bytes());
-            h.update(&rec.personality.map_or(u64::MAX, |p| p as u64).to_ne_bytes());
-            h.update(&rec.fde.map_or(u64::MAX, |f| f as u64).to_ne_bytes());
-            if let Some((lsda, off)) = rec.lsda {
+            h.update(&rec.personality().map_or(u64::MAX, |p| p as u64).to_ne_bytes());
+            h.update(&rec.fde().map_or(u64::MAX, |f| f as u64).to_ne_bytes());
+            if let Some((lsda, off)) = rec.lsda() {
                 h.update(&ctx.resolve_isec(lsda).to_ne_bytes());
                 h.update(&off.to_ne_bytes());
             }

@@ -1079,11 +1079,11 @@ pub fn remove_unreachable_files<E: Arch>(ctx: &mut Context<E>) {
     let isecs = &ctx.isecs;
     let map = &fde_map;
     ctx.unwind_records.retain_mut(|rec| {
-        if !isecs[rec.isec].is_alive {
+        if !isecs[rec.isec as usize].is_alive {
             return false;
         }
-        if let Some(fde) = &mut rec.fde {
-            *fde = map[*fde];
+        if rec.fde_idx != crate::input_files::UNWIND_NONE {
+            rec.fde_idx = map[rec.fde_idx as usize] as u32;
         }
         true
     });
@@ -1101,8 +1101,8 @@ pub fn refresh_unwind_ranges<E: Arch>(ctx: &mut Context<E>) {
         while i < ctx.unwind_records.len() && ctx.unwind_records[i].isec == isec {
             i += 1;
         }
-        ctx.isecs[isec].unwind_offset = start as u32;
-        ctx.isecs[isec].nunwind = (i - start) as u32;
+        ctx.isecs[isec as usize].unwind_offset = start as u32;
+        ctx.isecs[isec as usize].nunwind = (i - start) as u32;
     }
 }
 
@@ -1644,7 +1644,7 @@ pub fn scan_unwind_personalities<E: Arch>(ctx: &mut Context<E>) {
     let mut personalities: Vec<_> = ctx
         .unwind_records
         .iter()
-        .filter_map(|rec| rec.personality)
+        .filter_map(|rec| rec.personality())
         .collect();
     personalities.extend(ctx.cies.iter().filter_map(|cie| cie.personality));
     for id in personalities {

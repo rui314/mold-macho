@@ -622,19 +622,19 @@ pub fn integrate_objects<E: Arch>(
                 while run < st.unwind.len() && st.unwind[run].isec == isec {
                     run += 1;
                 }
-                st.isecs[isec].unwind_offset = (base.unwind + start) as u32;
-                st.isecs[isec].nunwind = (run - start) as u32;
+                st.isecs[isec as usize].unwind_offset = (base.unwind + start) as u32;
+                st.isecs[isec as usize].nunwind = (run - start) as u32;
             }
             for rec in &mut st.unwind {
-                rec.isec += base.isec;
-                if let Some((lsda, _)) = &mut rec.lsda {
-                    *lsda += base.isec;
+                rec.isec += base.isec as u32;
+                if rec.lsda_isec != UNWIND_NONE {
+                    rec.lsda_isec += base.isec as u32;
                 }
-                if let Some(fde) = &mut rec.fde {
-                    *fde += base.fde;
+                if rec.fde_idx != UNWIND_NONE {
+                    rec.fde_idx += base.fde as u32;
                 }
-                if let Some(p) = &mut rec.personality {
-                    *p = syms[*p];
+                if rec.personality_sym != UNWIND_NONE {
+                    rec.personality_sym = syms[rec.personality_sym as usize] as u32;
                 }
             }
             for cie in &mut st.cies {
@@ -786,19 +786,19 @@ pub fn integrate_object_with<E: Arch>(
     }
 
     for mut rec in staged.unwind {
-        rec.isec += isec_base;
-        if let Some((lsda, _)) = &mut rec.lsda {
-            *lsda += isec_base;
+        rec.isec += isec_base as u32;
+        if rec.lsda_isec != UNWIND_NONE {
+            rec.lsda_isec += isec_base as u32;
         }
-        if let Some(fde) = &mut rec.fde {
-            *fde += fde_base;
+        if rec.fde_idx != UNWIND_NONE {
+            rec.fde_idx += fde_base as u32;
         }
         // The personality was recorded as a local symbol index.
-        if let Some(p) = &mut rec.personality {
-            *p = syms[*p];
+        if rec.personality_sym != UNWIND_NONE {
+            rec.personality_sym = syms[rec.personality_sym as usize] as u32;
         }
         // Extend or open the subsection's record range (grouped input).
-        let isec = &mut ctx.isecs[rec.isec];
+        let isec = &mut ctx.isecs[rec.isec as usize];
         if isec.nunwind == 0 {
             isec.unwind_offset = ctx.unwind_records.len() as u32;
         }
@@ -952,23 +952,52 @@ fn validate_strtab(strtab: &'static [u8]) -> &'static [u8] {
 }
 
 
+/// Sentinel for an absent index in `UnwindRecord` (no personality, no
+/// LSDA, no FDE).
+pub const UNWIND_NONE: u32 = u32::MAX;
+
 /// A record from a __compact_unwind section, describing how to unwind
 /// the stack through one function.
+///
+/// One record per function, walked by unwind-info encoding, dead-strip
+/// and ICF, so it is kept to eight u32s (32 bytes): every index is a
+/// u32 with `UNWIND_NONE` for "absent" rather than an `Option<usize>`,
+/// which is 16 bytes each - as mold-rust's Fde/Cie hold u32 indices.
+/// Read the optional fields through `personality()`, `lsda()`, `fde()`.
 #[derive(Clone, Debug)]
 pub struct UnwindRecord {
     /// The input section holding the function.
-    pub isec: usize,
+    pub isec: u32,
     /// The function's offset within `isec`.
     pub input_offset: u32,
     pub code_len: u32,
     pub encoding: u32,
-    pub personality: Option<SymbolId>,
-    /// The language-specific data area: an input section and an offset
-    /// within it.
-    pub lsda: Option<(usize, u32)>,
+    /// The personality symbol, or `UNWIND_NONE`.
+    pub personality_sym: u32,
+    /// The language-specific data area: an input section (or
+    /// `UNWIND_NONE`) and an offset within it.
+    pub lsda_isec: u32,
+    pub lsda_off: u32,
     /// For a record synthesized from DWARF unwind info, the FDE it
-    /// points to (an index into `ctx.fdes`).
-    pub fde: Option<usize>,
+    /// points to (an index into `ctx.fdes`), or `UNWIND_NONE`.
+    pub fde_idx: u32,
+}
+
+const _: () = assert!(std::mem::size_of::<UnwindRecord>() == 32);
+
+impl UnwindRecord {
+    #[inline]
+    pub fn personality(&self) -> Option<SymbolId> {
+        (self.personality_sym != UNWIND_NONE).then_some(self.personality_sym as usize)
+    }
+    #[inline]
+    pub fn lsda(&self) -> Option<(usize, u32)> {
+        (self.lsda_isec != UNWIND_NONE).then_some((self.lsda_isec as usize, self.lsda_off))
+    }
+    #[inline]
+    pub fn fde(&self) -> Option<usize> {
+        (self.fde_idx != UNWIND_NONE).then_some(self.fde_idx as usize)
+    }
 }
 
 /// Parses a __LD,__compact_unwind section into unwind records. The
@@ -1015,7 +1044,7 @@ fn parse_compact_unwind<E: Arch>(
     let mut records = Vec::with_capacity(num_entries);
     for i in 0..num_entries {
         records.push(UnwindRecord {
-            isec: usize::MAX,
+            isec: u32::MAX,
             input_offset: 0,
             code_len: u32::from_le_bytes({
                 let off = hdr.offset as usize + i * ENTRY_SIZE + 8;
@@ -1025,9 +1054,9 @@ fn parse_compact_unwind<E: Arch>(
                 let off = hdr.offset as usize + i * ENTRY_SIZE + 12;
                 data[off..off + 4].try_into().unwrap()
             }),
-            personality: None,
-            lsda: None,
-            fde: None,
+            personality_sym: UNWIND_NONE,
+            lsda_isec: UNWIND_NONE, lsda_off: 0,
+            fde_idx: UNWIND_NONE,
         });
     }
 
@@ -1052,7 +1081,7 @@ fn parse_compact_unwind<E: Arch>(
                 let Some((isec, off)) = find_subsec(addr) else {
                     fatal!(diag, "{file_name}: __compact_unwind: bad function reference");
                 };
-                records[idx].isec = isec;
+                records[idx].isec = isec as u32;
                 records[idx].input_offset = off;
             }
             // The personality function, recorded as a local symbol
@@ -1070,7 +1099,7 @@ fn parse_compact_unwind<E: Arch>(
                 let Some(sym) = sym else {
                     fatal!(diag, "{file_name}: __compact_unwind: unsupported personality");
                 };
-                records[idx].personality = Some(sym);
+                records[idx].personality_sym = sym as u32;
             }
             // The language-specific data area
             24 => {
@@ -1082,7 +1111,7 @@ fn parse_compact_unwind<E: Arch>(
                 let Some(lsda) = find_subsec(addr) else {
                     fatal!(diag, "{file_name}: __compact_unwind: bad LSDA reference");
                 };
-                records[idx].lsda = Some(lsda);
+                records[idx].lsda_isec = lsda.0 as u32; records[idx].lsda_off = lsda.1;
             }
             _ => fatal!(diag, "{file_name}: __compact_unwind: unsupported relocation"),
         }
@@ -1092,7 +1121,7 @@ fn parse_compact_unwind<E: Arch>(
     // synthesized from __eh_frame instead. Object files usually don't
     // contain such records, but `ld -r` output does.
     records.retain(|rec| {
-        rec.isec != usize::MAX && (rec.encoding & UNWIND_MODE_MASK) != E::UNWIND_MODE_DWARF
+        rec.isec != u32::MAX && (rec.encoding & UNWIND_MODE_MASK) != E::UNWIND_MODE_DWARF
     });
     out.extend(records);
 }
@@ -1313,7 +1342,7 @@ fn parse_eh_frame<E: Arch>(
     // their FDE; the compact record wins.
     let covered: std::collections::HashSet<(usize, u32)> = unwind
         .iter()
-        .map(|rec| (rec.isec, rec.input_offset))
+        .map(|rec| (rec.isec as usize, rec.input_offset))
         .collect();
 
     for (input_addr, rec) in fdes {
@@ -1367,13 +1396,13 @@ fn parse_eh_frame<E: Arch>(
         // Synthesize a compact unwind record pointing at the FDE so that
         // the unwinder can find it through __unwind_info.
         unwind.push(UnwindRecord {
-            isec,
+            isec: isec as u32,
             input_offset: func_offset,
             code_len,
             encoding: 0,
-            personality: None,
-            lsda: None,
-            fde: Some(fde_idx),
+            personality_sym: UNWIND_NONE,
+            lsda_isec: UNWIND_NONE, lsda_off: 0,
+            fde_idx: fde_idx as u32,
         });
     }
 }

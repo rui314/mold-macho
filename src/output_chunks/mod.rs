@@ -957,7 +957,7 @@ pub fn encode_unwind_info<E: Arch>(ctx: &Context<E>) -> (Vec<u8>, Vec<SymbolId>)
         .unwind_records
         .par_iter()
         .filter(|rec| {
-            ctx.isecs[rec.isec].is_alive && ctx.isecs[rec.isec].replacement == crate::input_sections::NO_REPLACEMENT
+            ctx.isecs[rec.isec as usize].is_alive && ctx.isecs[rec.isec as usize].replacement == crate::input_sections::NO_REPLACEMENT
         })
         .cloned()
         .collect();
@@ -967,12 +967,12 @@ pub fn encode_unwind_info<E: Arch>(ctx: &Context<E>) -> (Vec<u8>, Vec<SymbolId>)
 
     let base = ctx.args.pagezero_size;
     let func_addr =
-        |r: &crate::input_files::UnwindRecord| ctx.isec_addr(r.isec) + r.input_offset as u64;
+        |r: &crate::input_files::UnwindRecord| ctx.isec_addr(r.isec as usize) + r.input_offset as u64;
 
     // Records synthesized from DWARF unwind info encode the FDE's
     // offset in __eh_frame in the low 24 bits.
     for rec in &mut records {
-        if let Some(fde) = rec.fde {
+        if let Some(fde) = rec.fde() {
             rec.encoding = E::UNWIND_MODE_DWARF | (ctx.fdes[fde].output_offset & 0xff_ffff);
         }
     }
@@ -980,7 +980,7 @@ pub fn encode_unwind_info<E: Arch>(ctx: &Context<E>) -> (Vec<u8>, Vec<SymbolId>)
     // Assign personality indices, encoded in bits 28-29 of the encoding.
     let mut personalities: Vec<SymbolId> = Vec::new();
     for rec in &mut records {
-        if let Some(p) = rec.personality {
+        if let Some(p) = rec.personality() {
             let idx = match personalities.iter().position(|&s| s == p) {
                 Some(idx) => idx,
                 None => {
@@ -1004,9 +1004,9 @@ pub fn encode_unwind_info<E: Arch>(ctx: &Context<E>) -> (Vec<u8>, Vec<SymbolId>)
             Some(last)
                 if func_addr(last) + last.code_len as u64 == func_addr(&rec)
                     && last.encoding == rec.encoding
-                    && last.personality == rec.personality
-                    && last.lsda.is_none()
-                    && rec.lsda.is_none() =>
+                    && last.personality() == rec.personality()
+                    && last.lsda().is_none()
+                    && rec.lsda().is_none() =>
             {
                 last.code_len += rec.code_len;
             }
@@ -1030,7 +1030,7 @@ pub fn encode_unwind_info<E: Arch>(ctx: &Context<E>) -> (Vec<u8>, Vec<SymbolId>)
         rest = &rest[i..];
     }
 
-    let num_lsda = records.iter().filter(|r| r.lsda.is_some()).count();
+    let num_lsda = records.iter().filter(|r| r.lsda().is_some()).count();
 
     // Compute the layout of the section.
     let personality_off = 28;
@@ -1070,7 +1070,7 @@ pub fn encode_unwind_info<E: Arch>(ctx: &Context<E>) -> (Vec<u8>, Vec<SymbolId>)
             let mut page2 = Vec::new();
             let mut lsda = Vec::new();
             for rec in *span {
-                if let Some((isec, off)) = rec.lsda {
+                if let Some((isec, off)) = rec.lsda() {
                     push32(&mut lsda, (func_addr(rec) - base) as u32);
                     push32(&mut lsda, (ctx.isec_addr(isec) + off as u64 - base) as u32);
                 }

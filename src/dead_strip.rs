@@ -129,11 +129,11 @@ pub fn dead_strip<E: Arch>(ctx: &mut Context<E>) {
         let isec = &ctx.isecs[id];
         let recs = isec.unwind_offset as usize..(isec.unwind_offset + isec.nunwind) as usize;
         for rec in &ctx.unwind_records[recs] {
-            if let Some((lsda, _)) = rec.lsda {
+            if let Some((lsda, _)) = rec.lsda() {
                 out.push(lsda);
             }
-            let mut personality = rec.personality;
-            if let Some(fde) = rec.fde {
+            let mut personality = rec.personality();
+            if let Some(fde) = rec.fde() {
                 if let Some((lsda, _)) = ctx.fdes[fde].lsda {
                     out.push(lsda);
                 }
@@ -190,11 +190,11 @@ pub fn dead_strip<E: Arch>(ctx: &mut Context<E>) {
             let recs =
                 isec.unwind_offset as usize..(isec.unwind_offset + isec.nunwind) as usize;
             for rec in &gc.ctx.unwind_records[recs] {
-                if let Some((lsda, _)) = rec.lsda {
+                if let Some((lsda, _)) = rec.lsda() {
                     targets.push(lsda);
                 }
-                let mut personality = rec.personality;
-                if let Some(fde) = rec.fde {
+                let mut personality = rec.personality();
+                if let Some(fde) = rec.fde() {
                     if let Some((lsda, _)) = gc.ctx.fdes[fde].lsda {
                         targets.push(lsda);
                     }
@@ -282,11 +282,12 @@ pub fn dead_strip<E: Arch>(ctx: &mut Context<E>) {
     let isecs = &ctx.isecs;
     let map = &fde_map;
     ctx.unwind_records.retain_mut(|rec| {
-        if !isecs[rec.isec].is_alive {
+        if !isecs[rec.isec as usize].is_alive {
             return false;
         }
-        if let Some(fde) = &mut rec.fde {
-            *fde = map[*fde];
+        if rec.fde_idx != crate::input_files::UNWIND_NONE {
+            // usize::MAX (a dropped FDE) narrows to UNWIND_NONE.
+            rec.fde_idx = map[rec.fde_idx as usize] as u32;
         }
         true
     });

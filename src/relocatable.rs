@@ -192,8 +192,8 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
     let mut cu_data: Vec<u8> = Vec::new();
     let mut cu_relocs: Vec<MachRel> = Vec::new();
     for rec in &ctx.unwind_records {
-        let isec = &ctx.isecs[rec.isec];
-        if !isec.is_alive || rec.fde.is_some() {
+        let isec = &ctx.isecs[rec.isec as usize];
+        if !isec.is_alive || rec.fde().is_some() {
             continue;
         }
         let entry = cu_data.len() as u32;
@@ -207,7 +207,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
             bits: ordinals[isec.osec as usize] as u32 | (3 << 25),
         });
 
-        match rec.personality {
+        match rec.personality() {
             Some(p) => {
                 let Some(&symnum) = index_of_sym.get(&p) else {
                     fatal!(ctx, "-r: unwind personality lost: {}", ctx.symtab[p].name);
@@ -221,7 +221,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
             None => cu_data.extend_from_slice(&0u64.to_le_bytes()),
         }
 
-        match rec.lsda {
+        match rec.lsda() {
             Some((lsda, off)) => {
                 let l = &ctx.isecs[ctx.resolve_isec(lsda)];
                 let lsda_addr = ctx.chunks[l.osec as usize].hdr.addr + l.output_offset as u64 + off as u64;
