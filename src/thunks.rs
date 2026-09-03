@@ -14,11 +14,17 @@
 //! some branch of the batch might not reach an entry, deduplicated by
 //! an atomic mark on the symbol inside the parallel scan, and a symbol
 //! keeps its mark - and so gets no second entry - for as long as that
-//! entry stays within reach of the batches that follow. Once addresses
-//! are final, remove_redundant_thunks drops every entry no branch
-//! actually needs and re-lays the section out, and
+//! entry stays within reach of the batches that follow, and
 //! gather_thunk_addresses records each symbol's entry addresses so that
 //! applying an out-of-range branch just picks the one within reach.
+//!
+//! mold-rust additionally trims the pessimistic entries once addresses
+//! are final (remove_redundant_thunks) and lays the section out again.
+//! Ours does not: the first pass already skips targets the section's
+//! size bound proves reachable, so on a debug clang link the trim
+//! recovered 0.07% of __text while the rescan of every branch plus the
+//! second __TEXT placement (which re-encodes __unwind_info) cost 5% of
+//! the link. The extra entries are dead code in the thunk islands.
 
 use crate::arch::{Arch, RelocClass};
 use crate::context::Context;
@@ -220,107 +226,6 @@ fn scan_batch<E: Arch>(
         syms,
     });
     n
-}
-
-/// Once every address is final, drops the thunk entries no branch
-/// actually needs - the first pass was pessimistic about cross-section
-/// and still-unplaced targets - and re-lays out each thunked section by
-/// walking its subsections and thunks in order. Returns true if any
-/// section changed size, in which case the caller re-places the segment.
-/// mold-rust's remove_redundant_thunks.
-pub fn remove_redundant_thunks<E: Arch>(ctx: &mut Context<E>, chunk_idxs: &[usize]) -> bool {
-    use rayon::prelude::*;
-    if E::THUNK_SIZE == 0 {
-        return false;
-    }
-    let range = E::BRANCH_RANGE / 2;
-
-    // Mark the symbols some branch really cannot reach directly.
-    {
-        let ctx_ref: &Context<E> = ctx;
-        for &ci in chunk_idxs {
-            let ChunkKind::Output { isecs, .. } = &ctx_ref.chunks[ci].kind else {
-                continue;
-            };
-            isecs.par_iter().for_each(|&isec_id| {
-                let isec = &ctx_ref.isecs[isec_id];
-                let obj = isec.obj as usize;
-                if obj == usize::MAX {
-                    return;
-                }
-                let base = ctx_ref.isec_addr(isec_id as usize);
-                for rel in ctx_ref.isec_relocs(isec_id as usize) {
-                    if E::classify_reloc(rel.r_type) != RelocClass::Branch {
-                        continue;
-                    }
-                    let Some(sym_id) = ctx_ref.reloc_target_sym(obj, rel) else {
-                        continue;
-                    };
-                    let sym = &ctx_ref.symtab[sym_id];
-                    if sym.is_marked() {
-                        continue;
-                    }
-                    let s = ctx_ref.sym_addr(sym_id) as i64 + rel.addend;
-                    let p = (base + rel.offset as u64) as i64;
-                    let d = s.wrapping_sub(p);
-                    if d < -(range as i64) || d >= range as i64 {
-                        sym.mark();
-                    }
-                }
-            });
-        }
-    }
-
-    let mut changed = false;
-    for &ci in chunk_idxs {
-        let (mut members, mut thunks) = {
-            let ChunkKind::Output { isecs, thunks } = &mut ctx.chunks[ci].kind else {
-                continue;
-            };
-            (std::mem::take(isecs), std::mem::take(thunks))
-        };
-        let before: Vec<SymbolId> = thunks.iter().flat_map(|t| t.syms.iter().copied()).collect();
-        {
-            let ctx_ref: &Context<E> = ctx;
-            thunks.par_iter_mut().for_each(|t| t.syms.retain(|&s| ctx_ref.symtab[s].is_marked()));
-        }
-        let kept: usize = thunks.iter().map(|t| t.syms.len()).sum();
-        if kept != before.len() {
-            changed = true;
-            thunks.retain(|t| !t.syms.is_empty());
-            // Re-lay out: subsections and thunks interleave by their
-            // current offsets; each takes the next aligned slot.
-            let (mut mi, mut ti) = (0usize, 0usize);
-            let mut offset = 0u64;
-            while mi < members.len() || ti < thunks.len() {
-                let member_first = mi < members.len()
-                    && (ti >= thunks.len()
-                        || (ctx.isecs[members[mi]].output_offset as u64) < thunks[ti].offset);
-                if member_first {
-                    let isec = &mut ctx.isecs[members[mi]];
-                    offset = align_to(offset, 1 << isec.p2align);
-                    isec.output_offset = offset as u32;
-                    offset += isec.size as u64;
-                    mi += 1;
-                } else {
-                    offset = align_to(offset, 16);
-                    thunks[ti].offset = offset;
-                    offset += thunks[ti].syms.len() as u64 * E::THUNK_SIZE;
-                    ti += 1;
-                }
-            }
-            ctx.chunks[ci].hdr.size = offset;
-        }
-        for sym in before {
-            ctx.symtab[sym].unmark();
-        }
-        let ChunkKind::Output { isecs, thunks: slot } = &mut ctx.chunks[ci].kind else {
-            unreachable!()
-        };
-        *isecs = std::mem::take(&mut members);
-        *slot = thunks;
-    }
-    changed
 }
 
 /// Records every thunk entry's address on its symbol (SymAux::
