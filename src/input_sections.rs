@@ -57,9 +57,10 @@ pub struct InputSection {
     /// reference too. `p2align` is held inline because it is the one
     /// header field the linker raises per subsection.
     pub hdr: &'static MachSection,
-    pub p2align: u32,
-    /// This subsection's address in the object's address space.
-    pub input_addr: u64,
+    pub p2align: u8,
+    /// This subsection's address in the object's address space. Object
+    /// files stay well under 4 GiB, so a u32 holds it.
+    pub input_addr: u32,
     pub size: u64,
     /// The subsection contents, as a bare pointer - the length is
     /// `size` - or 0 when there are none (a zero-fill or empty
@@ -101,7 +102,7 @@ pub struct InputSection {
 // InputSection is the highest-count struct in a link (millions on a
 // debug build), so it is kept compact - mold-rust's is 64 bytes; ours
 // carries a few Mach-O-specific fields more.
-const _: () = assert!(std::mem::size_of::<InputSection>() == 80);
+const _: () = assert!(std::mem::size_of::<InputSection>() == 72);
 
 impl InputSection {
     /// This subsection's bytes. Empty for a zero-fill or empty section;

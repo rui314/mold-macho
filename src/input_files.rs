@@ -73,14 +73,14 @@ pub fn find_subsec(
     subsecs: &[usize],
     addr: u64,
 ) -> Option<(usize, u64)> {
-    let i = subsecs.partition_point(|&id| isecs[id].input_addr <= addr);
+    let i = subsecs.partition_point(|&id| isecs[id].input_addr as u64 <= addr);
     if i == 0 {
         return None;
     }
     let id = subsecs[i - 1];
     let isec = &isecs[id];
-    if addr < isec.input_addr + isec.size || (isec.size == 0 && addr == isec.input_addr) {
-        Some((id, addr - isec.input_addr))
+    if addr < isec.input_addr as u64 + isec.size || (isec.size == 0 && addr == isec.input_addr as u64) {
+        Some((id, addr - isec.input_addr as u64))
     } else {
         None
     }
@@ -367,8 +367,8 @@ pub fn stage_object<E: Arch>(
             isecs.push(InputSection {
                 obj: u32::MAX,
                 hdr: sect,
-                p2align: sect.p2align,
-                input_addr: start,
+                p2align: sect.p2align as u8,
+                input_addr: start as u32,
                 size: end - start,
                 data_ptr: if contents.is_empty() { 0 } else { contents.as_ptr() as usize },
                 rel_offset: 0,
@@ -418,7 +418,7 @@ pub fn stage_object<E: Arch>(
 
         let mut pos = 0;
         for &sub in &by_ordinal[i] {
-            let sub_off = (isecs[sub].input_addr - sect.addr) as u32;
+            let sub_off = (isecs[sub].input_addr as u64 - sect.addr) as u32;
             let end = sub_off + isecs[sub].size as u32;
             let start = obj_relocs.len();
             while pos < rels.len() && rels[pos].offset < end {
@@ -987,7 +987,7 @@ fn parse_compact_unwind<E: Arch>(
 ) {
     let geo: Vec<(u64, u64, usize)> = subsecs
         .iter()
-        .map(|&id| (isecs[id].input_addr, isecs[id].size, id))
+        .map(|&id| (isecs[id].input_addr as u64, isecs[id].size, id))
         .collect();
     let find_subsec = |addr: u64| -> Option<(usize, u32)> {
         let i = geo.partition_point(|&(start, _, _)| start <= addr);
@@ -1163,7 +1163,7 @@ fn parse_eh_frame<E: Arch>(
 ) {
     let geo: Vec<(u64, u64, usize)> = subsecs
         .iter()
-        .map(|&id| (isecs[id].input_addr, isecs[id].size, id))
+        .map(|&id| (isecs[id].input_addr as u64, isecs[id].size, id))
         .collect();
     let find_local = |addr: u64| -> Option<(usize, u32)> {
         let i = geo.partition_point(|&(start, _, _)| start <= addr);

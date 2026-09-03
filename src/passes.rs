@@ -989,7 +989,7 @@ pub fn convert_common_symbols<E: Arch>(ctx: &mut Context<E>) {
         ctx.isecs.push(InputSection {
             obj: u32::MAX,
             hdr,
-            p2align: p2align as u32,
+            p2align: p2align as u8,
             input_addr: 0,
             size,
             data_ptr: 0,
@@ -1876,7 +1876,7 @@ pub fn create_output_sections<E: Arch>(ctx: &mut Context<E>) {
         };
 
         let chunk = &mut ctx.chunks[chunk_idx];
-        chunk.hdr.p2align = chunk.hdr.p2align.max(ctx.isecs[i].p2align);
+        chunk.hdr.p2align = chunk.hdr.p2align.max(ctx.isecs[i].p2align as u32);
         // __thread_vars contains pointers but clang emits it with an
         // alignment of 1, so override.
         if chunk.hdr.flags & SECTION_TYPE == S_THREAD_LOCAL_VARIABLES {
