@@ -2230,10 +2230,34 @@ pub fn create_output_sections<E: Arch>(ctx: &mut Context<E>) {
     // Lay out the surviving DWARF records: live CIEs first, then FDEs.
     // Their offsets are needed before layout, because the __unwind_info
     // encoding embeds each FDE's offset.
-    // FDEs of folded copies duplicate their leader's; drop them.
+    // FDEs of folded copies duplicate their leader's; drop them, and
+    // remap the unwind records' FDE indices around the removals as
+    // the dead-strip pass does (a record left pointing past the
+    // shortened table crashed the encoder).
     {
-        let isecs = &ctx.isecs;
-        ctx.fdes.retain(|fde| isecs[fde.isec].replacement == crate::input_sections::NO_REPLACEMENT);
+        let mut fde_map = vec![usize::MAX; ctx.fdes.len()];
+        let mut kept_fdes = Vec::new();
+        let fdes = std::mem::take(&mut ctx.fdes);
+        for (i, fde) in fdes.into_iter().enumerate() {
+            if ctx.isecs[fde.isec].replacement == crate::input_sections::NO_REPLACEMENT {
+                fde_map[i] = kept_fdes.len();
+                kept_fdes.push(fde);
+            }
+        }
+        ctx.fdes = kept_fdes;
+        let map = &fde_map;
+        ctx.unwind_records.retain_mut(|rec| {
+            if rec.fde_idx == crate::input_files::UNWIND_NONE {
+                return true;
+            }
+            let mapped = map[rec.fde_idx as usize];
+            if mapped == usize::MAX {
+                // A folded copy's record; its leader has its own.
+                return false;
+            }
+            rec.fde_idx = mapped as u32;
+            true
+        });
     }
     if !ctx.fdes.is_empty() {
         for fde in &ctx.fdes {
@@ -3152,6 +3176,7 @@ fn build_rebase_info<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
                 || rel.size != 8
                 || rel.is_pcrel
                 || rel.is_subtracted
+                || rel.r_type == E::RELOC_SUBTRACTOR
             {
                 continue;
             }
@@ -3283,6 +3308,7 @@ fn build_bind_info<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
                 || rel.size != 8
                 || rel.is_pcrel
                 || rel.is_subtracted
+                || rel.r_type == E::RELOC_SUBTRACTOR
             {
                 continue;
             }
@@ -3367,6 +3393,7 @@ fn collect_fixups<E: Arch>(ctx: &Context<E>) -> Vec<(u64, Option<crate::symbol::
                     || rel.size != 8
                     || rel.is_pcrel
                     || rel.is_subtracted
+                    || rel.r_type == E::RELOC_SUBTRACTOR
                 {
                     return None;
                 }
@@ -3636,7 +3663,16 @@ fn write_fixup_chains<E: Arch>(ctx: &Context<E>, buf: &mut [u8]) {
                     // holds the absolute target address.
                     let val = u64::from_le_bytes(buf[off..off + 8].try_into().unwrap());
                     if val & 0x00ff_fff0_0000_0000 != 0 {
-                        fatal!(ctx, "rebase target unencodable; re-link with -no_fixup_chains");
+                        let sect = ctx
+                            .chunks
+                            .iter()
+                            .find(|c| c.hdr.addr <= addr && addr < c.hdr.addr + c.hdr.size)
+                            .map(|c| format!("{},{}", c.hdr.segname, c.hdr.sectname))
+                            .unwrap_or_default();
+                        fatal!(
+                            ctx,
+                            "rebase target unencodable at {addr:#x} in {sect} (value {val:#x}); re-link with -no_fixup_chains"
+                        );
                     }
                     let target = val & 0xf_ffff_ffff;
                     let high8 = val >> 56;
