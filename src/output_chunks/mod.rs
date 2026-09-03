@@ -1254,14 +1254,48 @@ fn push_be64(buf: &mut Vec<u8>, val: u64) {
     buf.extend_from_slice(&val.to_be_bytes());
 }
 
-/// Computes the ad-hoc code signature over the file contents and writes
-/// it at the code signature chunk's offset.
+/// SHA256 of every code-signature page (4KiB) of `data`, computed in
+/// parallel: the hashes are independent. The last page may be short.
+/// These are the code directory's page hashes, and the UUID is derived
+/// from them too.
+pub fn page_hashes(data: &[u8]) -> Vec<[u8; SHA256_SIZE]> {
+    use rayon::prelude::*;
+    let page = CS_PAGE_SIZE as usize;
+    data.par_chunks(page)
+        .map(|chunk| {
+            let mut hash = [0; SHA256_SIZE];
+            crate::util::sha256(chunk, &mut hash);
+            hash
+        })
+        .collect()
+}
+
+/// Recomputes the hashes of the pages that overlap `data[range]`, after
+/// those bytes changed.
+pub fn rehash_pages(data: &[u8], hashes: &mut [[u8; SHA256_SIZE]], range: std::ops::Range<usize>) {
+    let page = CS_PAGE_SIZE as usize;
+    let first = range.start / page;
+    let last = range.end.div_ceil(page).min(hashes.len());
+    for i in first..last {
+        let start = i * page;
+        let end = (start + page).min(data.len());
+        crate::util::sha256(&data[start..end], &mut hashes[i]);
+    }
+}
+
+/// Writes the ad-hoc code signature at the code signature chunk's
+/// offset, from the page hashes of the file contents before it
+/// (page_hashes, brought up to date after the header's last change).
 ///
 /// On ARM64 macOS a code signature is mandatory: the kernel refuses to
 /// run an executable without one. The signature we create is just SHA256
 /// hashes of every page, marked ad-hoc and linker-signed; no signing
 /// identity is involved.
-pub fn write_code_signature<E: Arch>(ctx: &Context<E>, buf: &mut [u8]) {
+pub fn write_code_signature<E: Arch>(
+    ctx: &Context<E>,
+    buf: &mut [u8],
+    hashes: &[[u8; SHA256_SIZE]],
+) {
     let chunk = &ctx.chunks[find_chunk(ctx, |k| matches!(k, ChunkKind::CodeSignature)).unwrap()];
     let cs_off = chunk.hdr.fileoff;
     let ident = file_basename(&ctx.args.output);
@@ -1313,20 +1347,8 @@ pub fn write_code_signature<E: Arch>(ctx: &Context<E>, buf: &mut [u8]) {
     sig.extend_from_slice(ident.as_bytes());
     sig.resize(sig.len() + ident_size as usize - ident.len(), 0);
 
-    // Hash each page of the file up to the signature itself, in
-    // parallel: the hashes are independent.
-    use rayon::prelude::*;
-    let hashes: Vec<[u8; SHA256_SIZE]> = (0..nblocks)
-        .into_par_iter()
-        .map(|i| {
-            let start = (i * CS_PAGE_SIZE) as usize;
-            let end = std::cmp::min(start + CS_PAGE_SIZE as usize, cs_off as usize);
-            let mut hash = [0; SHA256_SIZE];
-            crate::util::sha256(&buf[start..end], &mut hash);
-            hash
-        })
-        .collect();
-    for hash in &hashes {
+    debug_assert_eq!(hashes.len() as u64, nblocks);
+    for hash in hashes {
         sig.extend_from_slice(hash);
     }
 

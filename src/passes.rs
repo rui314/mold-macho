@@ -3941,42 +3941,48 @@ pub fn copy_chunks<E: Arch>(ctx: &Context<E>, buf: &mut [u8]) {
     t!("copy_symtab", output_chunks::copy_symtab(ctx, buf));
     output_chunks::copy_mach_header(ctx, buf);
 
-    // The UUID identifies this build: a hash of the output contents,
-    // stamped as a version-4 UUID. Hash with the UUID zeroed, then
-    // rewrite the header; the code signature comes last and covers the
-    // final bytes.
+    // The code signature is SHA256 hashes of every 4KiB page before it,
+    // and the UUID that identifies this build is derived from that same
+    // hash array rather than from a second pass over the contents: the
+    // pages are hashed while the LC_UUID field is still zero, the array
+    // is hashed once more and stamped as a version-4 UUID, the header
+    // is rewritten with it, and only the pages the header spans are
+    // hashed again for the signature. The circularity - the signature
+    // covers the header, the header holds the UUID - is broken by the
+    // zeroed field, the way ld64 hashes with the UUID zeroed. Like
+    // ld64's, the UUID depends on the contents before the signature
+    // only, not on the signature blob (whose identifier is the output's
+    // basename); unsigned output hashes its pages the same way.
     let sig_start = output_chunks::find_chunk(ctx, |k| {
         matches!(k, ChunkKind::CodeSignature)
     })
     .map_or(buf.len(), |idx| ctx.chunks[idx].hdr.fileoff as usize);
 
-    let __uuid_t = std::time::Instant::now();
-    if ctx.args.uuid {
-        // A hash of hashes, as in mold: 4MiB blocks are digested on
-        // all cores and the digests digested once more. Equally a
-        // deterministic content hash, at memory bandwidth instead of
-        // one core's SHA throughput.
-        use rayon::prelude::*;
-        let digests: Vec<[u8; 32]> = buf[..sig_start]
-            .par_chunks(4 << 20)
-            .map(|block| {
-                let mut d = [0; 32];
-                crate::util::sha256(block, &mut d);
-                d
-            })
-            .collect();
-        let flat: Vec<u8> = digests.concat();
-        let mut hash = [0; 32];
-        crate::util::sha256(&flat, &mut hash);
-        let mut uuid: [u8; 16] = hash[..16].try_into().unwrap();
-        uuid[6] = (uuid[6] & 0x0f) | 0x40; // version 4
-        uuid[8] = (uuid[8] & 0x3f) | 0x80; // RFC 4122 variant
-        *ctx.uuid.lock().unwrap() = uuid;
-        output_chunks::copy_mach_header(ctx, buf);
+    let mut hashes: Vec<[u8; 32]> = Vec::new();
+    if ctx.args.uuid || ctx.args.adhoc_codesign {
+        t!("page-hashes", hashes = output_chunks::page_hashes(&buf[..sig_start]));
     }
-    if std::env::var_os("MOLD_TIMING").is_some() { eprintln!("    uuid {:?}", __uuid_t.elapsed()); }
+    if ctx.args.uuid {
+        t!("uuid", {
+            let flat: Vec<u8> = hashes.concat();
+            let mut hash = [0; 32];
+            crate::util::sha256(&flat, &mut hash);
+            let mut uuid: [u8; 16] = hash[..16].try_into().unwrap();
+            uuid[6] = (uuid[6] & 0x0f) | 0x40; // version 4
+            uuid[8] = (uuid[8] & 0x3f) | 0x80; // RFC 4122 variant
+            *ctx.uuid.lock().unwrap() = uuid;
+            output_chunks::copy_mach_header(ctx, buf);
+            let hdr_size = ctx.chunks[output_chunks::find_chunk(ctx, |k| {
+                matches!(k, ChunkKind::MachHeader)
+            })
+            .unwrap()]
+            .hdr
+            .size as usize;
+            output_chunks::rehash_pages(&buf[..sig_start], &mut hashes, 0..hdr_size);
+        });
+    }
 
     if ctx.args.adhoc_codesign {
-        t!("codesign", output_chunks::write_code_signature(ctx, buf));
+        t!("codesign", output_chunks::write_code_signature(ctx, buf, &hashes));
     }
 }
