@@ -616,7 +616,7 @@ pub fn copy_mach_header<E: Arch>(ctx: &Context<E>, buf: &mut [u8]) {
         sym.is_weak_def()
             && sym.is_extern()
             && !sym.is_private_extern()
-            && sym.isec.map(|i| i as usize).is_some_and(|isec| ctx.isecs[isec].is_alive)
+            && sym.isec().map(|i| i as usize).is_some_and(|isec| ctx.isecs[isec].is_alive)
     }) {
         hdr.flags |= MH_WEAK_DEFINES;
     }
@@ -781,11 +781,11 @@ pub fn encode_export_trie<E: Arch>(
         .filter_map(|&id| {
             let sym = &ctx.symtab[id];
             if let Some(exported) = &ctx.args.exported_symbols {
-                if !exported.iter().any(|pat| pat == sym.name) {
+                if !exported.iter().any(|pat| pat == sym.name()) {
                     return None;
                 }
             }
-            if ctx.args.unexported_symbols.iter().any(|pat| pat == sym.name) {
+            if ctx.args.unexported_symbols.iter().any(|pat| pat == sym.name()) {
                 return None;
             }
             let flags = if sym.is_weak_def() {
@@ -793,7 +793,7 @@ pub fn encode_export_trie<E: Arch>(
             } else {
                 0
             };
-            Some((sym.name, (flags, ctx.sym_addr(id) - base)))
+            Some((sym.name(), (flags, ctx.sym_addr(id) - base)))
         })
         .collect();
     if exports.is_empty() {

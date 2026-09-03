@@ -220,17 +220,25 @@ impl<E: Arch> Context<E> {
     /// the all-absent default for symbols with no slots (the table is
     /// grown lazily by the first setter).
     pub fn sym_aux(&self, id: SymbolId) -> crate::symbol::SymAux {
-        self.sym_aux.get(id).copied().unwrap_or_default()
+        // Sparse, as mold-rust's SymbolAux: the symbol carries an index
+        // into the table, NONE for the vast majority that have no slot.
+        match self.symtab[id].aux_idx {
+            crate::symbol::NONE => Default::default(),
+            i => self.sym_aux[i as usize],
+        }
     }
 
     /// Mutable access to a symbol's slot indices, growing the side table
     /// to cover it. Called only from the serial slot-assignment passes.
     pub fn sym_aux_mut(&mut self, id: SymbolId) -> &mut crate::symbol::SymAux {
-        if self.sym_aux.len() <= id {
-            self.sym_aux
-                .resize(self.symtab.syms.len().max(id + 1), Default::default());
+        // Allocate the symbol's entry on first use; the table holds only
+        // the symbols that take a slot (mold-rust's sparse SymbolAux).
+        if self.symtab[id].aux_idx == crate::symbol::NONE {
+            self.symtab[id].aux_idx = self.sym_aux.len() as u32;
+            self.sym_aux.push(Default::default());
         }
-        &mut self.sym_aux[id]
+        let i = self.symtab[id].aux_idx as usize;
+        &mut self.sym_aux[i]
     }
 
     /// A subsection's relocations, sliced from its object's reloc arena
@@ -269,13 +277,13 @@ impl<E: Arch> Context<E> {
     /// Returns the output address of a symbol.
     pub fn sym_addr(&self, id: SymbolId) -> u64 {
         let sym = &self.symtab[id];
-        match sym.origin {
+        match sym.origin() {
             Origin::Undef => {
-                error!(self, "undefined symbol: {}", sym.name);
+                error!(self, "undefined symbol: {}", sym.name());
                 0
             }
             Origin::Obj(_) | Origin::Synthetic => {
-                if let Some(isec) = sym.isec.map(|i| i as usize) {
+                if let Some(isec) = sym.isec().map(|i| i as usize) {
                     self.isec_addr(isec) + sym.value
                 } else if self.sym_aux(id).objc_stub_idx != crate::symbol::NO_IDX {
                     self.chunks[self.objc_stubs_chunk].hdr.addr
@@ -325,7 +333,7 @@ impl<E: Arch> Context<E> {
     /// Returns the input section a relocation's target lives in, if any.
     pub fn reloc_target_isec(&self, obj: usize, rel: &Reloc) -> Option<InputSectionId> {
         match rel.target() {
-            RelocTarget::Sym(idx) => self.symtab[self.objs[obj].syms[idx as usize]].isec.map(|i| i as usize),
+            RelocTarget::Sym(idx) => self.symtab[self.objs[obj].syms[idx as usize]].isec().map(|i| i as usize),
             RelocTarget::Section(idx) => Some(idx as usize),
         }
     }

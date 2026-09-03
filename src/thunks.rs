@@ -149,7 +149,7 @@ fn scan_relocs_into_thunk<E: Arch>(
                 };
 
                 let sym = &ctx_ref.symtab[sym_id];
-                if let (Origin::Obj(_), Some(target)) = (sym.origin, sym.isec) {
+                if let (Origin::Obj(_), Some(target)) = (sym.origin(), sym.isec()) {
                     let t = &ctx_ref.isecs[ctx_ref.resolve_isec(target as usize)];
                     // A target in another output section has no offset
                     // in this section's space; reserve an entry.

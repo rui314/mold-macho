@@ -65,7 +65,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
 
     let sym_addr = |ctx: &Context<E>, id: usize| -> u64 {
         let sym = &ctx.symtab[id];
-        match sym.isec {
+        match sym.isec() {
             Some(isec) => {
                 let isec = &ctx.isecs[ctx.resolve_isec(isec as usize)];
                 ctx.chunks[isec.osec as usize].hdr.addr + isec.output_offset as u64 + sym.value
@@ -84,14 +84,14 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
                 continue;
             }
             let sym = &ctx.symtab[sym_id];
-            let Some(isec) = sym.isec.map(|i| i as usize) else { continue };
+            let Some(isec) = sym.isec().map(|i| i as usize) else { continue };
             let isec = ctx.resolve_isec(isec);
-            if !ctx.isecs[isec].is_alive || sym.name.is_empty() {
+            if !ctx.isecs[isec].is_alive || sym.name().is_empty() {
                 continue;
             }
             index_of_sym.insert(sym_id, nlists_out.len() as u32);
             nlists_out.push(NList {
-                n_strx: add_string(&mut strtab, sym.name),
+                n_strx: add_string(&mut strtab, sym.name()),
                 n_type: nlist.n_type,
                 n_sect: ordinals[ctx.isecs[isec].osec as usize],
                 n_desc: nlist.n_desc,
@@ -106,16 +106,16 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
         .filter(|&i| {
             let sym = &ctx.symtab[i];
             sym.is_extern()
-                && matches!(sym.origin, Origin::Obj(_))
+                && matches!(sym.origin(), Origin::Obj(_))
                 && sym
-                    .isec
+                    .isec()
                     .is_none_or(|isec| ctx.isecs[ctx.resolve_isec(isec as usize)].is_alive)
         })
         .collect();
-    globals.sort_by_key(|&i| ctx.symtab[i].name);
+    globals.sort_by_key(|&i| ctx.symtab[i].name());
     for &i in &globals {
         let sym = &ctx.symtab[i];
-        let (n_type, n_sect) = match sym.isec {
+        let (n_type, n_sect) = match sym.isec() {
             Some(isec) => (
                 N_SECT | N_EXT | if sym.is_private_extern() { N_PEXT } else { 0 },
                 ordinals[ctx.isecs[ctx.resolve_isec(isec as usize)].osec as usize],
@@ -128,7 +128,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
         }
         index_of_sym.insert(i, nlists_out.len() as u32);
         nlists_out.push(NList {
-            n_strx: add_string(&mut strtab, sym.name),
+            n_strx: add_string(&mut strtab, sym.name()),
             n_type,
             n_sect,
             n_desc,
@@ -144,7 +144,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
             sym.is_used() && (!sym.is_defined() || sym.is_common())
         })
         .collect();
-    undefs.sort_by_key(|&i| ctx.symtab[i].name);
+    undefs.sort_by_key(|&i| ctx.symtab[i].name());
     for &i in &undefs {
         let sym = &ctx.symtab[i];
         let mut n_desc = 0;
@@ -155,7 +155,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
         }
         index_of_sym.insert(i, nlists_out.len() as u32);
         nlists_out.push(NList {
-            n_strx: add_string(&mut strtab, sym.name),
+            n_strx: add_string(&mut strtab, sym.name()),
             n_type: N_UNDF | N_EXT,
             n_sect: 0,
             n_desc,
@@ -210,7 +210,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
         match rec.personality() {
             Some(p) => {
                 let Some(&symnum) = index_of_sym.get(&p) else {
-                    fatal!(ctx, "-r: unwind personality lost: {}", ctx.symtab[p].name);
+                    fatal!(ctx, "-r: unwind personality lost: {}", ctx.symtab[p].name());
                 };
                 cu_data.extend_from_slice(&0u64.to_le_bytes());
                 cu_relocs.push(MachRel {
@@ -275,7 +275,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
             eh_data.extend_from_slice(&cie.data);
             if let Some(p) = cie.personality {
                 let Some(&symnum) = index_of_sym.get(&p) else {
-                    fatal!(ctx, "-r: unwind personality lost: {}", ctx.symtab[p].name);
+                    fatal!(ctx, "-r: unwind personality lost: {}", ctx.symtab[p].name());
                 };
                 let cell = (off + cie.personality_offset) as usize;
                 eh_data[cell..cell + 4].copy_from_slice(&0u32.to_le_bytes());
@@ -351,7 +351,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
                             fatal!(
                                 ctx,
                                 "-r: cannot re-emit relocation against {}",
-                                ctx.symtab[sym_id].name
+                                ctx.symtab[sym_id].name()
                             );
                         };
                         // An explicit addend record precedes relocations

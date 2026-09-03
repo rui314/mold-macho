@@ -92,19 +92,19 @@ pub fn print_map<E: Arch>(ctx: &Context<E>) {
     let mut syms: Vec<(u64, usize, &str, usize, u64)> = Vec::new();
     for i in 0..ctx.symtab.syms.len() {
         let sym = &ctx.symtab[i];
-        let Origin::Obj(obj) = sym.origin else {
+        let Origin::Obj(obj) = sym.origin() else {
             continue;
         };
         let obj = obj as usize;
-        let Some(isec) = sym.isec.map(|i| i as usize) else { continue };
+        let Some(isec) = sym.isec().map(|i| i as usize) else { continue };
         let isec = ctx.resolve_isec(isec);
-        if !ctx.isecs[isec].is_alive || sym.name.is_empty() {
+        if !ctx.isecs[isec].is_alive || sym.name().is_empty() {
             continue;
         }
-        if !sym.is_extern() && (sym.name.starts_with('l') || sym.name.starts_with('L')) {
+        if !sym.is_extern() && (sym.name().starts_with('l') || sym.name().starts_with('L')) {
             continue;
         }
-        syms.push((ctx.sym_addr(i), file_no[obj], sym.name, isec, sym.value));
+        syms.push((ctx.sym_addr(i), file_no[obj], sym.name(), isec, sym.value));
     }
 
     let mut sizes = vec![0u64; syms.len()];
@@ -129,20 +129,20 @@ pub fn print_map<E: Arch>(ctx: &Context<E>) {
     if ctx.args.dead_strip {
         for i in 0..ctx.symtab.syms.len() {
             let sym = &ctx.symtab[i];
-            let Origin::Obj(obj) = sym.origin else {
+            let Origin::Obj(obj) = sym.origin() else {
                 continue;
             };
             let obj = obj as usize;
-            let Some(isec) = sym.isec.map(|i| i as usize) else { continue };
+            let Some(isec) = sym.isec().map(|i| i as usize) else { continue };
             let isec = ctx.resolve_isec(isec);
             if ctx.isecs[isec].is_alive
                 || !ctx.objs[obj].is_alive
-                || sym.name.is_empty()
-                || (!sym.is_extern() && (sym.name.starts_with('l') || sym.name.starts_with('L')))
+                || sym.name().is_empty()
+                || (!sym.is_extern() && (sym.name().starts_with('l') || sym.name().starts_with('L')))
             {
                 continue;
             }
-            dead.push((file_no[obj], sym.value, isec, sym.name));
+            dead.push((file_no[obj], sym.value, isec, sym.name()));
         }
         dead.sort();
     }

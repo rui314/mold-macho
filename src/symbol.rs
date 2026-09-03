@@ -19,22 +19,91 @@ pub enum Origin {
 
 #[derive(Clone, Debug)]
 pub struct Symbol {
-    pub name: &'static str,
-    pub origin: Origin,
-    /// The section the symbol is defined in, for `N_SECT` symbols.
-    /// The defining subsection (u32 index, not usize, to keep Symbol
-    /// small); use `.map(|i| i as usize)` to index ctx.isecs.
-    pub isec: Option<u32>,
+    /// The name, as a pointer and a u32 length rather than a 16-byte
+    /// &str - mold-rust's name_ptr/name_len. Read through name().
+    name_ptr: usize,
+    name_len: u32,
+    /// The defining object or dylib index (see `kind`), or NONE.
+    file: u32,
+    /// The defining subsection for an `N_SECT` symbol, or NONE. Read
+    /// through isec(); index ctx.isecs with `as usize`.
+    isec: u32,
     /// Offset from the start of `isec`, or the absolute value for `N_ABS`
     /// symbols.
     pub value: u64,
-    /// The eight boolean attributes below, packed into one byte so the
-    /// struct stays 48 bytes - mold-rust keeps its Symbol flags in a
-    /// packed byte for the same reason (Symbol is scanned in every
-    /// resolution and layout pass, so its width dominates cache
-    /// traffic). Accessed only through the generated is_*/set_* methods.
+    /// Index into the sparse SymAux table (ctx.sym_aux), or NONE: only
+    /// symbols with a stub/GOT/TLV/objc slot have an entry - mold-rust's
+    /// aux_idx - instead of 16 bytes per symbol whether needed or not.
+    pub aux_idx: u32,
+    /// The eight boolean attributes, packed into one byte so the struct
+    /// stays small - mold-rust keeps its Symbol flags in a packed byte
+    /// for the same reason (Symbol is scanned in every resolution and
+    /// layout pass). Accessed only through the is_*/set_* methods.
     flags: u8,
+    /// Which of `Origin`'s variants this is (KIND_*); with `file` it
+    /// reconstructs the enum, which as a field was 8 bytes plus 8 more
+    /// for the Option<u32> section.
+    kind: u8,
     pub common_p2align: u8,
+}
+
+// Symbol is loaded in every resolution and layout scan, so its width
+// is kept minimal. mold-rust's is 48 with more fields (a version index,
+// a symbol index); ours packs the same way and lands at 40.
+const _: () = assert!(std::mem::size_of::<Symbol>() == 40);
+
+/// "No index" for `file`, `isec` and `aux_idx`.
+pub const NONE: u32 = u32::MAX;
+
+const KIND_UNDEF: u8 = 0;
+const KIND_OBJ: u8 = 1;
+const KIND_DYLIB: u8 = 2;
+const KIND_SYNTHETIC: u8 = 3;
+
+impl Symbol {
+    #[inline]
+    pub fn name(&self) -> &'static str {
+        // SAFETY: name_ptr/name_len are exactly the bytes of the
+        // &'static str the symbol was created with.
+        unsafe {
+            std::str::from_utf8_unchecked(std::slice::from_raw_parts(
+                self.name_ptr as *const u8,
+                self.name_len as usize,
+            ))
+        }
+    }
+
+    #[inline]
+    pub fn origin(&self) -> Origin {
+        match self.kind {
+            KIND_OBJ => Origin::Obj(self.file),
+            KIND_DYLIB => Origin::Dylib(self.file),
+            KIND_SYNTHETIC => Origin::Synthetic,
+            _ => Origin::Undef,
+        }
+    }
+
+    #[inline]
+    pub fn set_origin(&mut self, o: Origin) {
+        let (kind, file) = match o {
+            Origin::Undef => (KIND_UNDEF, NONE),
+            Origin::Obj(i) => (KIND_OBJ, i),
+            Origin::Dylib(i) => (KIND_DYLIB, i),
+            Origin::Synthetic => (KIND_SYNTHETIC, NONE),
+        };
+        self.kind = kind;
+        self.file = file;
+    }
+
+    #[inline]
+    pub fn isec(&self) -> Option<u32> {
+        (self.isec != NONE).then_some(self.isec)
+    }
+
+    #[inline]
+    pub fn set_isec(&mut self, isec: Option<u32>) {
+        self.isec = isec.unwrap_or(NONE);
+    }
 }
 
 const F_EXTERN: u8 = 1 << 0;
@@ -81,10 +150,6 @@ impl Symbol {
         "A tentative definition (common symbol) not yet converted; `value` holds its size.");
 }
 
-// Symbol is loaded in every resolution and layout scan, so its width
-// is kept minimal - matching mold-rust's 48-byte Symbol.
-const _: () = assert!(std::mem::size_of::<Symbol>() == 48);
-
 /// Sentinel for a synthetic-slot index a symbol does not have.
 pub const NO_IDX: u32 = u32::MAX;
 
@@ -115,17 +180,20 @@ impl Default for SymAux {
 impl Symbol {
     pub(crate) fn new(name: &'static str) -> Symbol {
         Symbol {
-            name,
-            origin: Origin::Undef,
-            isec: None,
+            name_ptr: name.as_ptr() as usize,
+            name_len: name.len() as u32,
+            file: NONE,
+            isec: NONE,
             value: 0,
+            aux_idx: NONE,
             flags: 0,
+            kind: KIND_UNDEF,
             common_p2align: 0,
         }
     }
 
     pub fn is_defined(&self) -> bool {
-        self.origin != Origin::Undef
+        self.origin() != Origin::Undef
     }
 }
 

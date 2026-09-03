@@ -493,11 +493,11 @@ pub fn claim_new_dylibs<E: Arch>(ctx: &mut Context<E>, first: usize) {
             return;
         }
         for (dylib_idx, dylib) in dylibs.iter().enumerate().skip(first) {
-            if dylib.exports.contains(sym.name) {
-                sym.origin = Origin::Dylib((dylib_idx) as u32);
+            if dylib.exports.contains(sym.name()) {
+                sym.set_origin(Origin::Dylib((dylib_idx) as u32));
                 sym.set_is_imported(true);
                 sym.set_is_extern(true);
-                sym.isec = None;
+                sym.set_isec(None);
                 sym.set_is_common(false);
                 break;
             }
@@ -542,16 +542,16 @@ fn claim_locals<E: Arch>(ctx: &mut Context<E>) {
             let sym = unsafe { &mut *ptr.0.add(obj.syms[i]) };
             match nlist.n_type() {
                 N_ABS => {
-                    sym.origin = Origin::Obj((obj_idx) as u32);
-                    sym.isec = None;
+                    sym.set_origin(Origin::Obj((obj_idx) as u32));
+                    sym.set_isec(None);
                     sym.value = nlist.n_value;
                 }
                 N_SECT => {
                     if let Some((isec, off)) =
                         crate::input_files::find_subsec(isecs, &obj.subsecs, nlist.n_value)
                     {
-                        sym.origin = Origin::Obj((obj_idx) as u32);
-                        sym.isec = Some(isec as u32);
+                        sym.set_origin(Origin::Obj((obj_idx) as u32));
+                        sym.set_isec(Some(isec as u32));
                         sym.value = off;
                         sym.set_no_dead_strip(nlist.n_desc & (N_NO_DEAD_STRIP | REFERENCED_DYNAMICALLY) != 0);
                     }
@@ -565,9 +565,9 @@ fn claim_locals<E: Arch>(ctx: &mut Context<E>) {
 fn clear_claims<E: Arch>(ctx: &mut Context<E>) {
     use rayon::prelude::*;
     ctx.symtab.syms.par_iter_mut().for_each(|sym| {
-        if matches!(sym.origin, Origin::Obj(_) | Origin::Dylib(_)) || sym.is_common() {
-            sym.origin = Origin::Undef;
-            sym.isec = None;
+        if matches!(sym.origin(), Origin::Obj(_) | Origin::Dylib(_)) || sym.is_common() {
+            sym.set_origin(Origin::Undef);
+            sym.set_isec(None);
             sym.value = 0;
             sym.set_is_weak_def(false);
             sym.set_is_private_extern(false);
@@ -686,32 +686,32 @@ fn do_resolve<E: Arch>(ctx: &mut Context<E>, only_alive: bool) {
 
                 match nlist.n_type() {
                     N_ABS => {
-                        sym.origin = Origin::Obj((obj_idx) as u32);
-                        sym.isec = None;
+                        sym.set_origin(Origin::Obj((obj_idx) as u32));
+                        sym.set_isec(None);
                         sym.value = nlist.n_value;
                     }
                     N_SECT => {
-                        sym.origin = Origin::Obj((obj_idx) as u32);
+                        sym.set_origin(Origin::Obj((obj_idx) as u32));
                         match crate::input_files::find_subsec(
                             isecs,
                             &obj.subsecs,
                             nlist.n_value,
                         ) {
                             Some((isec, off)) => {
-                                sym.isec = Some(isec as u32);
+                                sym.set_isec(Some(isec as u32));
                                 sym.value = off;
                             }
                             None => {
                                 // A symbol in a discarded (debug)
                                 // section resolves as if undefined.
-                                sym.origin = Origin::Undef;
+                                sym.set_origin(Origin::Undef);
                                 best[sym_id].store(u64::MAX, Ordering::Relaxed);
                             }
                         }
                     }
                     N_UNDF => {
                         // A common symbol takes a tentative claim.
-                        sym.origin = Origin::Undef;
+                        sym.set_origin(Origin::Undef);
                         sym.set_is_common(true);
                         sym.value = nlist.n_value;
                         sym.common_p2align = ((nlist.n_desc >> 8) & 0xf) as u8;
@@ -751,10 +751,10 @@ fn do_resolve<E: Arch>(ctx: &mut Context<E>, only_alive: bool) {
 
     // Report duplicates deterministically, sorted by symbol name.
     let mut duplicates = duplicates.into_inner().unwrap();
-    duplicates.sort_by_key(|&(sym_id, obj_idx)| (ctx.symtab[sym_id].name, obj_idx));
+    duplicates.sort_by_key(|&(sym_id, obj_idx)| (ctx.symtab[sym_id].name(), obj_idx));
     duplicates.dedup();
     for (sym_id, obj_idx) in duplicates {
-        let prev = match ctx.symtab[sym_id].origin {
+        let prev = match ctx.symtab[sym_id].origin() {
             Origin::Obj(idx) => file_display(&ctx.objs[idx as usize]),
             _ => "?".to_string(),
         };
@@ -763,7 +763,7 @@ fn do_resolve<E: Arch>(ctx: &mut Context<E>, only_alive: bool) {
             "duplicate symbol: {}: {}: {}",
             file_display(&ctx.objs[obj_idx]),
             prev,
-            ctx.symtab[sym_id].name
+            ctx.symtab[sym_id].name()
         );
     }
 
@@ -795,12 +795,12 @@ fn do_resolve<E: Arch>(ctx: &mut Context<E>, only_alive: bool) {
         }
         for (dylib_idx, dylib) in dylibs.iter().enumerate() {
             let rank = (2u64 << 32) | dylib.priority as u64;
-            if rank < best[i].load(Ordering::Relaxed) && dylib.exports.contains(sym.name) {
+            if rank < best[i].load(Ordering::Relaxed) && dylib.exports.contains(sym.name()) {
                 best[i].store(rank, Ordering::Relaxed);
-                sym.origin = Origin::Dylib((dylib_idx) as u32);
+                sym.set_origin(Origin::Dylib((dylib_idx) as u32));
                 sym.set_is_imported(true);
                 sym.set_is_extern(true);
-                sym.isec = None;
+                sym.set_isec(None);
                 sym.set_is_common(false);
                 break;
             }
@@ -828,11 +828,11 @@ fn mark_live_objects<E: Arch>(ctx: &mut Context<E>) {
     root_syms.extend(ctx.args.forced_undefined.iter().map(String::as_str));
     for name in root_syms {
         if let Some(id) = ctx.symtab.get(name) {
-            if let Origin::Obj(owner) = ctx.symtab[id].origin {
+            if let Origin::Obj(owner) = ctx.symtab[id].origin() {
                 let owner = owner as usize;
                 if !ctx.objs[owner].is_alive {
                     ctx.objs[owner].is_alive = true;
-                    ctx.why_load.insert(owner, ctx.symtab[id].name);
+                    ctx.why_load.insert(owner, ctx.symtab[id].name());
                     queue.push(owner);
                 }
             }
@@ -846,11 +846,11 @@ fn mark_live_objects<E: Arch>(ctx: &mut Context<E>) {
                 continue;
             }
             let sym_id = ctx.objs[obj_idx].syms[i];
-            if let Origin::Obj(owner) = ctx.symtab[sym_id].origin {
+            if let Origin::Obj(owner) = ctx.symtab[sym_id].origin() {
                 let owner = owner as usize;
                 if !ctx.objs[owner].is_alive {
                     ctx.objs[owner].is_alive = true;
-                    ctx.why_load.insert(owner, ctx.symtab[sym_id].name);
+                    ctx.why_load.insert(owner, ctx.symtab[sym_id].name());
                     queue.push(owner);
                 }
             }
@@ -891,22 +891,22 @@ pub fn run_lto<E: Arch>(ctx: &mut Context<E>) -> bool {
         let executable = ctx.args.output_type == MH_EXECUTE;
         let mut preserve: Vec<std::ffi::CString> = Vec::new();
         for sym in &ctx.symtab.syms {
-            if let Origin::Obj(idx) = sym.origin {
+            if let Origin::Obj(idx) = sym.origin() {
                 if ctx.objs[idx as usize].lto_module.is_some() && sym.is_extern() {
                     if executable
                         && !ctx.args.export_dynamic
                         && !sym.is_used()
-                        && sym.name != ctx.args.entry
-                        && !ctx.args.forced_undefined.iter().any(|n| n == sym.name)
+                        && sym.name() != ctx.args.entry
+                        && !ctx.args.forced_undefined.iter().any(|n| n == sym.name())
                         && !ctx
                             .args
                             .exported_symbols
                             .as_ref()
-                            .is_some_and(|list| list.iter().any(|n| n == sym.name))
+                            .is_some_and(|list| list.iter().any(|n| n == sym.name()))
                     {
                         continue;
                     }
-                    if let Ok(name) = std::ffi::CString::new(sym.name) {
+                    if let Ok(name) = std::ffi::CString::new(sym.name()) {
                         preserve.push(name);
                     }
                 }
@@ -946,9 +946,9 @@ pub fn run_lto<E: Arch>(ctx: &mut Context<E>) -> bool {
         let ids = ctx.objs[obj_idx].syms.clone();
         for id in ids {
             let sym = &mut ctx.symtab[id];
-            if sym.origin == Origin::Obj((obj_idx) as u32) {
-                sym.origin = Origin::Undef;
-                sym.isec = None;
+            if sym.origin() == Origin::Obj((obj_idx) as u32) {
+                sym.set_origin(Origin::Undef);
+                sym.set_isec(None);
                 sym.value = 0;
                 sym.set_is_weak_def(false);
             }
@@ -1004,8 +1004,8 @@ pub fn convert_common_symbols<E: Arch>(ctx: &mut Context<E>) {
         });
 
         let sym = &mut ctx.symtab[i];
-        sym.origin = Origin::Synthetic;
-        sym.isec = Some((ctx.isecs.len() - 1) as u32);
+        sym.set_origin(Origin::Synthetic);
+        sym.set_isec(Some((ctx.isecs.len() - 1) as u32));
         sym.value = 0;
         sym.set_is_common(false);
         sym.set_is_extern(true);
@@ -1036,7 +1036,7 @@ pub fn convert_init_offsets<E: Arch>(ctx: &mut Context<E>) {
             let target = match ctx.reloc_target_sym(obj, &rel) {
                 Some(id) => {
                     let sym = &ctx.symtab[id];
-                    match sym.isec {
+                    match sym.isec() {
                         Some(isec) => (ctx.resolve_isec(isec as usize), sym.value),
                         None => continue,
                     }
@@ -1179,12 +1179,12 @@ pub fn create_objc_msgsend_stubs<E: Arch>(ctx: &mut Context<E>) {
         if sym.is_defined() || !sym.is_used() {
             continue;
         }
-        let Some(sel) = sym.name.strip_prefix("_objc_msgSend$") else {
+        let Some(sel) = sym.name().strip_prefix("_objc_msgSend$") else {
             continue;
         };
         let sel = sel.to_string();
         let idx = ctx.objc_stubs.len() as u32;
-        ctx.symtab[i].origin = Origin::Synthetic;
+        ctx.symtab[i].set_origin(Origin::Synthetic);
         ctx.sym_aux_mut(i).objc_stub_idx = idx;
         ctx.objc_stubs.push((i, sel));
     }
@@ -1203,7 +1203,7 @@ pub fn create_objc_msgsend_stubs<E: Arch>(ctx: &mut Context<E>) {
                 .position(|d| d.exports.contains("_objc_msgSend"))
             {
                 let sym = &mut ctx.symtab[id];
-                sym.origin = Origin::Dylib((dylib) as u32);
+                sym.set_origin(Origin::Dylib((dylib) as u32));
                 sym.set_is_imported(true);
                 sym.set_is_extern(true);
             }
@@ -1279,8 +1279,8 @@ pub fn auto_hide_weak_defs<E: Arch>(ctx: &mut Context<E>) {
                 && f & NOT_HIDABLE == 0
                 && sym.is_weak_def()
                 && sym.is_extern()
-                && matches!(sym.origin, Origin::Obj(_))
-                && !exported.is_some_and(|list| list.iter().any(|n| n == sym.name))
+                && matches!(sym.origin(), Origin::Obj(_))
+                && !exported.is_some_and(|list| list.iter().any(|n| n == sym.name()))
             {
                 sym.set_is_private_extern(true);
             }
@@ -1327,11 +1327,11 @@ pub fn coalesce_weak_defs<E: Arch>(ctx: &mut Context<E>) {
                     continue;
                 }
                 let sym = &shared.symtab[sym_id];
-                let Origin::Obj(owner) = sym.origin else { continue };
+                let Origin::Obj(owner) = sym.origin() else { continue };
                 if owner as usize == obj_idx {
                     continue;
                 }
-                let Some(winner) = sym.isec.map(|i| i as usize) else { continue };
+                let Some(winner) = sym.isec().map(|i| i as usize) else { continue };
                 let Some((loser, off)) = crate::input_files::find_subsec(
                     &shared.isecs,
                     &obj.subsecs,
@@ -1394,18 +1394,18 @@ pub fn check_undefined_symbols<E: Arch>(ctx: &mut Context<E>) {
         let sym = &ctx.symtab[i];
         if sym.is_used() && !sym.is_defined() {
             let allowed = ctx.args.undefined_dynamic_lookup
-                || ctx.args.allowed_undefined.iter().any(|n| n == sym.name);
+                || ctx.args.allowed_undefined.iter().any(|n| n == sym.name());
             if allowed {
                 if ctx.args.undefined_warning {
-                    crate::warn!(ctx, "undefined symbol: {}", ctx.symtab[i].name);
+                    crate::warn!(ctx, "undefined symbol: {}", ctx.symtab[i].name());
                 }
                 let sym = &mut ctx.symtab[i];
-                sym.origin = Origin::Dylib((usize::MAX) as u32);
+                sym.set_origin(Origin::Dylib((usize::MAX) as u32));
                 sym.set_is_imported(true);
                 sym.set_is_extern(true);
             } else {
                 let file = who_wants(ctx, i);
-                error!(ctx, "undefined symbol: {}: {}", file, ctx.symtab[i].name);
+                error!(ctx, "undefined symbol: {}: {}", file, ctx.symtab[i].name());
             }
         }
     }
@@ -1429,7 +1429,7 @@ pub fn print_dependencies<E: Arch>(ctx: &Context<E>) {
                 continue;
             }
             let sym = &ctx.symtab[sym_id];
-            let provider = match sym.origin {
+            let provider = match sym.origin() {
                 Origin::Obj(idx) => {
                     let idx = idx as usize;
                     if !ctx.objs[idx].is_alive || std::ptr::eq(&ctx.objs[idx], obj) {
@@ -1442,7 +1442,7 @@ pub fn print_dependencies<E: Arch>(ctx: &Context<E>) {
                 }
                 _ => continue,
             };
-            println!("{}\t{}\tu\t{}", file_display(obj), provider, sym.name);
+            println!("{}\t{}\tu\t{}", file_display(obj), provider, sym.name());
         }
     }
 }
@@ -1513,7 +1513,7 @@ pub fn dead_strip_dylibs<E: Arch>(ctx: &mut Context<E>) {
         used[i] = dylib.is_needed || !strippable(dylib);
     }
     for sym in &ctx.symtab.syms {
-        if let Origin::Dylib(idx) = sym.origin {
+        if let Origin::Dylib(idx) = sym.origin() {
             if idx != u32::MAX {
                 used[idx as usize] = true;
             }
@@ -1531,9 +1531,9 @@ pub fn dead_strip_dylibs<E: Arch>(ctx: &mut Context<E>) {
     }
 
     for sym in &mut ctx.symtab.syms {
-        if let Origin::Dylib(idx) = sym.origin {
+        if let Origin::Dylib(idx) = sym.origin() {
             if idx != u32::MAX {
-                sym.origin = Origin::Dylib(remap[idx as usize] as u32);
+                sym.set_origin(Origin::Dylib(remap[idx as usize] as u32));
             }
         }
     }
@@ -1593,7 +1593,7 @@ pub fn scan_relocations<E: Arch>(ctx: &mut Context<E>) {
             fatal!(
                 ctx,
                 "illegal thread local variable reference to regular symbol `{}`",
-                sym.name
+                sym.name()
             );
         }
 
@@ -1619,12 +1619,12 @@ pub fn scan_relocations<E: Arch>(ctx: &mut Context<E>) {
 /// thread-local. Symbols left to runtime lookup pass as either.
 fn is_thread_local_sym<E: Arch>(ctx: &Context<E>, id: crate::symbol::SymbolId) -> bool {
     let sym = &ctx.symtab[id];
-    match sym.origin {
-        crate::symbol::Origin::Obj(_) => sym.isec.map(|i| i as usize).is_some_and(|isec| {
+    match sym.origin() {
+        crate::symbol::Origin::Obj(_) => sym.isec().map(|i| i as usize).is_some_and(|isec| {
             ctx.isecs[isec].hdr.flags & SECTION_TYPE == S_THREAD_LOCAL_VARIABLES
         }),
         crate::symbol::Origin::Dylib(idx) => {
-            idx != u32::MAX && ctx.dylibs[idx as usize].tlv_exports.contains(sym.name)
+            idx != u32::MAX && ctx.dylibs[idx as usize].tlv_exports.contains(sym.name())
         }
         _ => false,
     }
@@ -1678,7 +1678,7 @@ pub fn add_synthetic_symbols<E: Arch>(ctx: &mut Context<E>) {
         let id = ctx.symtab.intern("__mh_execute_header");
         let sym = &mut ctx.symtab[id];
         if !sym.is_defined() {
-            sym.origin = Origin::Synthetic;
+            sym.set_origin(Origin::Synthetic);
             sym.value = ctx.args.pagezero_size;
             sym.set_is_extern(true);
         }
@@ -1690,7 +1690,7 @@ pub fn add_synthetic_symbols<E: Arch>(ctx: &mut Context<E>) {
     let id = ctx.symtab.intern("___dso_handle");
     let sym = &mut ctx.symtab[id];
     if !sym.is_defined() {
-        sym.origin = Origin::Synthetic;
+        sym.set_origin(Origin::Synthetic);
         sym.value = ctx.args.pagezero_size;
         sym.set_is_extern(false);
     }
@@ -1714,11 +1714,11 @@ pub fn add_synthetic_symbols<E: Arch>(ctx: &mut Context<E>) {
         if !ctx.symtab[dst].is_defined() {
             let (origin, isec, value) = {
                 let s = &ctx.symtab[src];
-                (s.origin, s.isec, s.value)
+                (s.origin(), s.isec(), s.value)
             };
             let sym = &mut ctx.symtab[dst];
-            sym.origin = origin;
-            sym.isec = isec;
+            sym.set_origin(origin);
+            sym.set_isec(isec);
             sym.value = value;
             sym.set_is_extern(true);
         }
@@ -1736,13 +1736,13 @@ pub fn add_synthetic_symbols<E: Arch>(ctx: &mut Context<E>) {
         if !sym.is_used() || sym.is_defined() {
             continue;
         }
-        let parsed = if let Some(rest) = sym.name.strip_prefix("section$") {
+        let parsed = if let Some(rest) = sym.name().strip_prefix("section$") {
             rest.split_once('$').and_then(|(which, rest)| {
                 rest.split_once('$').map(|(seg, sect)| {
                     (which == "start", seg.to_string(), Some(sect.to_string()))
                 })
             })
-        } else if let Some(rest) = sym.name.strip_prefix("segment$") {
+        } else if let Some(rest) = sym.name().strip_prefix("segment$") {
             rest.split_once('$')
                 .map(|(which, seg)| (which == "start", seg.to_string(), None))
         } else {
@@ -1752,7 +1752,7 @@ pub fn add_synthetic_symbols<E: Arch>(ctx: &mut Context<E>) {
             continue;
         };
         let sym = &mut ctx.symtab[id];
-        sym.origin = Origin::Synthetic;
+        sym.set_origin(Origin::Synthetic);
         sym.set_is_extern(false);
         ctx.boundary_syms.push((id, is_start, seg, sect));
     }
@@ -1770,7 +1770,7 @@ pub fn fix_synthetic_symbols<E: Arch>(ctx: &mut Context<E>) {
                     .iter()
                     .find(|c| c.hdr.is_sect && c.hdr.segname == seg && c.hdr.sectname == *sect)
                 else {
-                    fatal!(ctx, "no section for boundary symbol: {}", ctx.symtab[id].name);
+                    fatal!(ctx, "no section for boundary symbol: {}", ctx.symtab[id].name());
                 };
                 if is_start {
                     chunk.hdr.addr
@@ -1780,7 +1780,7 @@ pub fn fix_synthetic_symbols<E: Arch>(ctx: &mut Context<E>) {
             }
             None => {
                 let Some(segment) = ctx.segments.iter().find(|s| s.name == seg) else {
-                    fatal!(ctx, "no segment for boundary symbol: {}", ctx.symtab[id].name);
+                    fatal!(ctx, "no segment for boundary symbol: {}", ctx.symtab[id].name());
                 };
                 if is_start {
                     segment.cmd.vmaddr
@@ -2347,19 +2347,19 @@ pub fn create_output_symtab<E: Arch>(
                 for (nlist, &sym_id) in obj.nlists.iter().zip(&obj.syms) {
                     let sym = &ctx.symtab[sym_id];
                     if nlist.is_stab()
-                        || !matches!(sym.origin, Origin::Obj(o) if o as usize == obj_idx)
-                        || (!nlist.is_extern() && !keep_local_symbol(sym.name))
+                        || !matches!(sym.origin(), Origin::Obj(o) if o as usize == obj_idx)
+                        || (!nlist.is_extern() && !keep_local_symbol(sym.name()))
                     {
                         continue;
                     }
-                    let Some(isec) = sym.isec.map(|i| i as usize) else { continue };
+                    let Some(isec) = sym.isec().map(|i| i as usize) else { continue };
                     let isec_id = ctx.resolve_isec(isec as usize);
                     let isec = &ctx.isecs[isec_id];
                     if !isec.is_alive {
                         continue;
                     }
 
-                    let stab_name = sym.name;
+                    let stab_name = sym.name();
                     let is_text = isec.hdr.segname() == "__TEXT"
                         && isec.hdr.flags
                             & (S_ATTR_PURE_INSTRUCTIONS | S_ATTR_SOME_INSTRUCTIONS)
@@ -2472,13 +2472,13 @@ pub fn create_output_symtab<E: Arch>(
                 }
                 for (nlist, &sym_id) in obj.nlists.iter().zip(&obj.syms) {
                     let sym = &ctx_ref.symtab[sym_id];
-                    if nlist.is_stab() || nlist.is_extern() || !keep_local_symbol(sym.name) {
+                    if nlist.is_stab() || nlist.is_extern() || !keep_local_symbol(sym.name()) {
                         continue;
                     }
                     // -non_global_symbols_keep_list / _strip_list
                     // filter local symbols by name; stabs unaffected.
                     if let Some(keep) = &ctx_ref.args.local_keep_list {
-                        if !keep.iter().any(|p| crate::util::glob_match(p, sym.name)) {
+                        if !keep.iter().any(|p| crate::util::glob_match(p, sym.name())) {
                             continue;
                         }
                     }
@@ -2486,13 +2486,13 @@ pub fn create_output_symtab<E: Arch>(
                         .args
                         .local_strip_list
                         .iter()
-                        .any(|p| crate::util::glob_match(p, sym.name))
+                        .any(|p| crate::util::glob_match(p, sym.name()))
                     {
                         continue;
                     }
-                    let Some(isec) = sym.isec.map(|i| i as usize) else { continue };
+                    let Some(isec) = sym.isec().map(|i| i as usize) else { continue };
                     let isec = ctx_ref.resolve_isec(isec);
-                    if !matches!(sym.origin, Origin::Obj(_)) || !ctx_ref.isecs[isec].is_alive {
+                    if !matches!(sym.origin(), Origin::Obj(_)) || !ctx_ref.isecs[isec].is_alive {
                         continue;
                     }
                     let ent = NList {
@@ -2502,7 +2502,7 @@ pub fn create_output_symtab<E: Arch>(
                         n_desc: 0,
                         n_value: 0,
                     };
-                    out.push((sym.name, ent, sym_id));
+                    out.push((sym.name(), ent, sym_id));
                 }
                 out
             })
@@ -2534,14 +2534,14 @@ pub fn create_output_symtab<E: Arch>(
             .into_par_iter()
             .map(|i| {
                 let sym = &ctx.symtab[i];
-                if matches!(sym.origin, Origin::Dylib(_)) {
+                if matches!(sym.origin(), Origin::Dylib(_)) {
                     return Class::Undef;
                 }
                 if sym.is_extern()
                     && sym.is_private_extern()
-                    && matches!(sym.origin, Origin::Obj(_))
+                    && matches!(sym.origin(), Origin::Obj(_))
                     && sym
-                        .isec
+                        .isec()
                         .is_some_and(|isec| ctx.isecs[ctx.resolve_isec(isec as usize)].is_alive)
                 {
                     return Class::Pext;
@@ -2558,8 +2558,8 @@ pub fn create_output_symtab<E: Arch>(
             continue;
         }
         let sym = &ctx.symtab[i];
-        let isec = ctx.resolve_isec(sym.isec.unwrap() as usize);
-        names.push(sym.name);
+        let isec = ctx.resolve_isec(sym.isec().unwrap() as usize);
+        names.push(sym.name());
         let ent = NList {
             n_strx: 0,
             n_type: N_SECT | N_PEXT,
@@ -2577,8 +2577,8 @@ pub fn create_output_symtab<E: Arch>(
     for &i in sorted_globals {
         let sym = &ctx.symtab[i];
         let n_strx = 0;
-        names.push(sym.name);
-        let (n_type, n_sect, mut n_desc) = match (sym.origin, sym.isec) {
+        names.push(sym.name());
+        let (n_type, n_sect, mut n_desc) = match (sym.origin(), sym.isec()) {
             (_, Some(isec)) => (
                 N_SECT | N_EXT,
                 ordinals[ctx.isecs[ctx.resolve_isec(isec as usize)].osec as usize],
@@ -2609,15 +2609,15 @@ pub fn create_output_symtab<E: Arch>(
         .filter(|&(_, &c)| c == Class::Undef)
         .map(|(i, _)| i)
         .collect();
-    undefs.par_sort_unstable_by_key(|&i| crate::util::name_sort_key(ctx.symtab[i].name));
+    undefs.par_sort_unstable_by_key(|&i| crate::util::name_sort_key(ctx.symtab[i].name()));
 
     for &i in &undefs {
         let sym = &ctx.symtab[i];
-        let Origin::Dylib(dylib) = sym.origin else {
+        let Origin::Dylib(dylib) = sym.origin() else {
             unreachable!()
         };
         let n_strx = 0;
-        names.push(sym.name);
+        names.push(sym.name());
         // A flat-namespace import records the DYNAMIC_LOOKUP ordinal.
         let ordinal = (ctx.bind_ordinal(dylib) as u8) as u16;
         let mut n_desc = ordinal << 8;
@@ -2833,13 +2833,13 @@ pub fn set_osec_offsets<E: Arch>(ctx: &mut Context<E>) {
                         let sym = &shared.symtab[i];
                         sym.is_extern()
                             && !sym.is_private_extern()
-                            && matches!(sym.origin, Origin::Obj(_) | Origin::Synthetic)
-                            && sym.isec.map(|i| i as usize).is_none_or(|isec| {
+                            && matches!(sym.origin(), Origin::Obj(_) | Origin::Synthetic)
+                            && sym.isec().map(|i| i as usize).is_none_or(|isec| {
                                 shared.isecs[shared.resolve_isec(isec)].is_alive
                             })
                     })
                     .collect();
-                v.par_sort_unstable_by_key(|&i| crate::util::name_sort_key(shared.symtab[i].name));
+                v.par_sort_unstable_by_key(|&i| crate::util::name_sort_key(shared.symtab[i].name()));
                 v
             })};
             let ((symtab, trie), (streams, (starts, dice))) = rayon::join(
@@ -3205,7 +3205,7 @@ fn build_bind_info<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
     let mut last_addend = 0i64;
     for (addr, id, addend) in binds {
         let sym = &ctx.symtab[id];
-        let Origin::Dylib(dylib) = sym.origin else {
+        let Origin::Dylib(dylib) = sym.origin() else {
             unreachable!()
         };
         let ordinal = ctx.bind_ordinal(dylib);
@@ -3223,7 +3223,7 @@ fn build_bind_info<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
             0
         };
         buf.push(BIND_OPCODE_SET_SYMBOL_TRAILING_FLAGS_IMM | flags);
-        buf.extend_from_slice(sym.name.as_bytes());
+        buf.extend_from_slice(sym.name().as_bytes());
         buf.push(0);
         buf.push(BIND_OPCODE_SET_TYPE_IMM | BIND_TYPE_POINTER);
         // The addend is bind-machine state: it persists across
@@ -3453,12 +3453,12 @@ fn build_chained_fixups<E: Arch>(ctx: &Context<E>) -> ChainedFixups {
     for (i, &(sym, _)) in dynsyms.iter().enumerate() {
         name_offs.push(nameoff);
         if i + 1 == dynsyms.len() || dynsyms[i + 1].0 != sym {
-            nameoff += ctx.symtab[sym].name.len() as u32 + 1;
+            nameoff += ctx.symtab[sym].name().len() as u32 + 1;
         }
     }
     for (i, &(sym, addend)) in dynsyms.iter().enumerate() {
         let s = &ctx.symtab[sym];
-        let Origin::Dylib(dylib) = s.origin else {
+        let Origin::Dylib(dylib) = s.origin() else {
             unreachable!()
         };
         let ordinal = ctx.bind_ordinal(dylib) as u8;
@@ -3486,7 +3486,7 @@ fn build_chained_fixups<E: Arch>(ctx: &Context<E>) -> ChainedFixups {
     buf[12..16].copy_from_slice(&(symbols_offset as u32).to_le_bytes());
     for (i, &(sym, _)) in dynsyms.iter().enumerate() {
         if i + 1 == dynsyms.len() || dynsyms[i + 1].0 != sym {
-            buf.extend_from_slice(ctx.symtab[sym].name.as_bytes());
+            buf.extend_from_slice(ctx.symtab[sym].name().as_bytes());
             buf.push(0);
         }
     }
@@ -3603,12 +3603,12 @@ fn order_file_ranks<E: Arch>(ctx: &Context<E>) -> Option<Vec<u64>> {
 
     let mut ranks = vec![u64::MAX; ctx.isecs.len()];
     for sym in &ctx.symtab.syms {
-        let Origin::Obj(obj) = sym.origin else {
+        let Origin::Obj(obj) = sym.origin() else {
             continue;
         };
         let obj = obj as usize;
-        let Some(isec) = sym.isec.map(|i| i as usize) else { continue };
-        let Some(entries) = rank_of.get(sym.name) else {
+        let Some(isec) = sym.isec().map(|i| i as usize) else { continue };
+        let Some(entries) = rank_of.get(sym.name()) else {
             continue;
         };
         let leaf = ctx.objs[obj].mf.name.rsplit('/').next().unwrap_or("");
@@ -3668,10 +3668,10 @@ fn build_function_starts<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
         .syms
         .par_iter()
         .filter_map(|sym| {
-            if !matches!(sym.origin, Origin::Obj(_)) {
+            if !matches!(sym.origin(), Origin::Obj(_)) {
                 return None;
             }
-            let isec = &ctx.isecs[ctx.resolve_isec(sym.isec? as usize)];
+            let isec = &ctx.isecs[ctx.resolve_isec(sym.isec()? as usize)];
             if isec.is_alive
                 && isec.hdr.segname() == "__TEXT"
                 && isec.hdr.sectname() == "__text"
