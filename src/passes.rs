@@ -1172,6 +1172,28 @@ pub fn merge_literals<E: Arch>(ctx: &mut Context<E>) {
             w.p2align = w.p2align.max(p2align);
         }
     }
+
+    // Point every symbol defined in a merged-away copy at the surviving
+    // one - mold-rust makes the merged section's fragment the symbol's
+    // origin - so a symbol's address never follows a replacement chain.
+    // The copies are identical, so the symbol's offset is unchanged.
+    // (Section-relative relocations still resolve through the chain in
+    // isec_addr.)
+    {
+        use rayon::prelude::*;
+        let isecs = &ctx.isecs;
+        ctx.symtab.syms.par_iter_mut().for_each(|sym| {
+            if let Some(i) = sym.isec() {
+                let mut r = i as usize;
+                while isecs[r].replacement != crate::input_sections::NO_REPLACEMENT {
+                    r = isecs[r].replacement as usize;
+                }
+                if r != i as usize {
+                    sym.set_isec(Some(r as u32));
+                }
+            }
+        });
+    }
 }
 
 /// Synthesizes _objc_msgSend$<selector> stubs. With selector stubs
