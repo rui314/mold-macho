@@ -1706,6 +1706,14 @@ pub fn parse_dylib_binary<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile
             exports.insert(name);
         }
     }
+    if let Some((off, size)) = find_export_trie(data, &hdr) {
+        for (name, flags) in export_trie_entries(data, off, size) {
+            if flags as u32 & EXPORT_SYMBOL_FLAGS_KIND_MASK == EXPORT_SYMBOL_FLAGS_KIND_THREAD_LOCAL {
+                tlv_exports.insert(name);
+            }
+            exports.insert(name);
+        }
+    }
 
     // A dylib's clients see its reexported libraries' exports through
     // it; merge them in, following the chain. Each queue entry keeps
@@ -1812,9 +1820,44 @@ pub fn next_dylib_ordinal<E: Arch>(ctx: &Context<E>) -> i32 {
     ctx.dylibs.iter().filter(|d| !d.is_bundle_loader).count() as i32 + 1
 }
 
-/// The names in an export trie (LC_DYLD_EXPORTS_TRIE, or LC_DYLD_INFO's
-/// export section): what a stripped executable or dylib exports.
+/// Where an image keeps its export trie: LC_DYLD_EXPORTS_TRIE, or the
+/// export section of LC_DYLD_INFO(_ONLY).
+fn find_export_trie(data: &[u8], hdr: &MachHeader) -> Option<(usize, usize)> {
+    let mut trie = None;
+    let mut off = size_of::<MachHeader>();
+    for _ in 0..hdr.ncmds {
+        let lc = LoadCommand::read_from(&data[off..]);
+        match lc.cmd {
+            LC_DYLD_EXPORTS_TRIE => {
+                let cmd = LinkEditDataCommand::read_from(&data[off..]);
+                trie = Some((cmd.dataoff as usize, cmd.datasize as usize));
+            }
+            LC_DYLD_INFO | LC_DYLD_INFO_ONLY => {
+                let cmd = DyldInfoCommand::read_from(&data[off..]);
+                if cmd.export_size != 0 {
+                    trie = Some((cmd.export_off as usize, cmd.export_size as usize));
+                }
+            }
+            _ => {}
+        }
+        off += lc.cmdsize as usize;
+    }
+    trie
+}
+
+/// The names in an export trie: what a stripped executable or dylib
+/// exports.
 fn export_trie_names(data: &[u8], off: usize, size: usize) -> Vec<&'static str> {
+    export_trie_entries(data, off, size).into_iter().map(|(name, _)| name).collect()
+}
+
+/// The (name, flags) entries of an export trie. The trie is what dyld
+/// binds against, and the one authoritative list of a dylib's exports:
+/// a dylib's symbol table may keep only a handful of its defined
+/// externals (Lottie.xcframework's ships 16 of 1846, the rest stripped),
+/// so a linker that reads just the symbol table finds nothing to
+/// resolve against. ld64 reads the trie.
+fn export_trie_entries(data: &[u8], off: usize, size: usize) -> Vec<(&'static str, u64)> {
     let trie = &data[off..(off + size).min(data.len())];
     let mut names = Vec::new();
     let mut stack: Vec<(usize, String)> = vec![(0, String::new())];
@@ -1839,7 +1882,9 @@ fn export_trie_names(data: &[u8], off: usize, size: usize) -> Vec<&'static str> 
         let mut pos = node;
         let terminal = read_uleb(&mut pos) as usize;
         if terminal > 0 {
-            names.push(String::leak(prefix.clone()) as &'static str);
+            let mut p = pos;
+            let flags = read_uleb(&mut p);
+            names.push((String::leak(prefix.clone()) as &'static str, flags));
             pos += terminal;
         }
         let Some(&nchildren) = trie.get(pos) else { continue };
@@ -1991,6 +2036,14 @@ fn dylib_binary_exports(
         for nlist in &nlists[range] {
             let name = symbol_name(strtab, nlist);
             if tlv_sects.contains(&nlist.n_sect) {
+                tlv_exports.push(name);
+            }
+            exports.push(name);
+        }
+    }
+    if let Some((off, size)) = find_export_trie(data, &hdr) {
+        for (name, flags) in export_trie_entries(data, off, size) {
+            if flags as u32 & EXPORT_SYMBOL_FLAGS_KIND_MASK == EXPORT_SYMBOL_FLAGS_KIND_THREAD_LOCAL {
                 tlv_exports.push(name);
             }
             exports.push(name);

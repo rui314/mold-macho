@@ -840,11 +840,17 @@ pub fn encode_export_trie<E: Arch>(
                 let ordinal = ctx.bind_ordinal(dylib) as u32;
                 return Some((sym.name(), Export::Reexport { ordinal, name: ctx.symtab[target].name() }));
             }
-            let flags = if sym.is_weak_def() {
-                EXPORT_SYMBOL_FLAGS_WEAK_DEFINITION
-            } else {
-                0
-            };
+            // The kind bits tell a client linker (and dyld) that the
+            // export is a TLV descriptor; ld64 sets them, and a
+            // linker reading a stripped dylib's trie has nothing else
+            // to go by.
+            let mut flags = 0;
+            if sym.is_weak_def() {
+                flags |= EXPORT_SYMBOL_FLAGS_WEAK_DEFINITION;
+            }
+            if crate::passes::is_thread_local_sym(ctx, id) {
+                flags |= EXPORT_SYMBOL_FLAGS_KIND_THREAD_LOCAL;
+            }
             Some((sym.name(), Export::Addr { flags, addr: ctx.sym_addr(id) - base }))
         })
         .collect();

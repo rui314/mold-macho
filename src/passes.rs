@@ -1703,7 +1703,7 @@ pub fn scan_relocations<E: Arch>(ctx: &mut Context<E>) {
 /// True if the symbol resolves to a TLV descriptor: a definition in a
 /// S_THREAD_LOCAL_VARIABLES section, or a dylib export listed as
 /// thread-local. Symbols left to runtime lookup pass as either.
-fn is_thread_local_sym<E: Arch>(ctx: &Context<E>, id: crate::symbol::SymbolId) -> bool {
+pub fn is_thread_local_sym<E: Arch>(ctx: &Context<E>, id: crate::symbol::SymbolId) -> bool {
     let sym = &ctx.symtab[id];
     match sym.origin() {
         crate::symbol::Origin::Obj(_) => sym.isec().map(|i| i as usize).is_some_and(|isec| {
