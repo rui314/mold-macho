@@ -207,11 +207,20 @@ pub fn link<E: Arch>(cmdline: &[String], diag: &Diagnostics) -> Result<i32, Stri
     crate::mapfile::write_dependency_info(&ctx);
     lap(&mut phases, "layout");
 
-    // Write the output
+    // Write the output. The file is created up front and its ranges are
+    // written from background threads as copy_chunks finishes them;
+    // finish() waits for the last one.
     let mut buf = vec![0; ctx.output_size as usize];
-    passes::copy_chunks(&ctx, &mut buf);
+    let out = output_file::OutputFile::create(&ctx.diag, &ctx.args.output, buf.as_ptr(), buf.len());
+    passes::copy_chunks(&ctx, &mut buf, &out);
     ctx.diag.checkpoint();
-    output_file::write(&ctx.diag, &ctx.args.output, &buf);
+    {
+        let tt = std::time::Instant::now();
+        out.finish(&ctx.diag);
+        if std::env::var_os("MOLD_TIMING").is_some() {
+            eprintln!("    write-wait {:?}", tt.elapsed());
+        }
+    }
     crate::subprocess::notify_parent();
     lap(&mut phases, "copy+write");
 

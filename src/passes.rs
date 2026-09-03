@@ -3898,8 +3898,12 @@ fn copy_chunk<E: Arch>(ctx: &Context<E>, chunk: &Chunk, buf: &mut [u8]) {
 /// every chunk writes only within its own. The mach header, symbol
 /// table (which also fills the string table), UUID and code signature
 /// run serially afterwards, in that order, since each depends on the
-/// bytes before it.
-pub fn copy_chunks<E: Arch>(ctx: &Context<E>, buf: &mut [u8]) {
+/// bytes before it. Each range of the buffer is queued to `out` the
+/// moment it is final, so the file is written while the rest is
+/// produced: everything between the header and the symbol table after
+/// the copy and its fix-ups, the symbol and string tables after
+/// copy_symtab, the header after the UUID, the signature last.
+pub fn copy_chunks<E: Arch>(ctx: &Context<E>, buf: &mut [u8], out: &crate::output_file::OutputFile) {
     use rayon::prelude::*;
 
     let mut jobs: Vec<(usize, usize, usize)> = ctx
@@ -3938,7 +3942,29 @@ pub fn copy_chunks<E: Arch>(ctx: &Context<E>, buf: &mut [u8]) {
         t!("write-chains", write_fixup_chains(ctx, buf));
     }
     t!("loh", E::apply_optimization_hints(ctx, buf));
+
+    let hdr_end = ctx.chunks[output_chunks::find_chunk(ctx, |k| {
+        matches!(k, ChunkKind::MachHeader)
+    })
+    .unwrap()]
+    .hdr
+    .size as usize;
+    let sig_start = output_chunks::find_chunk(ctx, |k| {
+        matches!(k, ChunkKind::CodeSignature)
+    })
+    .map_or(buf.len(), |idx| ctx.chunks[idx].hdr.fileoff as usize);
+    let symtab_start = ctx
+        .chunks
+        .iter()
+        .filter(|c| matches!(c.kind, ChunkKind::Symtab | ChunkKind::Strtab))
+        .map(|c| c.hdr.fileoff as usize)
+        .min()
+        .unwrap_or(sig_start);
+
+    // Nothing below writes between the header and the symbol table.
+    out.queue(hdr_end, symtab_start - hdr_end);
     t!("copy_symtab", output_chunks::copy_symtab(ctx, buf));
+    out.queue(symtab_start, sig_start - symtab_start);
     output_chunks::copy_mach_header(ctx, buf);
 
     // The code signature is SHA256 hashes of every 4KiB page before it,
@@ -3953,11 +3979,6 @@ pub fn copy_chunks<E: Arch>(ctx: &Context<E>, buf: &mut [u8]) {
     // ld64's, the UUID depends on the contents before the signature
     // only, not on the signature blob (whose identifier is the output's
     // basename); unsigned output hashes its pages the same way.
-    let sig_start = output_chunks::find_chunk(ctx, |k| {
-        matches!(k, ChunkKind::CodeSignature)
-    })
-    .map_or(buf.len(), |idx| ctx.chunks[idx].hdr.fileoff as usize);
-
     let mut hashes: Vec<[u8; 32]> = Vec::new();
     if ctx.args.uuid || ctx.args.adhoc_codesign {
         t!("page-hashes", hashes = output_chunks::page_hashes(&buf[..sig_start]));
@@ -3981,8 +4002,10 @@ pub fn copy_chunks<E: Arch>(ctx: &Context<E>, buf: &mut [u8]) {
             output_chunks::rehash_pages(&buf[..sig_start], &mut hashes, 0..hdr_size);
         });
     }
+    out.queue(0, hdr_end);
 
     if ctx.args.adhoc_codesign {
         t!("codesign", output_chunks::write_code_signature(ctx, buf, &hashes));
     }
+    out.queue(sig_start, buf.len() - sig_start);
 }
