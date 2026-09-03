@@ -481,7 +481,12 @@ pub fn stage_object<E: Arch>(
         }
         let raw: Vec<MachRel> = read_array(data, sect.reloff as usize, sect.nreloc as usize);
         let mut rels = E::read_relocs(diag, &mf.name, sect_hdrs, sect, data, &raw);
-        rels.sort_unstable_by_key(|rel| rel.offset);
+        // The sort must be stable: a SUBTRACTOR and the UNSIGNED it
+        // pairs with share one offset and their order is the pairing
+        // (Swift's relative pointers are all such pairs). An unstable
+        // sort swapped some, leaving lone 4-byte UNSIGNED relocations
+        // that were then written as 8 bytes.
+        rels.sort_by_key(|rel| rel.offset);
 
         for rel in &mut rels {
             if let crate::input_sections::RelocTarget::Section(sect_pos) = rel.target() {

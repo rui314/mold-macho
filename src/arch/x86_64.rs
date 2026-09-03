@@ -201,7 +201,6 @@ impl Arch for X86_64 {
 
             match r.r_type {
                 X86_64_RELOC_UNSIGNED => {
-                    debug_assert!(r.size == 8);
                     let imported = ctx
                         .reloc_target_sym(obj, r)
                         .is_some_and(|id| ctx.symtab[id].is_imported());
@@ -209,6 +208,18 @@ impl Arch for X86_64 {
                         // The slot is filled by dyld.
                     } else if ctx.reloc_target_is_tls(obj, r) {
                         write64(loc, s.wrapping_add_signed(a) - ctx.tls_begin);
+                    } else if r.size == 4 {
+                        // A 32-bit absolute address (.long sym); ld64
+                        // rejects one that does not fit.
+                        let val = s.wrapping_add_signed(a);
+                        if val > u32::MAX as u64 {
+                            fatal!(
+                                ctx,
+                                "{}: 32-bit absolute address out of range ({val:#x})",
+                                ctx.objs[obj].mf.name
+                            );
+                        }
+                        write32(loc, val as u32);
                     } else {
                         write64(loc, s.wrapping_add_signed(a));
                     }

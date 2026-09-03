@@ -416,7 +416,6 @@ impl Arch for Arm64 {
 
             match r.r_type {
                 ARM64_RELOC_UNSIGNED => {
-                    debug_assert!(r.size == 8);
                     // An imported symbol's address is written by dyld,
                     // via a bind record.
                     let imported = ctx
@@ -428,6 +427,18 @@ impl Arch for Arm64 {
                         // __thread_vars holds thread-pointer-relative
                         // offsets into the TLS initialization image.
                         write64(loc, s.wrapping_add_signed(a) - ctx.tls_begin);
+                    } else if r.size == 4 {
+                        // A 32-bit absolute address (.long sym); ld64
+                        // rejects one that does not fit.
+                        let val = s.wrapping_add_signed(a);
+                        if val > u32::MAX as u64 {
+                            fatal!(
+                                ctx,
+                                "{}: 32-bit absolute address out of range ({val:#x})",
+                                ctx.objs[obj].mf.name
+                            );
+                        }
+                        write32(loc, val as u32);
                     } else {
                         write64(loc, s.wrapping_add_signed(a));
                     }
