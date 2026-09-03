@@ -261,17 +261,17 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
     let mut eh_patches: Vec<(u32, u64, u8)> = Vec::new();
     {
         let kept: Vec<usize> = (0..ctx.fdes.len())
-            .filter(|&i| ctx.isecs[ctx.resolve_isec(ctx.fdes[i].isec)].is_alive)
+            .filter(|&i| ctx.isecs[ctx.resolve_isec(ctx.fdes[i].isec as usize)].is_alive)
             .collect();
         let mut cie_off: HashMap<usize, u32> = HashMap::new();
         for &f in &kept {
             let c = ctx.fdes[f].cie;
-            if cie_off.contains_key(&c) {
+            if cie_off.contains_key(&(c as usize)) {
                 continue;
             }
-            let cie = &ctx.cies[c];
+            let cie = &ctx.cies[c as usize];
             let off = eh_data.len() as u32;
-            cie_off.insert(c, off);
+            cie_off.insert(c as usize, off);
             eh_data.extend_from_slice(&cie.data);
             if let Some(p) = cie.personality {
                 let Some(&symnum) = index_of_sym.get(&p) else {
@@ -293,11 +293,11 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
             let fde = &ctx.fdes[f];
             let off = eh_data.len() as u32;
             eh_data.extend_from_slice(&fde.data);
-            let cie_ptr = off + 4 - cie_off[&fde.cie];
+            let cie_ptr = off + 4 - cie_off[&(fde.cie as usize)];
             eh_data[off as usize + 4..off as usize + 8]
                 .copy_from_slice(&cie_ptr.to_le_bytes());
 
-            let isec = &ctx.isecs[ctx.resolve_isec(fde.isec)];
+            let isec = &ctx.isecs[ctx.resolve_isec(fde.isec as usize)];
             let func_addr =
                 ctx.chunks[isec.osec as usize].hdr.addr + isec.output_offset as u64 + fde.func_offset as u64;
             eh_patches.push((off + 8, func_addr, 8));
@@ -308,10 +308,10 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
                     pos += 1;
                 }
                 pos += 1;
-                let l = &ctx.isecs[ctx.resolve_isec(lsda)];
+                let l = &ctx.isecs[ctx.resolve_isec(lsda as usize)];
                 let lsda_addr =
                     ctx.chunks[l.osec as usize].hdr.addr + l.output_offset as u64 + lsda_off as u64;
-                eh_patches.push((off + pos, lsda_addr, ctx.cies[fde.cie].lsda_size));
+                eh_patches.push((off + pos, lsda_addr, ctx.cies[fde.cie as usize].lsda_size));
             }
         }
     }

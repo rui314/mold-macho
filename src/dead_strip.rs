@@ -135,9 +135,9 @@ pub fn dead_strip<E: Arch>(ctx: &mut Context<E>) {
             let mut personality = rec.personality();
             if let Some(fde) = rec.fde() {
                 if let Some((lsda, _)) = ctx.fdes[fde].lsda {
-                    out.push(lsda);
+                    out.push(lsda as usize);
                 }
-                personality = personality.or(ctx.cies[ctx.fdes[fde].cie].personality);
+                personality = personality.or(ctx.cies[ctx.fdes[fde].cie as usize].personality);
             }
             if let Some(p) = personality {
                 if let Some(isec) = ctx.symtab[p].isec().map(|i| i as usize) {
@@ -196,10 +196,10 @@ pub fn dead_strip<E: Arch>(ctx: &mut Context<E>) {
                 let mut personality = rec.personality();
                 if let Some(fde) = rec.fde() {
                     if let Some((lsda, _)) = gc.ctx.fdes[fde].lsda {
-                        targets.push(lsda);
+                        targets.push(lsda as usize);
                     }
                     personality =
-                        personality.or(gc.ctx.cies[gc.ctx.fdes[fde].cie].personality);
+                        personality.or(gc.ctx.cies[gc.ctx.fdes[fde].cie as usize].personality);
                 }
                 if let Some(p) = personality {
                     if let Some(isec) = gc.ctx.symtab[p].isec().map(|i| i as usize) {
@@ -273,7 +273,7 @@ pub fn dead_strip<E: Arch>(ctx: &mut Context<E>) {
     let mut kept_fdes = Vec::new();
     let fdes = std::mem::take(&mut ctx.fdes);
     for (i, fde) in fdes.into_iter().enumerate() {
-        if live[fde.isec] {
+        if live[fde.isec as usize] {
             fde_map[i] = kept_fdes.len();
             kept_fdes.push(fde);
         }

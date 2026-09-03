@@ -1206,11 +1206,11 @@ pub fn copy_eh_frame<E: Arch>(ctx: &Context<E>, buf: &mut [u8]) {
         buf[off..off + fde.data.len()].copy_from_slice(&fde.data);
 
         // The CIE pointer is the distance back to the owning CIE.
-        let cie_ptr = fde.output_offset + 4 - ctx.cies[fde.cie].output_offset;
+        let cie_ptr = fde.output_offset + 4 - ctx.cies[fde.cie as usize].output_offset;
         buf[off + 4..off + 8].copy_from_slice(&cie_ptr.to_le_bytes());
 
         // pc_begin: self-relative pointer to the function.
-        let func_addr = ctx.isec_addr(fde.isec) + fde.func_offset as u64;
+        let func_addr = ctx.isec_addr(fde.isec as usize) + fde.func_offset as u64;
         let pc_begin = func_addr.wrapping_sub(fde_addr + 8) as i64;
         buf[off + 8..off + 16].copy_from_slice(&pc_begin.to_le_bytes());
 
@@ -1222,8 +1222,8 @@ pub fn copy_eh_frame<E: Arch>(ctx: &Context<E>, buf: &mut [u8]) {
             }
             pos += 1;
             let cell_addr = fde_addr + pos as u64;
-            let val = (ctx.isec_addr(lsda_isec) + lsda_off as u64).wrapping_sub(cell_addr);
-            match ctx.cies[fde.cie].lsda_size {
+            let val = (ctx.isec_addr(lsda_isec as usize) + lsda_off as u64).wrapping_sub(cell_addr);
+            match ctx.cies[fde.cie as usize].lsda_size {
                 4 => buf[off + pos..off + pos + 4].copy_from_slice(&(val as u32).to_le_bytes()),
                 8 => buf[off + pos..off + pos + 8].copy_from_slice(&val.to_le_bytes()),
                 _ => unreachable!(),

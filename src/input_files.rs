@@ -658,17 +658,17 @@ pub fn integrate_objects<E: Arch>(
                 }
             }
             for cie in &mut st.cies {
-                cie.obj = obj_idx;
+                cie.obj = obj_idx as u32;
                 if let Some(p) = &mut cie.personality {
                     *p = syms[*p as usize];
                 }
             }
             for fde in &mut st.fdes {
-                fde.obj = obj_idx;
-                fde.isec += base.isec;
-                fde.cie += base.cie;
+                fde.obj = obj_idx as u32;
+                fde.isec += base.isec as u32;
+                fde.cie += base.cie as u32;
                 if let Some((lsda, _)) = &mut fde.lsda {
-                    *lsda += base.isec;
+                    *lsda += base.isec as u32;
                 }
             }
             syms
@@ -826,18 +826,18 @@ pub fn integrate_object_with<E: Arch>(
         ctx.unwind_records.push(rec);
     }
     for mut cie in staged.cies {
-        cie.obj = obj_idx;
+        cie.obj = obj_idx as u32;
         if let Some(p) = &mut cie.personality {
             *p = syms[*p as usize];
         }
         ctx.cies.push(cie);
     }
     for mut fde in staged.fdes {
-        fde.obj = obj_idx;
-        fde.isec += isec_base;
-        fde.cie += cie_base;
+        fde.obj = obj_idx as u32;
+        fde.isec += isec_base as u32;
+        fde.cie += cie_base as u32;
         if let Some((lsda, _)) = &mut fde.lsda {
-            *lsda += isec_base;
+            *lsda += isec_base as u32;
         }
         ctx.fdes.push(fde);
     }
@@ -1149,35 +1149,44 @@ fn parse_compact_unwind<E: Arch>(
 /// A DWARF Common Information Entry from an object's __eh_frame.
 #[derive(Debug)]
 pub struct Cie {
-    pub obj: usize,
+    /// The owning object (u32 index).
+    pub obj: u32,
     pub input_addr: u32,
-    /// Contents with subtraction pairs already applied.
-    pub data: Vec<u8>,
+    /// The CIE bytes: a slice of the object's __eh_frame (with its
+    /// subtraction pairs pre-applied), not a per-record copy - mold-rust's
+    /// CieRecord borrows its contents the same way.
+    pub data: &'static [u8],
     pub personality: Option<SymbolId>,
-    /// Offset of the personality cell within this CIE.
     pub personality_offset: u32,
-    /// Size of the LSDA pointer declared by the augmentation ('L'), or
-    /// 0 if none.
     pub lsda_size: u8,
     pub output_offset: u32,
     pub is_alive: bool,
 }
 
+const _: () = assert!(std::mem::size_of::<Cie>() == 48);
+
 /// A DWARF Frame Description Entry from an object's __eh_frame.
 #[derive(Debug)]
 pub struct Fde {
-    pub obj: usize,
+    /// The owning object (u32 index).
+    pub obj: u32,
     pub input_addr: u32,
-    pub data: Vec<u8>,
-    /// Index into `ctx.cies`.
-    pub cie: usize,
-    /// The function the FDE describes.
-    pub isec: usize,
+    /// The FDE bytes: a slice of the object's processed __eh_frame.
+    pub data: &'static [u8],
+    /// Index of the CIE this FDE points at (ctx.cies).
+    pub cie: u32,
+    /// The subsection holding the function.
+    pub isec: u32,
     pub func_offset: u32,
     pub code_len: u32,
-    pub lsda: Option<(usize, u32)>,
+    /// The language-specific data area: a subsection and an offset.
+    pub lsda: Option<(u32, u32)>,
     pub output_offset: u32,
 }
+
+// Every index a u32 and the record bytes borrowed, as in mold-rust
+// (whose FdeRecord derives even more and is 16 bytes).
+const _: () = assert!(std::mem::size_of::<Fde>() == 56);
 
 pub fn read_uleb_at(data: &[u8], pos: &mut usize) -> u64 {
     let mut val = 0;
@@ -1267,19 +1276,23 @@ fn parse_eh_frame<E: Arch>(
 
     // Split the section into records: a zero ID marks a CIE, anything
     // else is an FDE pointing back at its CIE.
-    let mut fdes: Vec<(u32, Vec<u8>)> = Vec::new();
+    let mut fdes: Vec<(u32, &'static [u8])> = Vec::new();
     let mut pos = 0;
+    // The records borrow from this processed copy of the section, leaked
+    // once per object (like its section headers): the CIE/FDE bytes then
+    // need no per-record copy, and they carry the pre-applied pairs.
+    let contents: &'static [u8] = Vec::leak(contents);
     while pos < contents.len() {
         let len = u32::from_le_bytes(contents[pos..pos + 4].try_into().unwrap()) as usize;
         if len == 0xffff_ffff {
             fatal!(diag, "{file_name}: __eh_frame: extended length is not supported");
         }
-        let rec = contents[pos..pos + 4 + len].to_vec();
+        let rec: &'static [u8] = &contents[pos..pos + 4 + len];
         let id = u32::from_le_bytes(rec[4..8].try_into().unwrap());
         let input_addr = hdr.addr as u32 + pos as u32;
         if id == 0 {
             out_cies.push(Cie {
-                obj: usize::MAX,
+                obj: u32::MAX,
                 input_addr,
                 data: rec,
                 personality: None,
@@ -1402,14 +1415,14 @@ fn parse_eh_frame<E: Arch>(
 
         let fde_idx = out_fdes.len();
         out_fdes.push(Fde {
-            obj: usize::MAX,
+            obj: u32::MAX,
             input_addr,
             data: rec,
-            cie,
-            isec,
+            cie: cie as u32,
+            isec: isec as u32,
             func_offset,
             code_len,
-            lsda: lsda.map(|(i, o)| (i, o)),
+            lsda: lsda.map(|(i, o)| (i as u32, o)),
             output_offset: 0,
         });
 

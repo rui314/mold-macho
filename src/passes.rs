@@ -2155,7 +2155,7 @@ pub fn create_output_sections<E: Arch>(ctx: &mut Context<E>) {
     }
     if !ctx.fdes.is_empty() {
         for fde in &ctx.fdes {
-            ctx.cies[fde.cie].is_alive = true;
+            ctx.cies[fde.cie as usize].is_alive = true;
         }
         let mut off = 0;
         for cie in &mut ctx.cies {
