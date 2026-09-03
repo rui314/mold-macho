@@ -248,8 +248,22 @@ impl<E: Arch> Context<E> {
     /// every subsection's final address the moment its output section
     /// is placed (literal-merge losers borrow their survivor's), so
     /// this is one field read.
+    /// A subsection's output address: its output section's address plus
+    /// its offset there, as mold-rust's isec.addr(ctx) derives it - not
+    /// a cached field, which cost 8 bytes on every subsection. A
+    /// literal-merge loser reports its surviving copy's address (the
+    /// redirect is followed only when one exists, so the common case is
+    /// one branch); an unplaced subsection reports 0.
+    #[inline]
     pub fn isec_addr(&self, id: InputSectionId) -> u64 {
-        self.isecs[id].addr
+        let mut isec = &self.isecs[id];
+        if isec.replacement != crate::input_sections::NO_REPLACEMENT {
+            isec = &self.isecs[self.resolve_isec(id)];
+        }
+        if isec.osec == u32::MAX || isec.output_offset == u32::MAX {
+            return 0;
+        }
+        self.chunks[isec.osec as usize].hdr.addr + isec.output_offset as u64
     }
 
     /// Returns the output address of a symbol.

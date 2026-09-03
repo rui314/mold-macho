@@ -125,12 +125,6 @@ pub struct InputSection {
     /// subsection not yet placed, during thunk layout). An output
     /// section stays well under 4 GiB, so a u32 suffices.
     pub output_offset: u32,
-    /// The final output address. Layout visits one output section at a
-    /// time and assigns its contents global addresses on the spot;
-    /// everything that depends on code or data addresses (the trie,
-    /// LINKEDIT streams) comes later in the file, so nothing is ever
-    /// computed twice.
-    pub addr: u64,
     pub is_alive: bool,
     /// For a literal merged with an identical one, the surviving copy's
     /// subsection index, or `NO_REPLACEMENT`. A u32 sentinel rather than
@@ -146,7 +140,7 @@ pub struct InputSection {
 // InputSection is the highest-count struct in a link (millions on a
 // debug build), so it is kept compact - mold-rust's is 64 bytes; ours
 // carries a few Mach-O-specific fields more.
-const _: () = assert!(std::mem::size_of::<InputSection>() == 72);
+const _: () = assert!(std::mem::size_of::<InputSection>() == 64);
 
 impl InputSection {
     /// This subsection's bytes. Empty for a zero-fill or empty section;

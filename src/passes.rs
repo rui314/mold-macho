@@ -997,7 +997,6 @@ pub fn convert_common_symbols<E: Arch>(ctx: &mut Context<E>) {
             nrels: 0,
             osec: u32::MAX,
             output_offset: 0,
-            addr: 0,
             is_alive: true,
             replacement: crate::input_sections::NO_REPLACEMENT,
             unwind_offset: 0,
@@ -2780,30 +2779,6 @@ pub fn create_output_symtab<E: Arch>(
     data
 }
 
-/// Assigns virtual addresses and file offsets to all segments and chunks.
-/// Gives every subsection of a just-placed output section its final
-/// global address. Layout visits one output section at a time, and
-/// everything that depends on code or data addresses (the trie, the
-/// LINKEDIT streams) comes later in the file, so a single front-to-back
-/// scan computes each address exactly once.
-fn assign_isec_addrs<E: Arch>(ctx: &mut Context<E>, chunk_idx: usize) {
-    let base = ctx.chunks[chunk_idx].hdr.addr;
-    let ChunkKind::Output { isecs: members, .. } = &ctx.chunks[chunk_idx].kind else {
-        return;
-    };
-    // A subsection belongs to exactly one output section, so the
-    // parallel writes are disjoint.
-    struct SlotPtr(*mut crate::input_sections::InputSection);
-    unsafe impl Sync for SlotPtr {}
-    let ptr = SlotPtr(ctx.isecs.as_mut_ptr());
-    let ptr = &ptr;
-    use rayon::prelude::*;
-    members.par_iter().for_each(|&id| unsafe {
-        let isec = &mut *ptr.0.add(id);
-        isec.addr = base + isec.output_offset as u64;
-    });
-}
-
 pub fn set_osec_offsets<E: Arch>(ctx: &mut Context<E>) {
     let page = E::PAGE_SIZE;
     let mut addr = 0;
@@ -2830,20 +2805,7 @@ pub fn set_osec_offsets<E: Arch>(ctx: &mut Context<E>) {
         // Everything the bind stream describes (the GOT, data sections)
         // is laid out by the time we reach __LINKEDIT.
         if ctx.segments[seg_idx].name == "__LINKEDIT" {
-            // Every code and data address is final by now. Literal-merge
-            // losers borrow their surviving copy's address so lookups
-            // from here on never chase redirects.
-            {
-                use rayon::prelude::*;
-                let patches: Vec<(usize, u64)> = (0..ctx.isecs.len())
-                    .into_par_iter()
-                    .filter(|&i| ctx.isecs[i].replacement != crate::input_sections::NO_REPLACEMENT)
-                    .map(|i| (i, ctx.isecs[ctx.resolve_isec(i)].addr))
-                    .collect();
-                for (i, a) in patches {
-                    ctx.isecs[i].addr = a;
-                }
-            }
+            // Every code and data address is final by now.
             // The LINKEDIT tables are independent of one another and
             // every address they read is final (the symbol table needs
             // none at all), so they build as one parallel task group;
@@ -3002,7 +2964,6 @@ pub fn set_osec_offsets<E: Arch>(ctx: &mut Context<E>) {
             chunk.hdr.addr = seg_vmaddr + (cursor - seg_fileoff);
             chunk.hdr.size = size;
             cursor += size;
-            assign_isec_addrs(ctx, idx);
         }
 
         let filesize = cursor - seg_fileoff;
@@ -3019,7 +2980,6 @@ pub fn set_osec_offsets<E: Arch>(ctx: &mut Context<E>) {
             chunk.hdr.addr = vm_end;
             chunk.hdr.fileoff = 0;
             vm_end += chunk.hdr.size;
-            assign_isec_addrs(ctx, idx);
         }
 
         // __LINKEDIT's file contents end exactly at the code signature;
