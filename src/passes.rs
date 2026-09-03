@@ -254,10 +254,11 @@ fn load_pending<E: Arch>(ctx: &mut Context<E>, pending: Vec<PendingObject>) {
     let per_obj: Vec<Vec<(&'static str, u64)>> = staged
         .par_iter()
         .map(|st| {
-            st.sym_names
+            let r = st.global_range();
+            st.sym_names[r.clone()]
                 .iter()
-                .zip(&st.sym_hashes)
-                .zip(st.nlists.iter())
+                .zip(&st.sym_hashes[r.clone()])
+                .zip(st.nlists[r].iter())
                 .filter(|((_, _), nlist)| !nlist.is_stab() && nlist.is_extern())
                 .map(|((&name, &hash), _)| (name, hash))
                 .collect()
@@ -534,7 +535,8 @@ fn claim_locals<E: Arch>(ctx: &mut Context<E>) {
     let ptr = &ptr;
     let isecs = &ctx.isecs;
     ctx.objs.par_iter().enumerate().for_each(|(obj_idx, obj)| {
-        for (i, nlist) in obj.nlists.iter().enumerate() {
+        for i in obj.local_range() {
+            let nlist = &obj.nlists[i];
             if nlist.is_stab() || nlist.is_extern() {
                 continue;
             }
@@ -594,7 +596,8 @@ fn do_resolve<E: Arch>(ctx: &mut Context<E>, only_alive: bool) {
         .par_iter()
         .filter(|obj| !only_alive || obj.is_alive)
         .for_each(|obj| {
-            for (nlist, &sym_id) in obj.nlists.iter().zip(&obj.syms) {
+            let r = obj.global_range();
+            for (nlist, &sym_id) in obj.nlists[r.clone()].iter().zip(&obj.syms[r]) {
                 if !nlist.is_stab() && nlist.is_extern() && nlist.n_type() == N_UNDF {
                     used[sym_id as usize].store(true, Ordering::Relaxed);
                     if nlist.n_desc & N_WEAK_REF != 0 {
@@ -637,7 +640,8 @@ fn do_resolve<E: Arch>(ctx: &mut Context<E>, only_alive: bool) {
         .par_iter()
         .filter(|obj| !only_alive || obj.is_alive)
         .for_each(|obj| {
-            for (nlist, &sym_id) in obj.nlists.iter().zip(&obj.syms) {
+            let r = obj.global_range();
+            for (nlist, &sym_id) in obj.nlists[r.clone()].iter().zip(&obj.syms[r]) {
                 if let Some(rank) = rank_of(obj, nlist) {
                     best[sym_id as usize].fetch_min(rank, Ordering::Relaxed);
                 }
@@ -660,8 +664,8 @@ fn do_resolve<E: Arch>(ctx: &mut Context<E>, only_alive: bool) {
         .enumerate()
         .filter(|(_, obj)| !only_alive || obj.is_alive)
         .for_each(|(obj_idx, obj)| {
-            for (i, (nlist, &sym_id)) in obj.nlists.iter().zip(&obj.syms).enumerate() {
-                let _ = i;
+            let r = obj.global_range();
+            for (nlist, &sym_id) in obj.nlists[r.clone()].iter().zip(&obj.syms[r]) {
                 let Some(rank) = rank_of(obj, nlist) else {
                     continue;
                 };
@@ -729,7 +733,8 @@ fn do_resolve<E: Arch>(ctx: &mut Context<E>, only_alive: bool) {
         .par_iter()
         .filter(|obj| (!only_alive || obj.is_alive) && obj.is_alive)
         .flat_map_iter(|obj| {
-            obj.nlists.iter().zip(&obj.syms).filter_map(|(nlist, &sym_id)| {
+            let r = obj.global_range();
+            obj.nlists[r.clone()].iter().zip(&obj.syms[r]).filter_map(|(nlist, &sym_id)| {
                 if !nlist.is_stab()
                     && nlist.is_extern()
                     && nlist.n_type() == N_UNDF
@@ -1255,7 +1260,8 @@ pub fn auto_hide_weak_defs<E: Arch>(ctx: &mut Context<E>) {
         if !obj.is_alive {
             return;
         }
-        for (nlist, &sym_id) in obj.nlists.iter().zip(&obj.syms) {
+        let r = obj.global_range();
+        for (nlist, &sym_id) in obj.nlists[r.clone()].iter().zip(&obj.syms[r]) {
             if nlist.is_stab()
                 || !nlist.is_extern()
                 || nlist.n_type() != N_SECT
@@ -1318,7 +1324,8 @@ pub fn coalesce_weak_defs<E: Arch>(ctx: &mut Context<E>) {
             if !obj.is_alive {
                 return out;
             }
-            for (nlist, &sym_id) in obj.nlists.iter().zip(&obj.syms) {
+            let r = obj.global_range();
+            for (nlist, &sym_id) in obj.nlists[r.clone()].iter().zip(&obj.syms[r]) {
                 if nlist.is_stab()
                     || !nlist.is_extern()
                     || nlist.n_type() != N_SECT
@@ -1376,7 +1383,8 @@ pub fn check_undefined_symbols<E: Arch>(ctx: &mut Context<E>) {
                 if !obj.is_alive {
                     continue;
                 }
-                for (nlist, &sym_id) in obj.nlists.iter().zip(&obj.syms) {
+                let r = obj.global_range();
+                for (nlist, &sym_id) in obj.nlists[r.clone()].iter().zip(&obj.syms[r]) {
                     if !nlist.is_stab() && nlist.n_type() == N_UNDF && !nlist.is_common() {
                         map.entry(sym_id).or_insert(obj_idx);
                     }
@@ -1424,7 +1432,8 @@ pub fn print_dependencies<E: Arch>(ctx: &Context<E>) {
         if !obj.is_alive {
             continue;
         }
-        for (nlist, &sym_id) in obj.nlists.iter().zip(&obj.syms) {
+        let r = obj.global_range();
+        for (nlist, &sym_id) in obj.nlists[r.clone()].iter().zip(&obj.syms[r]) {
             if nlist.is_stab() || nlist.n_type() != N_UNDF || nlist.is_common() {
                 continue;
             }
@@ -2470,7 +2479,8 @@ pub fn create_output_symtab<E: Arch>(
                 if !obj.is_alive {
                     return out;
                 }
-                for (nlist, &sym_id) in obj.nlists.iter().zip(&obj.syms) {
+                let r = obj.local_range();
+                for (nlist, &sym_id) in obj.nlists[r.clone()].iter().zip(&obj.syms[r]) {
                     let sym = &ctx_ref.symtab[sym_id];
                     if nlist.is_stab() || nlist.is_extern() || !keep_local_symbol(sym.name()) {
                         continue;

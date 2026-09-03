@@ -79,7 +79,8 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
         if !obj.is_alive {
             continue;
         }
-        for (nlist, &sym_id) in obj.nlists.iter().zip(&obj.syms) {
+        let r = obj.local_range();
+        for (nlist, &sym_id) in obj.nlists[r.clone()].iter().zip(&obj.syms[r]) {
             if nlist.is_stab() || nlist.is_extern() {
                 continue;
             }

@@ -42,6 +42,9 @@ pub struct ObjectFile {
     /// placeholder that only claims symbols until LTO compiles it.
     pub lto_module: Option<usize>,
     pub nlists: std::borrow::Cow<'static, [NList]>,
+    /// Index of the first external nlist, if the table is partitioned
+    /// locals-then-externals (see first_global_of).
+    pub first_global: Option<u32>,
     /// The symbol slot for each nlist entry.
     pub syms: Vec<SymbolId>,
     /// LC_DATA_IN_CODE entries: (file offset in the object, length,
@@ -150,6 +153,9 @@ pub struct StagedObject {
     pub relocs: Vec<crate::input_sections::Reloc>,
     pub subsecs: Vec<crate::input_sections::InputSectionId>,
     pub nlists: std::borrow::Cow<'static, [NList]>,
+    /// Index of the first external nlist, if the table is partitioned
+    /// locals-then-externals (see first_global_of).
+    pub first_global: Option<u32>,
     pub sym_names: Vec<&'static str>,
     /// xxh3 of each extern non-stab name (0 otherwise), computed here
     /// so the serial intern path never hashes.
@@ -181,6 +187,56 @@ fn nlists_slice(data: &'static [u8], off: usize, n: usize) -> Option<&'static [N
     Some(unsafe { std::slice::from_raw_parts(data.as_ptr().add(off) as *const NList, n) })
 }
 
+/// The nlist index ranges of an object's local (with stab) and external
+/// (defined and undefined) symbols. With a partitioned table these are
+/// the two halves; without one, both are the whole table and callers'
+/// per-entry filters still decide.
+macro_rules! symbol_ranges {
+    () => {
+        #[inline]
+        pub fn local_range(&self) -> std::ops::Range<usize> {
+            0..self.first_global.map_or(self.nlists.len(), |g| g as usize)
+        }
+        #[inline]
+        pub fn global_range(&self) -> std::ops::Range<usize> {
+            self.first_global.map_or(0, |g| g as usize)..self.nlists.len()
+        }
+    };
+}
+impl ObjectFile {
+    symbol_ranges!();
+}
+impl StagedObject {
+    symbol_ranges!();
+}
+
+/// Where the object's external symbols start in its nlist array, or
+/// None if the table is not partitioned locals-then-externals.
+///
+/// An object's LC_DYSYMTAB names the local, external-defined and
+/// undefined runs; when they tile the table in that order (as ld64 and
+/// clang always lay it out) the split is free, and the passes that
+/// only want externals - resolution, weak-def coalescing, the intern
+/// batch - or only locals - the anonymous symbol slots, the local
+/// symtab - walk their half instead of testing every entry: mold-rust's
+/// first_global. Without a usable LC_DYSYMTAB the table is scanned once
+/// and the split is used only if it really is partitioned.
+fn first_global_of(nlists: &[NList], dysym: Option<&DysymtabCommand>) -> Option<u32> {
+    let n = nlists.len() as u32;
+    if let Some(d) = dysym {
+        if d.ilocalsym == 0
+            && d.iextdefsym == d.nlocalsym
+            && d.iundefsym == d.iextdefsym + d.nextdefsym
+            && d.iundefsym + d.nundefsym == n
+        {
+            return Some(d.iextdefsym);
+        }
+    }
+    let is_local = |nl: &NList| nl.is_stab() || !nl.is_extern();
+    let first = nlists.iter().position(|nl| !is_local(nl)).unwrap_or(nlists.len());
+    nlists[first..].iter().all(|nl| !is_local(nl)).then_some(first as u32)
+}
+
 pub fn stage_object<E: Arch>(
     diag: &crate::error::Diagnostics,
     mf: &'static MappedFile,
@@ -204,6 +260,7 @@ pub fn stage_object<E: Arch>(
     let mut isecs: Vec<InputSection> = Vec::new();
     let mut sect_hdrs = Vec::new();
     let mut symtab_cmd = None;
+    let mut dysymtab_cmd: Option<DysymtabCommand> = None;
     let mut linker_options = Vec::new();
     let mut dice = Vec::new();
     let mut loh = Vec::new();
@@ -222,6 +279,7 @@ pub fn stage_object<E: Arch>(
                 }
             }
             LC_SYMTAB => symtab_cmd = Some(SymtabCommand::read_from(&data[off..])),
+            LC_DYSYMTAB => dysymtab_cmd = Some(DysymtabCommand::read_from(&data[off..])),
             LC_LINKER_OPTION => {
                 // Auto-link requests: the object names libraries it
                 // needs, as NUL-terminated strings after a count.
@@ -290,6 +348,7 @@ pub fn stage_object<E: Arch>(
         };
         strtab = validate_strtab(&data[cmd.stroff as usize..(cmd.stroff + cmd.strsize) as usize]);
     }
+    let first_global = first_global_of(&nlists, dysymtab_cmd.as_ref());
 
     // Split each section into subsections at its symbols, the Mach-O
     // linking granularity, so that unreferenced pieces can later be
@@ -514,6 +573,7 @@ pub fn stage_object<E: Arch>(
         relocs: obj_relocs,
         subsecs,
         nlists,
+        first_global,
         sym_names,
         sym_hashes,
         unwind,
@@ -571,10 +631,10 @@ pub fn integrate_objects<E: Arch>(
     let n_locals_all: Vec<usize> = staged
         .par_iter()
         .map(|st| {
-            st.nlists
-                .iter()
-                .filter(|n| n.is_stab() || !n.is_extern())
-                .count()
+            st.first_global.map_or_else(
+                || st.nlists.iter().filter(|n| n.is_stab() || !n.is_extern()).count(),
+                |g| g as usize,
+            )
         })
         .collect();
     let mut bases = Vec::with_capacity(staged.len());
@@ -693,7 +753,8 @@ pub fn integrate_objects<E: Arch>(
             .zip(&bases)
             .for_each(|(st, base)| {
                 let mut slot = base.locals;
-                for (nlist, name) in st.nlists.iter().zip(&st.sym_names) {
+                let r = st.local_range();
+                for (nlist, name) in st.nlists[r.clone()].iter().zip(&st.sym_names[r]) {
                     if nlist.is_stab() || !nlist.is_extern() {
                         // SAFETY: [base.locals, base.locals+n) ranges
                         // are disjoint across objects and lie within
@@ -762,6 +823,7 @@ pub fn integrate_objects<E: Arch>(
             objc_image_info: st.objc_image_info,
             has_debug_info: st.has_debug_info,
             nlists: st.nlists,
+            first_global: st.first_global,
             syms,
             lto_module: None,
             dice: st.dice,
@@ -854,6 +916,7 @@ pub fn integrate_object_with<E: Arch>(
         objc_image_info: staged.objc_image_info,
         has_debug_info: staged.has_debug_info,
         nlists: staged.nlists,
+        first_global: staged.first_global,
         syms,
         lto_module: None,
         dice: staged.dice,
@@ -926,6 +989,7 @@ pub fn parse_bitcode<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile, ali
         objc_image_info: None,
         has_debug_info: false,
         nlists: std::borrow::Cow::Owned(nlists),
+        first_global: None,
         syms,
         lto_module: Some(module),
         dice: Vec::new(),
