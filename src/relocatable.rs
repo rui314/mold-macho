@@ -244,6 +244,31 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
     }
     let mut extras: Vec<ExtraSection> = Vec::new();
 
+    // The merged __objc_imageinfo (create_output_sections folded the
+    // inputs' records into ctx.objc_image_info_flags). The record is
+    // what makes the Objective-C runtime look at an image at all:
+    // without it, dyld never hands the image to the runtime, so no
+    // class or category it defines is registered (a class referenced
+    // from another image then dies with "Attempt to use unknown
+    // class", and categories on framework classes never attach).
+    // A prelinked object lacking it silently poisons the image that
+    // links it. ld64 writes it into __DATA in a -r output.
+    if ctx.objs.iter().any(|o| o.is_alive && o.objc_image_info.is_some()) {
+        let mut data = vec![0u8; 8];
+        data[4..8].copy_from_slice(&ctx.objc_image_info_flags.to_le_bytes());
+        extras.push(ExtraSection {
+            segname: "__DATA",
+            sectname: "__objc_imageinfo",
+            flags: 0,
+            data,
+            relocs: Vec::new(),
+            patches: Vec::new(),
+            addr: 0,
+            fileoff: 0,
+            reloff: 0,
+        });
+    }
+
     // Re-synthesize __LD,__compact_unwind so unwind info survives the
     // merge: one 32-byte entry per record, its pointer fields set by
     // UNSIGNED relocations exactly as compilers emit them. Records
