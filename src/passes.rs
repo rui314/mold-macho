@@ -603,6 +603,23 @@ fn do_resolve<E: Arch>(ctx: &mut Context<E>, only_alive: bool) {
     use rayon::prelude::*;
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+    // Symbols the command line names (-e, -u) exist even when no
+    // object mentions them, so that a dylib export can claim them: an
+    // app extension's entry point, _NSExtensionMain, lives in
+    // Foundation and nothing in the extension references it.
+    let mut named: Vec<String> = ctx.args.forced_undefined.clone();
+    if ctx.args.output_type == MH_EXECUTE {
+        named.push(ctx.args.entry.clone());
+    }
+    // -alias bases too: Xcode aliases an app extension's debug dylib
+    // entry point to Foundation's _NSExtensionMain.
+    named.extend(ctx.args.aliases.iter().map(|(existing, _)| existing.clone()));
+    for name in named {
+        if ctx.symtab.get(&name).is_none() {
+            ctx.symtab.intern(String::leak(name));
+        }
+    }
+
     let n = ctx.symtab.syms.len();
 
     // Which symbols the files considered this round actually reference.
@@ -631,6 +648,11 @@ fn do_resolve<E: Arch>(ctx: &mut Context<E>, only_alive: bool) {
     }
     if let Some(id) = ctx.symtab.get(&ctx.args.entry) {
         used[id as usize].store(true, Ordering::Relaxed);
+    }
+    for (existing, _) in &ctx.args.aliases {
+        if let Some(id) = ctx.symtab.get(existing) {
+            used[id as usize].store(true, Ordering::Relaxed);
+        }
     }
 
     // The rank of a definition: (class << 32) | priority, lower is
@@ -1761,6 +1783,22 @@ pub fn add_synthetic_symbols<E: Arch>(ctx: &mut Context<E>) {
             continue;
         }
         let dst = ctx.symtab.intern(String::leak(new.clone()));
+        if ctx.symtab[src].is_imported() {
+            // An alias of a dylib symbol is an indirect symbol
+            // (N_INDR) whose export trie entry re-exports the dylib's
+            // symbol under the new name; nothing here has an address.
+            // ld64 does this for Xcode's
+            // `-alias _NSExtensionMain ___debug_main_executable_dylib_entry_point`.
+            if !ctx.symtab[dst].is_defined() {
+                let sym = &mut ctx.symtab[dst];
+                sym.set_origin(Origin::Synthetic);
+                sym.set_isec(None);
+                sym.value = 0;
+                sym.set_is_extern(true);
+                ctx.indirect_aliases.push((dst, src));
+            }
+            continue;
+        }
         if !ctx.symtab[dst].is_defined() {
             let (origin, isec, value) = {
                 let s = &ctx.symtab[src];
@@ -2875,8 +2913,29 @@ pub fn create_output_symtab<E: Arch>(
             }
         }
     }
+
     for (i, &id) in undefs.iter().enumerate() {
         data.output_sym_indices[id] = data.nlocal + data.nextdef + i as u32;
+    }
+
+    // An alias of an imported symbol is an N_INDR entry whose n_value
+    // is the string-table offset of the name it stands for; that
+    // name is in the table already as the import's own entry. The
+    // slot is detached from the symbol so copy_symtab leaves n_value
+    // alone.
+    for &(alias, target) in &ctx.indirect_aliases {
+        let a = data.output_sym_indices[alias as usize];
+        let t = data.output_sym_indices[target as usize];
+        if a == u32::MAX || t == u32::MAX {
+            continue;
+        }
+        let strx = data.entries[t as usize].0.n_strx;
+        let ent = &mut data.entries[a as usize];
+        ent.0.n_type = N_INDR | N_EXT;
+        ent.0.n_sect = 0;
+        ent.0.n_desc = 0;
+        ent.0.n_value = strx as u64;
+        ent.1 = None;
     }
 
     if std::env::var_os("MOLD_TIMING").is_some() {
@@ -3838,8 +3897,27 @@ pub fn resolve_entry<E: Arch>(ctx: &mut Context<E>) {
         return;
     }
     match ctx.symtab.get(&ctx.args.entry) {
+        // An entry point in a dylib (an app extension's
+        // _NSExtensionMain): LC_MAIN must point into __TEXT, so it
+        // names the symbol's stub, as ld64 does.
+        Some(id) if ctx.symtab[id].is_imported() => ctx.entry_addr = ctx.sym_stub_addr(id),
         Some(id) if ctx.symtab[id].is_defined() => ctx.entry_addr = ctx.sym_addr(id),
         _ => error!(ctx, "undefined symbol for entry point: {}", ctx.args.entry),
+    }
+}
+
+/// Gives an entry point that resolved to a dylib export the stub that
+/// LC_MAIN will name; runs after scan_relocations, with the stubs of
+/// the branch targets.
+pub fn add_entry_stub<E: Arch>(ctx: &mut Context<E>) {
+    if ctx.args.output_type != MH_EXECUTE {
+        return;
+    }
+    if let Some(id) = ctx.symtab.get(&ctx.args.entry) {
+        if ctx.symtab[id].is_imported() {
+            add_stub(ctx, id);
+            add_got(ctx, id);
+        }
     }
 }
 

@@ -189,6 +189,7 @@ pub fn link<E: Arch>(cmdline: &[String], diag: &Diagnostics) -> Result<i32, Stri
             eprintln!("    scan_relocations {:?}", tt.elapsed());
         }
     }
+    passes::add_entry_stub(&mut ctx);
     passes::scan_unwind_personalities(&mut ctx);
     passes::scan_objc_stubs(&mut ctx);
 
