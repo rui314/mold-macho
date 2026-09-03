@@ -1715,6 +1715,15 @@ pub fn parse_dylib_binary<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile
         if !visited.insert(name.clone()) {
             continue;
         }
+        // A library already in the link, matched by install name
+        // (libXCTestSwiftSupport re-exports @rpath/XCTest.framework/...,
+        // which its own rpaths cannot reach but -framework XCTest has
+        // loaded): its exports count, no file search needed.
+        if let Some(loaded) = ctx.dylibs.iter().find(|d| d.install_name == name) {
+            exports.extend(loaded.exports.iter().copied());
+            tlv_exports.extend(loaded.tlv_exports.iter().copied());
+            continue;
+        }
         let Some(dep) = resolve_dylib_ref(ctx, &name, &loader_dir, &loader_rpaths) else {
             crate::warn!(ctx, "{}: reexported library not found: {}", mf.name, name);
             continue;
@@ -2059,6 +2068,11 @@ pub fn find_reexport_file<E: Arch>(
         candidates.push(base);
         for path in candidates {
             if let Some(mf) = MappedFile::open(&ctx.diag, &path) {
+                // A universal binary (Xcode's XCTestCore, re-exported
+                // by XCTest): the target's slice.
+                if crate::filetype::get_file_type(mf) == crate::filetype::FileType::Fat {
+                    return Some(get_fat_slice(ctx, mf));
+                }
                 return Some(mf);
             }
         }
@@ -2147,6 +2161,11 @@ pub fn parse_dylib<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile) -> us
     let mut visited = std::collections::HashSet::new();
     while let Some((name, loader_dir)) = queue.pop() {
         if !visited.insert(name.clone()) {
+            continue;
+        }
+        if let Some(loaded) = ctx.dylibs.iter().find(|d| d.install_name == name) {
+            exports.extend(loaded.exports.iter().copied());
+            tlv_exports.extend(loaded.tlv_exports.iter().copied());
             continue;
         }
         let Some(dep) = resolve_dylib_ref(ctx, &name, &loader_dir, &[]) else {
