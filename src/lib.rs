@@ -6,6 +6,7 @@ pub mod cmdline;
 pub mod context;
 pub mod dead_strip;
 pub mod driver;
+pub mod dwarf;
 pub mod error;
 pub mod filetype;
 pub mod icf;

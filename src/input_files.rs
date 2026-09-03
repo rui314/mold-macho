@@ -130,16 +130,15 @@ pub struct DylibFile {
 }
 
 /// Returns true for sections that don't become part of the output image.
-fn is_discarded_section(hdr: &MachSection, keep_debug: bool) -> bool {
+fn is_discarded_section(hdr: &MachSection) -> bool {
     // Debug sections, including __LD,__compact_unwind, are consumed by
     // other tools or, later, by the linker itself; they are never
-    // copied into a final image. A relocatable (-r) output is another
-    // object, though: its DWARF must ride along, or the merged object
-    // becomes undebuggable - the final link's stabs will name it as
-    // the place to find debug info.
-    if keep_debug {
-        return hdr.segname() == "__LD";
-    }
+    // copied into an output. Not into a -r output either: ld64 does
+    // not merge DWARF (the section-relative offsets in it - abbrev,
+    // line table, ranges - carry no relocations and would all have to
+    // be rebased), it writes debug-note stabs naming the input objects
+    // as the places debuggers read DWARF from, and a later link
+    // carries those notes through.
     hdr.flags & S_ATTR_DEBUG != 0 || hdr.segname() == "__DWARF" || hdr.segname() == "__LD"
 }
 
@@ -247,7 +246,6 @@ pub fn stage_object<E: Arch>(
     alive: bool,
     hidden: bool,
     priority: u32,
-    keep_debug: bool,
 ) -> StagedObject {
     let data = mf.data;
     let hdr = MachHeader::read_from(data);
@@ -394,7 +392,7 @@ pub fn stage_object<E: Arch>(
         // __eh_frame is re-synthesized from parsed CIE/FDE records, and
         // __objc_imageinfo sections are merged into one synthesized
         // record; neither is copied through.
-        if is_discarded_section(sect, keep_debug)
+        if is_discarded_section(sect)
             || (sect.segname() == "__TEXT" && sect.sectname() == "__eh_frame")
             || sect.sectname() == "__objc_imageinfo"
         {
@@ -948,7 +946,7 @@ pub fn integrate_object_with<E: Arch>(
 pub fn parse_object<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile, alive: bool) -> usize {
     let priority = ctx.next_priority();
     let diag = ctx.diag.clone();
-    let staged = stage_object::<E>(&diag, mf, alive, false, priority, ctx.args.relocatable);
+    let staged = stage_object::<E>(&diag, mf, alive, false, priority);
     integrate_object(ctx, staged)
 }
 

@@ -114,6 +114,12 @@ pub const N_FUN: u8 = 0x24;
 pub const N_STSYM: u8 = 0x26;
 pub const N_SO: u8 = 0x64;
 pub const N_OSO: u8 = 0x66;
+pub const N_LCSYM: u8 = 0x28;
+pub const N_BNSYM: u8 = 0x2e;
+pub const N_SLINE: u8 = 0x44;
+pub const N_ENSYM: u8 = 0x4e;
+pub const N_ECOMM: u8 = 0xe4;
+pub const N_ECOML: u8 = 0xe8;
 
 // Symbol descriptions (n_desc field of nlist)
 pub const N_WEAK_REF: u16 = 0x0040;

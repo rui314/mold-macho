@@ -14,15 +14,24 @@ EOF
 $CC -g -c $t/a.c -o $t/a.o
 $CC -g -c $t/b.c -o $t/b.o
 
-# The merged object must carry both objects' DWARF, marked debug.
+# Like ld64, a -r link does not merge DWARF (its section-relative
+# offsets carry no relocations); the merged object gets debug-note
+# stabs naming the input objects, and a final link carries those notes
+# through, so the executable's N_OSO entries name a.o and b.o.
 $mold -r -arch $ARCH -platform_version macos 15.0 15.0 -o $t/merged.o $t/a.o $t/b.o
-dwarfdump --debug-info $t/merged.o > $t/dwarf
-[ "$(grep -c DW_TAG_compile_unit $t/dwarf)" = 2 ]
+otool -l $t/merged.o > $t/lc
+! grep -q '__debug_info' $t/lc
+nm -pa $t/merged.o > $t/stabs
+grep -q 'OSO.*/a.o' $t/stabs
+grep -q 'OSO.*/b.o' $t/stabs
+grep -q 'FUN _compute' $t/stabs
 
-# A final link's OSO stab names the merged object as the debug source.
 $CC --ld-path=$mold -g -o $t/exe $t/merged.o
 $t/exe | grep -q '^42$'
-nm -pa $t/exe | grep -q 'OSO.*merged.o'
+nm -pa $t/exe > $t/stabs2
+grep -q 'OSO.*/a.o' $t/stabs2
+grep -q 'OSO.*/b.o' $t/stabs2
+! grep -q 'OSO.*merged.o' $t/stabs2
 
 # Apple's linker accepts the merged object too.
 $CC -g -o $t/exe2 $t/merged.o

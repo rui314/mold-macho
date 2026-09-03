@@ -238,7 +238,6 @@ fn collect_file<E: Arch>(
 fn load_pending<E: Arch>(ctx: &mut Context<E>, pending: Vec<PendingObject>) {
     use rayon::prelude::*;
     let diag = ctx.diag.clone();
-    let keep_debug = ctx.args.relocatable;
     let staged: Vec<input_files::StagedObject> = t!("stage", pending
         .par_iter()
         .map(|p| {
@@ -248,7 +247,6 @@ fn load_pending<E: Arch>(ctx: &mut Context<E>, pending: Vec<PendingObject>) {
                 p.alive,
                 p.hidden,
                 p.priority,
-                keep_debug,
             )
         })
         .collect());
@@ -2400,6 +2398,233 @@ fn keep_local_symbol(name: &str) -> bool {
     !name.is_empty() && !name.starts_with('l') && !name.starts_with('L')
 }
 
+/// Plans one object's debug-note stabs, in output symbol-table form
+/// (name, entry, and the symbol whose address the entry takes, if
+/// any). An object with DWARF gets the run ld64 writes: N_SO, N_OSO
+/// naming the object, N_FUN pairs and N_GSYM/N_STSYM for its
+/// symbols, and a closing N_SO. An object that already carries such a
+/// run (a -r output: ld64 does not merge DWARF, it writes these
+/// notes) has it copied through, the address-bearing entries rebased
+/// to their subsections' output addresses and those of dead
+/// subsections dropped. Shared by the final link and -r.
+pub fn plan_object_stabs<E: Arch>(
+    ctx: &Context<E>,
+    obj_idx: usize,
+    ordinals: &[u8],
+    cwd: &str,
+) -> Vec<(&'static str, NList, Option<crate::symbol::SymbolId>)> {
+    let obj = &ctx.objs[obj_idx];
+    let mut out: Vec<(&'static str, NList, Option<crate::symbol::SymbolId>)> = Vec::new();
+    if !obj.is_alive {
+        return out;
+    }
+
+    if obj.nlists.iter().any(|n| n.n_type == N_OSO) {
+        // Entries whose n_value is an address in the object (n_sect
+        // says which section); an N_FUN with an empty name holds the
+        // function's size instead.
+        let addressed = |n: &NList| {
+            n.n_sect != 0
+                && matches!(
+                    n.n_type,
+                    N_FUN | N_BNSYM | N_ENSYM | N_GSYM | N_STSYM | N_LCSYM | N_SLINE | N_ECOMM
+                        | N_ECOML
+                )
+        };
+        let mut skip_size = false;
+        for (nlist, &sym_id) in obj.nlists.iter().zip(&obj.syms) {
+            if !nlist.is_stab() {
+                continue;
+            }
+            let mut ent = *nlist;
+            let name = ctx.symtab[sym_id].name();
+            // The string table starts " \0": offset 1 is the empty
+            // name (a closing N_SO, an N_FUN size entry); offset 0
+            // would read as the name " ", and lldb then never sees
+            // the unit's end.
+            ent.n_strx = if name.is_empty() { 1 } else { 0 };
+            if addressed(nlist) {
+                let placed = crate::input_files::find_subsec(&ctx.isecs, &obj.subsecs, nlist.n_value)
+                    .map(|(isec, off)| (ctx.resolve_isec(isec), off))
+                    .filter(|&(isec, _)| ctx.isecs[isec].is_alive());
+                let Some((isec, off)) = placed else {
+                    // Dead code: drop the note, and a function's size
+                    // entry with it.
+                    skip_size = nlist.n_type == N_FUN;
+                    continue;
+                };
+                ent.n_value = ctx.isec_addr(isec) + off;
+                ent.n_sect = ordinals[ctx.isecs[isec].osec as usize];
+            } else if nlist.n_type == N_FUN && skip_size {
+                skip_size = false;
+                continue;
+            }
+            out.push((name, ent, None));
+        }
+        return out;
+    }
+
+    if !obj.has_debug_info {
+        return out;
+    }
+
+    // ld64 opens each object's run with two N_SO entries, the
+    // compilation directory (with a trailing slash) and the source
+    // file, both from the DWARF compile unit; its own stab reader
+    // takes an N_SO with an empty name as the closing one, so a -r
+    // output without them crashed it. N_OSO then points at the
+    // object (or "archive(member)"), as an absolute path.
+    let (dir, file) = match crate::dwarf::compile_unit_name(obj.mf.data, obj.sect_hdrs) {
+        Some((dir, file)) => (dir, file),
+        None => (String::new(), obj.mf.name.rsplit('/').next().unwrap_or("").to_string()),
+    };
+    let dir = if dir.is_empty() {
+        format!("{cwd}/")
+    } else if dir.ends_with('/') {
+        dir
+    } else {
+        format!("{dir}/")
+    };
+    for name in [dir, file] {
+        out.push((
+            String::leak(name) as &'static str,
+            NList {
+                n_strx: 0,
+                n_type: N_SO,
+                ..Default::default()
+            },
+            None,
+        ));
+    }
+    let mut oso_name = match obj.mf.parent {
+        Some(parent) if parent.name.starts_with('/') => obj.mf.name.clone(),
+        Some(_) | None if obj.mf.name.starts_with('/') => obj.mf.name.clone(),
+        _ => format!("{cwd}/{}", obj.mf.name),
+    };
+    // -oso_prefix strips a leading path from every N_OSO, so
+    // debug builds relocated to another machine (or built in a
+    // sandbox) can still find their objects relative to a
+    // debugger's source map. "." means the current directory.
+    if let Some(prefix) = &ctx.args.oso_prefix {
+        let prefix: &str =
+            if prefix == "." { &format!("{cwd}/") } else { prefix };
+        if let Some(rest) = oso_name.strip_prefix(prefix) {
+            oso_name = rest.to_string();
+        }
+    }
+    // n_value is the object's modification time, which dsymutil and
+    // lldb compare against the file they find (0 disables the check).
+    let mtime = std::fs::metadata(&obj.mf.name)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |d| d.as_secs());
+    out.push((
+        String::leak(std::mem::take(&mut oso_name)),
+        NList {
+            n_strx: 0,
+            n_type: N_OSO,
+            n_sect: E::CPUSUBTYPE as u8,
+            n_desc: 1,
+            n_value: mtime,
+        },
+        None,
+    ));
+
+    for (nlist, &sym_id) in obj.nlists.iter().zip(&obj.syms) {
+        let sym = &ctx.symtab[sym_id];
+        if nlist.is_stab()
+            || !matches!(sym.origin(), Origin::Obj(o) if o as usize == obj_idx)
+            || (!nlist.is_extern() && !keep_local_symbol(sym.name()))
+        {
+            continue;
+        }
+        let Some(isec) = sym.isec().map(|i| i as usize) else { continue };
+        let isec_id = ctx.resolve_isec(isec as usize);
+        let isec = &ctx.isecs[isec_id];
+        if !isec.is_alive() {
+            continue;
+        }
+
+        let stab_name = sym.name();
+        let is_text = ctx.hdr_of(isec).segname() == "__TEXT"
+            && ctx.hdr_of(isec).flags
+                & (S_ATTR_PURE_INSTRUCTIONS | S_ATTR_SOME_INSTRUCTIONS)
+                != 0;
+        if is_text {
+            // ld64's shape: N_BNSYM, the N_FUN pair (the function's
+            // address, then its size), N_ENSYM. Its stab reader takes
+            // an N_FUN without the bracketing symbols badly (a crash
+            // on a -r output that had only the pair).
+            let sect = ordinals[isec.osec as usize];
+            out.push((
+                "",
+                NList {
+                    n_strx: 1,
+                    n_type: N_BNSYM,
+                    n_sect: sect,
+                    ..Default::default()
+                },
+                Some(sym_id),
+            ));
+            out.push((
+                stab_name,
+                NList {
+                    n_strx: 0,
+                    n_type: N_FUN,
+                    n_sect: sect,
+                    ..Default::default()
+                },
+                Some(sym_id),
+            ));
+            out.push((
+                "",
+                NList {
+                    n_strx: 1,
+                    n_type: N_FUN,
+                    n_value: isec.size as u64,
+                    ..Default::default()
+                },
+                None,
+            ));
+            out.push((
+                "",
+                NList {
+                    n_strx: 1,
+                    n_type: N_ENSYM,
+                    n_sect: sect,
+                    ..Default::default()
+                },
+                Some(sym_id),
+            ));
+        } else {
+            out.push((
+                stab_name,
+                NList {
+                    n_strx: 0,
+                    n_type: if nlist.is_extern() { N_GSYM } else { N_STSYM },
+                    n_sect: ordinals[isec.osec as usize],
+                    ..Default::default()
+                },
+                Some(sym_id),
+            ));
+        }
+    }
+
+    // An N_SO with an empty name closes the object's stabs.
+    out.push((
+        "",
+        NList {
+            n_strx: 1,
+            n_type: N_SO,
+            n_sect: 1,
+            ..Default::default()
+        },
+        None,
+    ));
+    out
+}
+
 /// Builds the output symbol table contents: local symbols in input order,
 /// then defined globals and undefined symbols, each sorted by name.
 /// Symbol values are filled in when the table is copied out, after
@@ -2457,122 +2682,7 @@ pub fn create_output_symtab<E: Arch>(
             .objs
             .par_iter()
             .enumerate()
-            .map(|(obj_idx, obj)| {
-                let mut out: Vec<(&'static str, NList, Option<crate::symbol::SymbolId>)> =
-                    Vec::new();
-                if !obj.has_debug_info || !obj.is_alive {
-                    return out;
-                }
-
-                // The source-file N_SO's name is unused by debuggers; "-"
-                // stands in. N_OSO points at the object (or
-                // "archive(member)"), as an absolute path.
-                out.push((
-                    "",
-                    NList {
-                        n_strx: 2,
-                        n_type: N_SO,
-                        ..Default::default()
-                    },
-                    None,
-                ));
-                let mut oso_name = match obj.mf.parent {
-                    Some(parent) if parent.name.starts_with('/') => obj.mf.name.clone(),
-                    Some(_) | None if obj.mf.name.starts_with('/') => obj.mf.name.clone(),
-                    _ => format!("{cwd}/{}", obj.mf.name),
-                };
-                // -oso_prefix strips a leading path from every N_OSO, so
-                // debug builds relocated to another machine (or built in a
-                // sandbox) can still find their objects relative to a
-                // debugger's source map. "." means the current directory.
-                if let Some(prefix) = &ctx.args.oso_prefix {
-                    let prefix: &str =
-                        if prefix == "." { &format!("{cwd}/") } else { prefix };
-                    if let Some(rest) = oso_name.strip_prefix(prefix) {
-                        oso_name = rest.to_string();
-                    }
-                }
-                out.push((
-                    String::leak(std::mem::take(&mut oso_name)),
-                    NList {
-                        n_strx: 0,
-                        n_type: N_OSO,
-                        n_sect: E::CPUSUBTYPE as u8,
-                        n_desc: 1,
-                        n_value: 0,
-                    },
-                    None,
-                ));
-
-                for (nlist, &sym_id) in obj.nlists.iter().zip(&obj.syms) {
-                    let sym = &ctx.symtab[sym_id];
-                    if nlist.is_stab()
-                        || !matches!(sym.origin(), Origin::Obj(o) if o as usize == obj_idx)
-                        || (!nlist.is_extern() && !keep_local_symbol(sym.name()))
-                    {
-                        continue;
-                    }
-                    let Some(isec) = sym.isec().map(|i| i as usize) else { continue };
-                    let isec_id = ctx.resolve_isec(isec as usize);
-                    let isec = &ctx.isecs[isec_id];
-                    if !isec.is_alive() {
-                        continue;
-                    }
-
-                    let stab_name = sym.name();
-                    let is_text = ctx.hdr_of(isec).segname() == "__TEXT"
-                        && ctx.hdr_of(isec).flags
-                            & (S_ATTR_PURE_INSTRUCTIONS | S_ATTR_SOME_INSTRUCTIONS)
-                            != 0;
-                    if is_text {
-                        // A pair: the function's address, then its size.
-                        out.push((
-                            stab_name,
-                            NList {
-                                n_strx: 0,
-                                n_type: N_FUN,
-                                n_sect: ordinals[isec.osec as usize],
-                                ..Default::default()
-                            },
-                            Some(sym_id),
-                        ));
-                        out.push((
-                            "",
-                            NList {
-                                n_strx: 1,
-                                n_type: N_FUN,
-                                n_value: isec.size as u64,
-                                ..Default::default()
-                            },
-                            None,
-                        ));
-                    } else {
-                        out.push((
-                            stab_name,
-                            NList {
-                                n_strx: 0,
-                                n_type: if nlist.is_extern() { N_GSYM } else { N_STSYM },
-                                n_sect: ordinals[isec.osec as usize],
-                                ..Default::default()
-                            },
-                            Some(sym_id),
-                        ));
-                    }
-                }
-
-                // An N_SO with an empty name closes the object's stabs.
-                out.push((
-                    "",
-                    NList {
-                        n_strx: 1,
-                        n_type: N_SO,
-                        n_sect: 1,
-                        ..Default::default()
-                    },
-                    None,
-                ));
-                out
-            })
+            .map(|(obj_idx, _)| plan_object_stabs(ctx, obj_idx, &ordinals, cwd))
             .collect();
         // Write the planned stabs into prefix-summed ranges in
         // parallel, instead of appending object by object - mold's

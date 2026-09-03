@@ -74,6 +74,25 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
         }
     };
 
+    // Debug-note stabs first, as in a final link: ld64 does not merge
+    // the inputs' DWARF into a -r output, it names the objects that
+    // hold it (N_OSO) and where their symbols landed, and a later link
+    // carries the notes through.
+    if !ctx.args.strip_debug {
+        let cwd = std::env::current_dir()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        for obj_idx in 0..ctx.objs.len() {
+            for (name, mut ent, sym) in crate::passes::plan_object_stabs(ctx, obj_idx, &ordinals, &cwd) {
+                if let Some(id) = sym {
+                    ent.n_value = sym_addr(ctx, id);
+                }
+                ent.n_strx = add_string(&mut strtab, name);
+                nlists_out.push(ent);
+            }
+        }
+    }
+
     // Local symbols.
     for obj in &ctx.objs {
         if !obj.is_alive {
