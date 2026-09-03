@@ -33,6 +33,284 @@ pub struct TbdFile {
     pub external_reexports: Vec<&'static str>,
 }
 
+/// A JSON value, as much of JSON as a TBD v5 file uses. Strings borrow
+/// from the file (input files are leaked); one with an escape is
+/// unescaped into a leaked copy.
+enum Json {
+    Null,
+    Bool,
+    Num,
+    Str(&'static str),
+    Arr(Vec<Json>),
+    Obj(Vec<(&'static str, Json)>),
+}
+
+impl Json {
+    fn get(&self, key: &str) -> Option<&Json> {
+        match self {
+            Json::Obj(fields) => fields.iter().find(|(k, _)| *k == key).map(|(_, v)| v),
+            _ => None,
+        }
+    }
+    fn arr(&self) -> &[Json] {
+        match self {
+            Json::Arr(items) => items,
+            _ => &[],
+        }
+    }
+    fn str(&self) -> Option<&'static str> {
+        match self {
+            Json::Str(s) => Some(s),
+            _ => None,
+        }
+    }
+    /// The strings of an array-valued key.
+    fn strs(&self, key: &str) -> impl Iterator<Item = &'static str> + '_ {
+        self.get(key).map(Json::arr).unwrap_or(&[]).iter().filter_map(Json::str)
+    }
+}
+
+struct JsonParser<'a> {
+    diag: &'a Diagnostics,
+    file: &'a str,
+    text: &'static str,
+    pos: usize,
+}
+
+impl JsonParser<'_> {
+    fn fail(&self, what: &str) -> ! {
+        fatal!(self.diag, "{}: malformed .tbd JSON at byte {}: {what}", self.file, self.pos);
+    }
+
+    fn skip_ws(&mut self) {
+        let b = self.text.as_bytes();
+        while self.pos < b.len() && matches!(b[self.pos], b' ' | b'\t' | b'\n' | b'\r') {
+            self.pos += 1;
+        }
+    }
+
+    fn eat(&mut self, c: u8) -> bool {
+        self.skip_ws();
+        if self.text.as_bytes().get(self.pos) == Some(&c) {
+            self.pos += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn value(&mut self) -> Json {
+        self.skip_ws();
+        let b = self.text.as_bytes();
+        match b.get(self.pos) {
+            Some(b'{') => {
+                self.pos += 1;
+                let mut fields = Vec::new();
+                if !self.eat(b'}') {
+                    loop {
+                        self.skip_ws();
+                        let key = self.string();
+                        if !self.eat(b':') {
+                            self.fail("expected ':'");
+                        }
+                        let val = self.value();
+                        fields.push((key, val));
+                        if self.eat(b',') {
+                            continue;
+                        }
+                        if self.eat(b'}') {
+                            break;
+                        }
+                        self.fail("expected ',' or '}'");
+                    }
+                }
+                Json::Obj(fields)
+            }
+            Some(b'[') => {
+                self.pos += 1;
+                let mut items = Vec::new();
+                if !self.eat(b']') {
+                    loop {
+                        items.push(self.value());
+                        if self.eat(b',') {
+                            continue;
+                        }
+                        if self.eat(b']') {
+                            break;
+                        }
+                        self.fail("expected ',' or ']'");
+                    }
+                }
+                Json::Arr(items)
+            }
+            Some(b'"') => Json::Str(self.string()),
+            Some(b't') if self.text[self.pos..].starts_with("true") => {
+                self.pos += 4;
+                Json::Bool
+            }
+            Some(b'f') if self.text[self.pos..].starts_with("false") => {
+                self.pos += 5;
+                Json::Bool
+            }
+            Some(b'n') if self.text[self.pos..].starts_with("null") => {
+                self.pos += 4;
+                Json::Null
+            }
+            Some(_) => {
+                let start = self.pos;
+                while self.pos < b.len()
+                    && matches!(b[self.pos], b'0'..=b'9' | b'-' | b'+' | b'.' | b'e' | b'E')
+                {
+                    self.pos += 1;
+                }
+                if self.text[start..self.pos].parse::<f64>().is_err() {
+                    self.fail("expected a value");
+                }
+                Json::Num
+            }
+            None => self.fail("unexpected end of file"),
+        }
+    }
+
+    fn string(&mut self) -> &'static str {
+        let b = self.text.as_bytes();
+        if b.get(self.pos) != Some(&b'"') {
+            self.fail("expected a string");
+        }
+        self.pos += 1;
+        let start = self.pos;
+        let mut escaped = false;
+        while self.pos < b.len() && b[self.pos] != b'"' {
+            if b[self.pos] == b'\\' {
+                escaped = true;
+                self.pos += 1;
+            }
+            self.pos += 1;
+        }
+        if self.pos >= b.len() {
+            self.fail("unterminated string");
+        }
+        let raw = &self.text[start..self.pos];
+        self.pos += 1;
+        if !escaped {
+            return raw;
+        }
+        let mut out = String::with_capacity(raw.len());
+        let mut chars = raw.chars();
+        while let Some(c) = chars.next() {
+            if c != '\\' {
+                out.push(c);
+                continue;
+            }
+            match chars.next() {
+                Some('n') => out.push('\n'),
+                Some('t') => out.push('\t'),
+                Some('r') => out.push('\r'),
+                Some('b') => out.push('\u{8}'),
+                Some('f') => out.push('\u{c}'),
+                Some('u') => {
+                    let hex: String = chars.by_ref().take(4).collect();
+                    match u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32) {
+                        Some(ch) => out.push(ch),
+                        None => self.fail("bad \\u escape"),
+                    }
+                }
+                Some(other) => out.push(other),
+                None => self.fail("bad escape"),
+            }
+        }
+        String::leak(out)
+    }
+}
+
+/// Parses a TBD v5 file: JSON with a "main_library" object and, for
+/// reexported libraries inlined in the same file, a "libraries" array
+/// of objects of the same shape. Symbols are listed per target group;
+/// as with the YAML formats, the groups are merged (the SDK's stubs
+/// describe the same library for every target).
+fn parse_json(diag: &Diagnostics, file: &str, text: &'static str) -> TbdFile {
+    let mut p = JsonParser { diag, file, text, pos: 0 };
+    let root = p.value();
+
+    let mut tbd = TbdFile {
+        install_name: String::new(),
+        current_version: crate::macho::encode_version(1, 0, 0),
+        exports: Vec::new(),
+        weak_exports: Vec::new(),
+        tlv_exports: Vec::new(),
+        not_app_extension_safe: false,
+        external_reexports: Vec::new(),
+    };
+
+    // Adds one library object's symbols.
+    let add_symbols = |tbd: &mut TbdFile, lib: &Json| {
+        for key in ["exported_symbols", "reexported_symbols"] {
+            for group in lib.get(key).map(Json::arr).unwrap_or(&[]) {
+                for section in ["data", "text"] {
+                    let Some(kinds) = group.get(section) else { continue };
+                    tbd.exports.extend(kinds.strs("global"));
+                    tbd.weak_exports.extend(kinds.strs("weak"));
+                    tbd.tlv_exports.extend(kinds.strs("thread_local"));
+                    for name in kinds.strs("objc_class") {
+                        tbd.exports.push(String::leak(format!("_OBJC_CLASS_$_{name}")));
+                        tbd.exports.push(String::leak(format!("_OBJC_METACLASS_$_{name}")));
+                    }
+                    for name in kinds.strs("objc_eh_type") {
+                        tbd.exports.push(String::leak(format!("_OBJC_EHTYPE_$_{name}")));
+                    }
+                    for name in kinds.strs("objc_ivar") {
+                        tbd.exports.push(String::leak(format!("_OBJC_IVAR_$_{name}")));
+                    }
+                }
+            }
+        }
+    };
+
+    let Some(main) = root.get("main_library") else {
+        fatal!(diag, "{file}: no main_library in .tbd file");
+    };
+    if let Some(name) = main.get("install_names").map(Json::arr).and_then(|a| a.first()) {
+        if let Some(s) = name.get("name").and_then(Json::str) {
+            tbd.install_name = s.to_string();
+        }
+    }
+    if let Some(v) = main.get("current_versions").map(Json::arr).and_then(|a| a.first()) {
+        if let Some(s) = v.get("version").and_then(Json::str) {
+            tbd.current_version = parse_version(s);
+        }
+    }
+    for flags in main.get("flags").map(Json::arr).unwrap_or(&[]) {
+        if flags.strs("attributes").any(|a| a == "not_app_extension_safe") {
+            tbd.not_app_extension_safe = true;
+        }
+    }
+    add_symbols(&mut tbd, main);
+
+    // Reexported libraries: those inlined in "libraries" merge in here;
+    // the others live in files of their own.
+    let mut doc_names: Vec<&'static str> = Vec::new();
+    for lib in root.get("libraries").map(Json::arr).unwrap_or(&[]) {
+        for name in lib.get("install_names").map(Json::arr).unwrap_or(&[]) {
+            if let Some(s) = name.get("name").and_then(Json::str) {
+                doc_names.push(s);
+            }
+        }
+        add_symbols(&mut tbd, lib);
+    }
+    for group in main.get("reexported_libraries").map(Json::arr).unwrap_or(&[]) {
+        for name in group.strs("names") {
+            if !doc_names.contains(&name) && !tbd.external_reexports.contains(&name) {
+                tbd.external_reexports.push(name);
+            }
+        }
+    }
+
+    if tbd.install_name.is_empty() {
+        fatal!(diag, "{file}: no install name in .tbd file");
+    }
+    tbd
+}
+
 /// Strips a YAML scalar's surrounding quotes, if any.
 fn unquote(s: &str) -> &str {
     let s = s.trim();
@@ -105,6 +383,13 @@ pub fn parse(diag: &Diagnostics, mf: &MappedFile) -> TbdFile {
     let Ok(text): Result<&'static str, _> = std::str::from_utf8(mf.data) else {
         fatal!(diag, "{}: invalid UTF-8 in .tbd file", mf.name);
     };
+
+    // TBD version 5 is JSON (tapi's current output, and what Xcode
+    // writes for the "eager linking" stubs of frameworks built in the
+    // same workspace); versions 1-4 are YAML.
+    if text.trim_start().starts_with('{') {
+        return parse_json(diag, &mf.name, text);
+    }
 
     let mut tbd = TbdFile {
         install_name: String::new(),

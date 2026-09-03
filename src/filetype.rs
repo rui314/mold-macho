@@ -32,6 +32,12 @@ pub fn get_file_type(mf: &MappedFile) -> FileType {
     if data.starts_with(b"--- !tapi-tbd") || data.starts_with(b"---\narchs:") {
         return FileType::Tapi;
     }
+    // TBD version 5 is JSON; the version key may come last in the file
+    // (Xcode's eager-linking stubs put it there), so a .tbd that
+    // starts with '{' is taken as one.
+    if data.starts_with(b"{") && (mf.name.ends_with(".tbd") || data.windows(16).any(|w| w == b"tapi_tbd_version")) {
+        return FileType::Tapi;
+    }
 
     // Raw LLVM bitcode, or the bitcode wrapper header.
     if data.starts_with(b"BC\xc0\xde") || data.starts_with(&0x0b17_c0deu32.to_le_bytes()) {
