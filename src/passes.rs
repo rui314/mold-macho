@@ -4081,6 +4081,11 @@ pub fn copy_chunks<E: Arch>(ctx: &Context<E>, buf: &mut [u8], out: &crate::outpu
                     | ChunkKind::Strtab
                     | ChunkKind::CodeSignature
             ) && !c.is_zerofill()
+                // An empty section (every subsection of a coverage
+                // section dead, say) shares its file offset with its
+                // neighbor; it has nothing to copy and would only
+                // upset the gap arithmetic below.
+                && c.hdr.size != 0
         })
         .map(|(i, c)| (i, c.hdr.fileoff as usize, c.hdr.size as usize))
         .collect();

@@ -490,8 +490,18 @@ pub fn stage_object<E: Arch>(
 
         for rel in &mut rels {
             if let crate::input_sections::RelocTarget::Section(sect_pos) = rel.target() {
-                let taddr = (sect_hdrs[sect_pos as usize].addr as i64 + rel.addend) as u64;
-                let Some((tsub, toff)) = find_subsec(&isecs, &subsecs, taddr) else {
+                let sect = &sect_hdrs[sect_pos as usize];
+                let taddr = (sect.addr as i64 + rel.addend) as u64;
+                let found = find_subsec(&isecs, &subsecs, taddr).or_else(|| {
+                    // One past the section's end (a DWARF range end):
+                    // one past its last subsection.
+                    if taddr != sect.addr + sect.size {
+                        return None;
+                    }
+                    let &last = by_ordinal[sect_pos as usize].last()?;
+                    Some((last as usize, isecs[last as usize].size as u64))
+                });
+                let Some((tsub, toff)) = found else {
                     fatal!(diag, "{}: relocation against a discarded section", mf.name);
                 };
                 rel.set_target(crate::input_sections::RelocTarget::Section(tsub as u32));

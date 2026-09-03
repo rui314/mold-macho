@@ -141,9 +141,13 @@ impl Arch for X86_64 {
                 } else {
                     addend as u64
                 };
+                // The address may be one past a section's end: a
+                // DWARF range end or high_pc, or a label after the
+                // last instruction.
                 let Some(idx) = sections
                     .iter()
                     .position(|sec| sec.addr <= addr && addr < sec.addr + sec.size)
+                    .or_else(|| sections.iter().position(|sec| addr == sec.addr + sec.size))
                 else {
                     fatal!(diag, "{file_name}: bad relocation: {}", r.r_address);
                 };
