@@ -19,10 +19,11 @@ use crate::symbol::Origin;
 /// requires to stay (initializers, no-dead-strip sections and symbols).
 /// Reachability follows relocations and unwind-info edges.
 pub fn dead_strip<E: Arch>(ctx: &mut Context<E>) {
-    let mut live = vec![false; ctx.isecs.len()];
     // For -why_live: who first marked each subsection (usize::MAX for
-    // roots), giving a spanning tree of the liveness walk.
-    let mut pred = vec![usize::MAX; ctx.isecs.len()];
+    // roots), giving a spanning tree of the liveness walk. Only kept
+    // when it will be printed.
+    let mut pred: Vec<usize> =
+        if ctx.args.why_live.is_empty() { Vec::new() } else { vec![usize::MAX; ctx.isecs.len()] };
     let mut stack: Vec<usize> = Vec::new();
     let redirects: Vec<usize> = {
         use rayon::prelude::*;
@@ -32,15 +33,18 @@ pub fn dead_strip<E: Arch>(ctx: &mut Context<E>) {
             .collect()
     };
     let redirects = &redirects;
-    let mark =
-        move |live: &mut Vec<bool>, pred: &mut Vec<usize>, stack: &mut Vec<usize>, id: usize, from: usize| {
-            let id = redirects[id];
-            if !live[id] {
-                live[id] = true;
+    // Liveness is marked in place, on the section's atomic visited bit
+    // (mold-rust's IS_VISITED), rather than in side arrays copied back
+    // at the end.
+    let mark = move |ctx: &Context<E>, pred: &mut Vec<usize>, stack: &mut Vec<usize>, id: usize, from: usize| {
+        let id = redirects[id];
+        if ctx.isecs[id].mark_visited() {
+            if !pred.is_empty() {
                 pred[id] = from;
-                stack.push(id);
             }
-        };
+            stack.push(id);
+        }
+    };
 
     // Section-level roots, found on all cores; marking stays serial
     // (it is a handful of sections). Sections of dead archive members
@@ -51,7 +55,7 @@ pub fn dead_strip<E: Arch>(ctx: &mut Context<E>) {
             .par_iter()
             .enumerate()
             .filter_map(|(id, isec)| {
-                if !isec.is_alive {
+                if !isec.is_alive() {
                     return None;
                 }
                 let keep_type = matches!(
@@ -69,13 +73,13 @@ pub fn dead_strip<E: Arch>(ctx: &mut Context<E>) {
             .collect()
     };
     for id in root_ids {
-        mark(&mut live, &mut pred, &mut stack, id, usize::MAX);
+        mark(ctx, &mut pred, &mut stack, id, usize::MAX);
     }
 
     // Initializers converted to __init_offsets are roots; their source
     // sections are gone.
     for &(isec, _) in &ctx.init_funcs {
-        mark(&mut live, &mut pred, &mut stack, isec, usize::MAX);
+        mark(ctx, &mut pred, &mut stack, isec, usize::MAX);
     }
 
     // Symbol-level roots, found on all cores like the section roots.
@@ -95,12 +99,12 @@ pub fn dead_strip<E: Arch>(ctx: &mut Context<E>) {
             .collect()
     };
     for isec in sym_roots {
-        mark(&mut live, &mut pred, &mut stack, isec, usize::MAX);
+        mark(ctx, &mut pred, &mut stack, isec, usize::MAX);
     }
     if ctx.args.output_type == MH_EXECUTE {
         if let Some(id) = ctx.symtab.get(&ctx.args.entry) {
             if let Some(isec) = ctx.symtab[id].isec().map(|i| i as usize) {
-                mark(&mut live, &mut pred, &mut stack, isec, usize::MAX);
+                mark(ctx, &mut pred, &mut stack, isec, usize::MAX);
             }
         }
     }
@@ -149,10 +153,6 @@ pub fn dead_strip<E: Arch>(ctx: &mut Context<E>) {
 
     if ctx.args.why_live.is_empty() {
         use rayon::prelude::*;
-        use std::sync::atomic::{AtomicBool, Ordering};
-        let visited: Vec<AtomicBool> =
-            live.iter().map(|&l| AtomicBool::new(l)).collect();
-
         // mold's gc-sections marks with a work-stealing task pool, not
         // synchronous frontier rounds: each visit follows edges up to
         // three levels inline and banks the rest in small batches that
@@ -163,7 +163,6 @@ pub fn dead_strip<E: Arch>(ctx: &mut Context<E>) {
         const GC_BATCH: usize = 16;
         struct Gc<'a, E: Arch> {
             ctx: &'a Context<E>,
-            visited: &'a [AtomicBool],
             redirects: &'a [usize],
         }
         fn visit_section<'s, E: Arch>(
@@ -209,7 +208,7 @@ pub fn dead_strip<E: Arch>(ctx: &mut Context<E>) {
             }
             for t in targets {
                 let t = gc.redirects[t];
-                if !gc.visited[t].swap(true, Ordering::Relaxed) {
+                if gc.ctx.isecs[t].mark_visited() {
                     if depth < 3 {
                         visit_section(gc, t, depth + 1, scope, next);
                     } else {
@@ -236,11 +235,7 @@ pub fn dead_strip<E: Arch>(ctx: &mut Context<E>) {
                 scope.spawn(move |scope| visit_batch(gc, next, scope));
             }
         }
-        let gc = Gc {
-            ctx,
-            visited: &visited,
-            redirects,
-        };
+        let gc = Gc { ctx, redirects };
         let gc = &gc;
         let roots = std::mem::take(&mut stack);
         rayon::scope(|scope| {
@@ -248,24 +243,25 @@ pub fn dead_strip<E: Arch>(ctx: &mut Context<E>) {
                 .par_chunks(GC_BATCH)
                 .for_each(|batch| visit_batch(gc, batch.to_vec(), scope));
         });
-        for (l, v) in live.iter_mut().zip(&visited) {
-            *l = v.load(Ordering::Relaxed);
-        }
     } else {
         while let Some(id) = stack.pop() {
             let mut out = Vec::new();
             edges_of(id, &mut out);
             for t in out {
-                mark(&mut live, &mut pred, &mut stack, t, id);
+                mark(ctx, &mut pred, &mut stack, t, id);
             }
         }
     }
 
-    print_why_live(ctx, &pred, &live);
-
-    for (id, isec) in ctx.isecs.iter_mut().enumerate() {
-        isec.is_alive = live[id] && isec.is_alive;
+    // A section stays alive if the walk reached it; the visited bit is
+    // consumed here.
+    for isec in ctx.isecs.iter_mut() {
+        let visited = isec.take_visited();
+        let alive = isec.is_alive();
+        isec.set_alive(visited && alive);
     }
+
+    print_why_live(ctx, &pred);
 
     // Drop unwind records and FDEs of dead functions, remapping the
     // record-to-FDE links.
@@ -273,7 +269,7 @@ pub fn dead_strip<E: Arch>(ctx: &mut Context<E>) {
     let mut kept_fdes = Vec::new();
     let fdes = std::mem::take(&mut ctx.fdes);
     for (i, fde) in fdes.into_iter().enumerate() {
-        if live[fde.isec as usize] {
+        if ctx.isecs[fde.isec as usize].is_alive() {
             fde_map[i] = kept_fdes.len();
             kept_fdes.push(fde);
         }
@@ -282,7 +278,7 @@ pub fn dead_strip<E: Arch>(ctx: &mut Context<E>) {
     let isecs = &ctx.isecs;
     let map = &fde_map;
     ctx.unwind_records.retain_mut(|rec| {
-        if !isecs[rec.isec as usize].is_alive {
+        if !isecs[rec.isec as usize].is_alive() {
             return false;
         }
         if rec.fde_idx != crate::input_files::UNWIND_NONE {
@@ -302,7 +298,7 @@ pub fn dead_strip<E: Arch>(ctx: &mut Context<E>) {
 /// liveness walk's spanning tree read backwards, one "symbol from
 /// file" line per hop, ending at a dead-strip root. Only meaningful
 /// under -dead_strip, like ld64's option of the same name.
-fn print_why_live<E: Arch>(ctx: &Context<E>, pred: &[usize], live: &[bool]) {
+fn print_why_live<E: Arch>(ctx: &Context<E>, pred: &[usize]) {
     if ctx.args.why_live.is_empty() {
         return;
     }
@@ -350,7 +346,7 @@ fn print_why_live<E: Arch>(ctx: &Context<E>, pred: &[usize], live: &[bool]) {
         }
         let Some(isec) = sym.isec().map(|i| i as usize) else { continue };
         let mut isec = ctx.resolve_isec(isec);
-        if !live[isec] {
+        if !ctx.isecs[isec].is_alive() {
             continue;
         }
         println!("{} from {}", sym.name(), crate::passes::file_display(&ctx.objs[ctx.isecs[isec].obj as usize]));

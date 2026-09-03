@@ -616,7 +616,7 @@ pub fn copy_mach_header<E: Arch>(ctx: &Context<E>, buf: &mut [u8]) {
         sym.is_weak_def()
             && sym.is_extern()
             && !sym.is_private_extern()
-            && sym.isec().map(|i| i as usize).is_some_and(|isec| ctx.isecs[isec].is_alive)
+            && sym.isec().map(|i| i as usize).is_some_and(|isec| ctx.isecs[isec].is_alive())
     }) {
         hdr.flags |= MH_WEAK_DEFINES;
     }
@@ -1002,7 +1002,7 @@ pub fn encode_unwind_info<E: Arch>(ctx: &Context<E>) -> (Vec<u8>, Vec<SymbolId>)
         .unwind_records
         .par_iter()
         .filter(|rec| {
-            ctx.isecs[rec.isec as usize].is_alive && ctx.isecs[rec.isec as usize].replacement == crate::input_sections::NO_REPLACEMENT
+            ctx.isecs[rec.isec as usize].is_alive() && ctx.isecs[rec.isec as usize].replacement == crate::input_sections::NO_REPLACEMENT
         })
         .cloned()
         .collect();

@@ -171,7 +171,11 @@ pub struct InputSection {
     /// subsection not yet placed, during thunk layout). An output
     /// section stays well under 4 GiB, so a u32 suffices.
     pub output_offset: u32,
-    pub is_alive: bool,
+    /// IS_ALIVE and the transient IS_VISITED bit, in one atomic byte so
+    /// the parallel dead-strip walk marks sections in place (mold-rust's
+    /// InputSection flags). Read through is_alive(); the &mut setters
+    /// write without an atomic operation.
+    pub flags: std::sync::atomic::AtomicU8,
     /// For a literal merged with an identical one, the surviving copy's
     /// subsection index, or `NO_REPLACEMENT`. A u32 sentinel rather than
     /// an `Option<usize>` (16 bytes) keeps the struct small.
@@ -188,7 +192,45 @@ pub struct InputSection {
 // (ours carries the unwind range but no section-name/flags word).
 const _: () = assert!(std::mem::size_of::<InputSection>() == 56);
 
+const IS_ALIVE: u8 = 1 << 0;
+const IS_VISITED: u8 = 1 << 1;
+
 impl InputSection {
+    /// The initial flag word of a live section.
+    pub fn flags_alive() -> std::sync::atomic::AtomicU8 {
+        std::sync::atomic::AtomicU8::new(IS_ALIVE)
+    }
+    /// The initial flag word of a section that never joins the link.
+    pub fn flags_dead() -> std::sync::atomic::AtomicU8 {
+        std::sync::atomic::AtomicU8::new(0)
+    }
+    #[inline]
+    pub fn is_alive(&self) -> bool {
+        self.flags.load(std::sync::atomic::Ordering::Relaxed) & IS_ALIVE != 0
+    }
+    #[inline]
+    pub fn set_alive(&mut self, v: bool) {
+        let f = self.flags.get_mut();
+        if v {
+            *f |= IS_ALIVE;
+        } else {
+            *f &= !IS_ALIVE;
+        }
+    }
+    /// Atomically sets the visited bit; true if this call set it.
+    #[inline]
+    pub fn mark_visited(&self) -> bool {
+        self.flags.fetch_or(IS_VISITED, std::sync::atomic::Ordering::Relaxed) & IS_VISITED == 0
+    }
+    /// Reads and clears the visited bit.
+    #[inline]
+    pub fn take_visited(&mut self) -> bool {
+        let f = self.flags.get_mut();
+        let v = *f & IS_VISITED != 0;
+        *f &= !IS_VISITED;
+        v
+    }
+
     /// This subsection's bytes. Empty for a zero-fill or empty section;
     /// otherwise the `size` bytes at `data_ptr` (which point into the
     /// mmap'd input, so they live for the whole link).

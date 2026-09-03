@@ -154,7 +154,7 @@ impl Arch for Arm64 {
                         continue 'hint;
                     };
                     let isec = &ctx.isecs[ctx.resolve_isec(isec)];
-                    if !isec.is_alive || isec.output_offset == u32::MAX {
+                    if !isec.is_alive() || isec.output_offset == u32::MAX {
                         continue 'hint;
                     }
                     let chunk = &ctx.chunks[isec.osec as usize];

@@ -454,7 +454,7 @@ pub fn stage_object<E: Arch>(
                 nrels: 0,
                 osec: u32::MAX,
                 output_offset: 0,
-                is_alive: true,
+                flags: InputSection::flags_alive(),
                 replacement: crate::input_sections::NO_REPLACEMENT,
                 unwind_offset: 0,
                 nunwind: 0,

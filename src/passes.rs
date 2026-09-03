@@ -1003,7 +1003,7 @@ pub fn convert_common_symbols<E: Arch>(ctx: &mut Context<E>) {
             nrels: 0,
             osec: u32::MAX,
             output_offset: 0,
-            is_alive: true,
+            flags: InputSection::flags_alive(),
             replacement: crate::input_sections::NO_REPLACEMENT,
             unwind_offset: 0,
             nunwind: 0,
@@ -1031,7 +1031,7 @@ pub fn convert_init_offsets<E: Arch>(ctx: &mut Context<E>) {
     }
     for i in 0..ctx.isecs.len() {
         if ctx.hdr_of(&ctx.isecs[i]).section_type() != S_MOD_INIT_FUNC_POINTERS
-            || !ctx.isecs[i].is_alive
+            || !ctx.isecs[i].is_alive()
         {
             continue;
         }
@@ -1056,7 +1056,7 @@ pub fn convert_init_offsets<E: Arch>(ctx: &mut Context<E>) {
             };
             ctx.init_funcs.push(target);
         }
-        ctx.isecs[i].is_alive = false;
+        ctx.isecs[i].set_alive(false);
     }
 }
 
@@ -1065,7 +1065,7 @@ pub fn convert_init_offsets<E: Arch>(ctx: &mut Context<E>) {
 pub fn remove_unreachable_files<E: Arch>(ctx: &mut Context<E>) {
     for isec in ctx.isecs.iter_mut() {
         if isec.obj != u32::MAX && !ctx.objs[isec.obj as usize].is_alive {
-            isec.is_alive = false;
+            isec.set_alive(false);
         }
     }
 
@@ -1075,7 +1075,7 @@ pub fn remove_unreachable_files<E: Arch>(ctx: &mut Context<E>) {
     let mut kept_fdes = Vec::new();
     let fdes = std::mem::take(&mut ctx.fdes);
     for (i, fde) in fdes.into_iter().enumerate() {
-        if ctx.isecs[fde.isec].is_alive {
+        if ctx.isecs[fde.isec].is_alive() {
             fde_map[i] = kept_fdes.len();
             kept_fdes.push(fde);
         }
@@ -1084,7 +1084,7 @@ pub fn remove_unreachable_files<E: Arch>(ctx: &mut Context<E>) {
     let isecs = &ctx.isecs;
     let map = &fde_map;
     ctx.unwind_records.retain_mut(|rec| {
-        if !isecs[rec.isec as usize].is_alive {
+        if !isecs[rec.isec as usize].is_alive() {
             return false;
         }
         if rec.fde_idx != crate::input_files::UNWIND_NONE {
@@ -1126,7 +1126,7 @@ pub fn merge_literals<E: Arch>(ctx: &mut Context<E>) {
         .par_iter()
         .enumerate()
         .filter_map(|(i, isec)| {
-            if !isec.is_alive || isec.replacement != crate::input_sections::NO_REPLACEMENT {
+            if !isec.is_alive() || isec.replacement != crate::input_sections::NO_REPLACEMENT {
                 return None;
             }
             let ty = ctx.hdr_of(isec).section_type();
@@ -1560,7 +1560,7 @@ pub fn scan_relocations<E: Arch>(ctx: &mut Context<E>) {
     let classes: Vec<(crate::symbol::SymbolId, RelocClass)> = ctx_ref
         .isecs
         .par_iter()
-        .filter(|isec| isec.is_alive)
+        .filter(|isec| isec.is_alive())
         .flat_map_iter(|isec| {
             crate::input_files::isec_relocs_of(&ctx_ref.objs, isec).iter().filter_map(move |rel| {
                 let id = ctx_ref.reloc_target_sym(isec.obj as usize, rel)?;
@@ -1844,7 +1844,7 @@ pub fn create_output_sections<E: Arch>(ctx: &mut Context<E>) {
     let mut last_hdr: *const crate::macho::MachSection = std::ptr::null();
     let mut last_chunk: usize = 0;
     for i in 0..ctx.isecs.len() {
-        if !ctx.isecs[i].is_alive || ctx.isecs[i].replacement != crate::input_sections::NO_REPLACEMENT {
+        if !ctx.isecs[i].is_alive() || ctx.isecs[i].replacement != crate::input_sections::NO_REPLACEMENT {
             continue;
         }
         let hdr = ctx.hdr_of(&ctx.isecs[i]);
@@ -2366,7 +2366,7 @@ pub fn create_output_symtab<E: Arch>(
                     let Some(isec) = sym.isec().map(|i| i as usize) else { continue };
                     let isec_id = ctx.resolve_isec(isec as usize);
                     let isec = &ctx.isecs[isec_id];
-                    if !isec.is_alive {
+                    if !isec.is_alive() {
                         continue;
                     }
 
@@ -2504,7 +2504,7 @@ pub fn create_output_symtab<E: Arch>(
                     }
                     let Some(isec) = sym.isec().map(|i| i as usize) else { continue };
                     let isec = ctx_ref.resolve_isec(isec);
-                    if !matches!(sym.origin(), Origin::Obj(_)) || !ctx_ref.isecs[isec].is_alive {
+                    if !matches!(sym.origin(), Origin::Obj(_)) || !ctx_ref.isecs[isec].is_alive() {
                         continue;
                     }
                     let ent = NList {
@@ -2554,7 +2554,7 @@ pub fn create_output_symtab<E: Arch>(
                     && matches!(sym.origin(), Origin::Obj(_))
                     && sym
                         .isec()
-                        .is_some_and(|isec| ctx.isecs[ctx.resolve_isec(isec as usize)].is_alive)
+                        .is_some_and(|isec| ctx.isecs[ctx.resolve_isec(isec as usize)].is_alive())
                 {
                     return Class::Pext;
                 }
@@ -2847,7 +2847,7 @@ pub fn set_osec_offsets<E: Arch>(ctx: &mut Context<E>) {
                             && !sym.is_private_extern()
                             && matches!(sym.origin(), Origin::Obj(_) | Origin::Synthetic)
                             && sym.isec().map(|i| i as usize).is_none_or(|isec| {
-                                shared.isecs[shared.resolve_isec(isec)].is_alive
+                                shared.isecs[shared.resolve_isec(isec)].is_alive()
                             })
                     })
                     .map(|i| i as u32)
@@ -3083,7 +3083,7 @@ fn build_rebase_info<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
 
     // Pointers written for UNSIGNED relocations to local targets.
     for isec in ctx.isecs.iter() {
-        if !isec.is_alive || isec.replacement != crate::input_sections::NO_REPLACEMENT {
+        if !isec.is_alive() || isec.replacement != crate::input_sections::NO_REPLACEMENT {
             continue;
         }
         let base = ctx.chunks[isec.osec as usize].hdr.addr + isec.output_offset as u64;
@@ -3217,7 +3217,7 @@ fn build_bind_info<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
     // Pointers in data sections initialized with an imported symbol's
     // address.
     for isec in ctx.isecs.iter() {
-        if !isec.is_alive || isec.replacement != crate::input_sections::NO_REPLACEMENT {
+        if !isec.is_alive() || isec.replacement != crate::input_sections::NO_REPLACEMENT {
             continue;
         }
         let base = ctx.chunks[isec.osec as usize].hdr.addr + isec.output_offset as u64;
@@ -3302,7 +3302,7 @@ fn collect_fixups<E: Arch>(ctx: &Context<E>) -> Vec<(u64, Option<crate::symbol::
     let mut fixups: Vec<(u64, Option<crate::symbol::SymbolId>, u64)> = ctx
         .isecs
         .par_iter()
-        .filter(|isec| isec.is_alive && isec.replacement == crate::input_sections::NO_REPLACEMENT)
+        .filter(|isec| isec.is_alive() && isec.replacement == crate::input_sections::NO_REPLACEMENT)
         .flat_map_iter(|isec| {
             let base = ctx.chunks[isec.osec as usize].hdr.addr + isec.output_offset as u64;
             crate::input_files::isec_relocs_of(&ctx.objs, isec).iter().filter_map(move |rel| {
@@ -3689,7 +3689,7 @@ fn build_data_in_code<E: Arch>(ctx: &Context<E>) -> Vec<(u32, u16, u16)> {
                 continue;
             };
             let isec = &ctx.isecs[ctx.resolve_isec(isec as usize)];
-            if isec.is_alive {
+            if isec.is_alive() {
                 let fileoff = ctx.chunks[isec.osec as usize].hdr.fileoff + isec.output_offset as u64 + off_in;
                 out.push((fileoff as u32, len, kind));
             }
@@ -3713,7 +3713,7 @@ fn build_function_starts<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
                 return None;
             }
             let isec = &ctx.isecs[ctx.resolve_isec(sym.isec()? as usize)];
-            if isec.is_alive
+            if isec.is_alive()
                 && ctx.hdr_of(isec).segname() == "__TEXT"
                 && ctx.hdr_of(isec).sectname() == "__text"
             {

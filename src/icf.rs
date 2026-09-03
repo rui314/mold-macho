@@ -309,7 +309,7 @@ pub fn icf_sections<E: Arch>(ctx: &mut Context<E>) {
 
     let is_candidate = |ctx: &Context<E>, id: usize| -> bool {
         let isec = &ctx.isecs[id];
-        isec.is_alive
+        isec.is_alive()
             && isec.replacement == crate::input_sections::NO_REPLACEMENT
             && ctx.hdr_of(isec).segname() == "__TEXT"
             && ctx.hdr_of(isec).flags & S_ATTR_PURE_INSTRUCTIONS != 0

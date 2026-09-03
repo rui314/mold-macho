@@ -98,7 +98,7 @@ pub fn print_map<E: Arch>(ctx: &Context<E>) {
         let obj = obj as usize;
         let Some(isec) = sym.isec().map(|i| i as usize) else { continue };
         let isec = ctx.resolve_isec(isec);
-        if !ctx.isecs[isec].is_alive || sym.name().is_empty() {
+        if !ctx.isecs[isec].is_alive() || sym.name().is_empty() {
             continue;
         }
         if !sym.is_extern() && (sym.name().starts_with('l') || sym.name().starts_with('L')) {
@@ -135,7 +135,7 @@ pub fn print_map<E: Arch>(ctx: &Context<E>) {
             let obj = obj as usize;
             let Some(isec) = sym.isec().map(|i| i as usize) else { continue };
             let isec = ctx.resolve_isec(isec);
-            if ctx.isecs[isec].is_alive
+            if ctx.isecs[isec].is_alive()
                 || !ctx.objs[obj].is_alive
                 || sym.name().is_empty()
                 || (!sym.is_extern() && (sym.name().starts_with('l') || sym.name().starts_with('L')))

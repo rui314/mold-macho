@@ -87,7 +87,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
             let sym = &ctx.symtab[sym_id];
             let Some(isec) = sym.isec().map(|i| i as usize) else { continue };
             let isec = ctx.resolve_isec(isec);
-            if !ctx.isecs[isec].is_alive || sym.name().is_empty() {
+            if !ctx.isecs[isec].is_alive() || sym.name().is_empty() {
                 continue;
             }
             index_of_sym.insert(sym_id, nlists_out.len() as u32);
@@ -110,7 +110,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
                 && matches!(sym.origin(), Origin::Obj(_))
                 && sym
                     .isec()
-                    .is_none_or(|isec| ctx.isecs[ctx.resolve_isec(isec as usize)].is_alive)
+                    .is_none_or(|isec| ctx.isecs[ctx.resolve_isec(isec as usize)].is_alive())
         })
         .collect();
     globals.sort_by_key(|&i| ctx.symtab[i].name());
@@ -194,7 +194,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
     let mut cu_relocs: Vec<MachRel> = Vec::new();
     for rec in &ctx.unwind_records {
         let isec = &ctx.isecs[rec.isec as usize];
-        if !isec.is_alive || rec.fde().is_some() {
+        if !isec.is_alive() || rec.fde().is_some() {
             continue;
         }
         let entry = cu_data.len() as u32;
@@ -262,7 +262,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
     let mut eh_patches: Vec<(u32, u64, u8)> = Vec::new();
     {
         let kept: Vec<usize> = (0..ctx.fdes.len())
-            .filter(|&i| ctx.isecs[ctx.resolve_isec(ctx.fdes[i].isec as usize)].is_alive)
+            .filter(|&i| ctx.isecs[ctx.resolve_isec(ctx.fdes[i].isec as usize)].is_alive())
             .collect();
         let mut cie_off: HashMap<usize, u32> = HashMap::new();
         for &f in &kept {
