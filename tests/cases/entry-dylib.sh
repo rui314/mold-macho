@@ -19,3 +19,11 @@ st=0; $t/exe a b || st=$?
 
 nm -m $t/exe | grep -q 'undefined.*_exit'
 otool -l $t/exe | grep -q LC_MAIN
+
+# A -r link has no entry point: its output must not acquire an
+# undefined _main (a dylib built from Xcode's prelinked package
+# object then failed with "undefined symbol: _main").
+$mold -r -arch $ARCH -o $t/r.o $t/a.o
+nm $t/r.o > $t/nm-r
+! grep -q ' U _main' $t/nm-r
+$CC --ld-path=$mold -shared -o $t/libr.dylib $t/r.o

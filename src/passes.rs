@@ -620,7 +620,9 @@ fn do_resolve<E: Arch>(ctx: &mut Context<E>, only_alive: bool) {
     // app extension's entry point, _NSExtensionMain, lives in
     // Foundation and nothing in the extension references it.
     let mut named: Vec<String> = ctx.args.forced_undefined.clone();
-    if ctx.args.output_type == MH_EXECUTE {
+    // Not for -r, whose output type is still the executable default: the
+    // relocatable output would carry a spurious undefined _main.
+    if ctx.args.output_type == MH_EXECUTE && !ctx.args.relocatable {
         named.push(ctx.args.entry.clone());
     }
     // -alias bases too: Xcode aliases an app extension's debug dylib
