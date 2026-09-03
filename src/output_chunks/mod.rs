@@ -697,6 +697,9 @@ struct TrieNode {
     /// Pre-order index, assigned by flatten; lets the sizing pass name
     /// a child by index without a pointer hash map.
     index: u32,
+    /// Node count of this subtree (including this node), so that
+    /// flatten can hand every subtree a disjoint slot range.
+    size: u32,
 }
 
 /// Builds the subtrie for a sorted run of names that all share their
@@ -800,17 +803,59 @@ pub fn encode_export_trie<E: Arch>(
     let mut root = build_trie(&exports, 0);
 
     // Nodes in pre-order, as raw pointers to sidestep the borrow of the
-    // recursive structure.
-    fn flatten(node: &mut TrieNode, out: &mut Vec<*mut TrieNode>) {
-        node.index = out.len() as u32;
-        out.push(node);
+    // recursive structure. Two parallel passes in mold's prefix-sum
+    // shape: count every subtree, then each subtree writes its
+    // pre-order run into its own disjoint slot range of one
+    // preallocated array - no appending or copying, and the pre-order
+    // index is simply the slot number. Fan-out happens at nodes with
+    // many children (the second level: every Mach-O name starts with
+    // '_', so the root has one child).
+    const FANOUT: usize = 8;
+    fn count(node: &mut TrieNode) -> u32 {
         node.children.sort_by(|a, b| a.0.cmp(&b.0));
-        for (_, child) in &mut node.children {
-            flatten(child, out);
+        let below: u32 = if node.children.len() >= FANOUT {
+            node.children.par_iter_mut().map(|(_, c)| count(c)).sum()
+        } else {
+            node.children.iter_mut().map(|(_, c)| count(c)).sum()
+        };
+        node.size = 1 + below;
+        node.size
+    }
+    struct Slots(*mut *mut TrieNode);
+    unsafe impl Sync for Slots {}
+    fn fill(node: &mut TrieNode, base: u32, slots: &Slots) {
+        node.index = base;
+        // SAFETY: every subtree owns [base, base+size), the ranges are
+        // disjoint by construction of the prefix sums below, and the
+        // array holds exactly root.size slots.
+        unsafe { *slots.0.add(base as usize) = node };
+        if node.children.len() >= FANOUT {
+            let mut b = base + 1;
+            let bases: Vec<u32> = node
+                .children
+                .iter()
+                .map(|(_, c)| {
+                    let x = b;
+                    b += c.size;
+                    x
+                })
+                .collect();
+            node.children
+                .par_iter_mut()
+                .zip(bases)
+                .for_each(|((_, c), cb)| fill(c, cb, slots));
+        } else {
+            let mut b = base + 1;
+            for (_, c) in &mut node.children {
+                fill(c, b, slots);
+                b += c.size;
+            }
         }
     }
-    let mut nodes = Vec::new();
-    flatten(&mut root, &mut nodes);
+    let total = count(&mut root) as usize;
+    let mut nodes: Vec<*mut TrieNode> = vec![std::ptr::null_mut(); total];
+    fill(&mut root, 0, &Slots(nodes.as_mut_ptr()));
+    debug_assert!(nodes.iter().all(|p| !p.is_null()));
 
     // Assign node offsets until they stop moving. Everything except
     // the width of the child-offset ULEBs is invariant, so the
