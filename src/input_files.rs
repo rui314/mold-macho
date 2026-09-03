@@ -41,7 +41,7 @@ pub struct ObjectFile {
     /// For a bitcode input, the lto_module handle: the object is a
     /// placeholder that only claims symbols until LTO compiles it.
     pub lto_module: Option<usize>,
-    pub nlists: Vec<NList>,
+    pub nlists: std::borrow::Cow<'static, [NList]>,
     /// The symbol slot for each nlist entry.
     pub syms: Vec<SymbolId>,
     /// LC_DATA_IN_CODE entries: (file offset in the object, length,
@@ -149,7 +149,7 @@ pub struct StagedObject {
     pub isecs: Vec<InputSection>,
     pub relocs: Vec<crate::input_sections::Reloc>,
     pub subsecs: Vec<usize>,
-    pub nlists: Vec<NList>,
+    pub nlists: std::borrow::Cow<'static, [NList]>,
     pub sym_names: Vec<&'static str>,
     /// xxh3 of each extern non-stab name (0 otherwise), computed here
     /// so the serial intern path never hashes.
@@ -168,6 +168,19 @@ pub struct StagedObject {
 }
 
 /// Parses one object file without touching any linker state.
+/// The object's nlist_64 array as a slice of the mapped file, or None
+/// if it is unaligned or truncated (then the caller copies it).
+fn nlists_slice(data: &'static [u8], off: usize, n: usize) -> Option<&'static [NList]> {
+    let bytes = n.checked_mul(size_of::<NList>())?;
+    if off.checked_add(bytes)? > data.len() || (data.as_ptr() as usize + off) % std::mem::align_of::<NList>() != 0 {
+        return None;
+    }
+    // SAFETY: in bounds and aligned (checked above); NList is a
+    // #[repr(C)] struct of plain integers, valid for every bit pattern;
+    // the mapping lives for the whole link.
+    Some(unsafe { std::slice::from_raw_parts(data.as_ptr().add(off) as *const NList, n) })
+}
+
 pub fn stage_object<E: Arch>(
     diag: &crate::error::Diagnostics,
     mf: &'static MappedFile,
@@ -263,11 +276,18 @@ pub fn stage_object<E: Arch>(
     // the object's section count and lives for the whole link.
     let sect_hdrs: &'static [MachSection] = Vec::leak(sect_hdrs);
 
-    // Read the symbol table
-    let mut nlists: Vec<NList> = Vec::new();
+    // Read the symbol table. The nlist_64 array is used straight from
+    // the mmap when it is 8-aligned (ld64 aligns it; NList is #[repr(C)]
+    // nlist_64, all integer fields, so any bytes are a valid value) -
+    // no copy of 16 bytes per symbol. mold-rust borrows its ElfSym
+    // array the same way (Cow, Owned only for synthesized symbols).
+    let mut nlists: std::borrow::Cow<'static, [NList]> = std::borrow::Cow::Borrowed(&[]);
     let mut strtab: &'static [u8] = &[];
     if let Some(cmd) = symtab_cmd {
-        nlists = read_array(data, cmd.symoff as usize, cmd.nsyms as usize);
+        nlists = match nlists_slice(data, cmd.symoff as usize, cmd.nsyms as usize) {
+            Some(s) => std::borrow::Cow::Borrowed(s),
+            None => std::borrow::Cow::Owned(read_array(data, cmd.symoff as usize, cmd.nsyms as usize)),
+        };
         strtab = validate_strtab(&data[cmd.stroff as usize..(cmd.stroff + cmd.strsize) as usize]);
     }
 
@@ -279,7 +299,7 @@ pub fn stage_object<E: Arch>(
     let split_ok = hdr.flags & MH_SUBSECTIONS_VIA_SYMBOLS != 0;
     let mut split_points: Vec<Vec<u64>> = vec![Vec::new(); sect_hdrs.len()];
     if split_ok {
-        for nlist in &nlists {
+        for nlist in nlists.iter() {
             if !nlist.is_stab()
                 && nlist.n_type() == N_SECT
                 && nlist.n_desc & N_ALT_ENTRY == 0
@@ -588,7 +608,7 @@ pub fn integrate_objects<E: Arch>(
             let mut syms = Vec::with_capacity(st.nlists.len());
             let mut next_local = base.locals;
             let mut next_id = base.ids;
-            for nlist in &st.nlists {
+            for nlist in st.nlists.iter() {
                 if nlist.is_stab() || !nlist.is_extern() {
                     syms.push(next_local);
                     next_local += 1;
@@ -905,7 +925,7 @@ pub fn parse_bitcode<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile, ali
         subsecs: Vec::new(),
         objc_image_info: None,
         has_debug_info: false,
-        nlists,
+        nlists: std::borrow::Cow::Owned(nlists),
         syms,
         lto_module: Some(module),
         dice: Vec::new(),

@@ -257,7 +257,7 @@ fn load_pending<E: Arch>(ctx: &mut Context<E>, pending: Vec<PendingObject>) {
             st.sym_names
                 .iter()
                 .zip(&st.sym_hashes)
-                .zip(&st.nlists)
+                .zip(st.nlists.iter())
                 .filter(|((_, _), nlist)| !nlist.is_stab() && nlist.is_extern())
                 .map(|((&name, &hash), _)| (name, hash))
                 .collect()
@@ -955,7 +955,7 @@ pub fn run_lto<E: Arch>(ctx: &mut Context<E>) -> bool {
         }
         let obj = &mut ctx.objs[obj_idx];
         obj.is_alive = false;
-        obj.nlists.clear();
+        obj.nlists = std::borrow::Cow::Borrowed(&[]);
         obj.syms.clear();
     }
 
