@@ -2656,11 +2656,32 @@ pub fn create_output_symtab<E: Arch>(
     {
         use rayon::prelude::*;
         debug_assert_eq!(names.len(), data.entries.len());
-        // Fibonacci hash of the pointer, for an even bin spread.
-        let ptr_hash = |n: &&'static str| -> u64 {
-            (n.as_ptr() as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
-        };
-        let hashes: Vec<u64> = names.par_iter().map(ptr_hash).collect();
+        // The bin key must (a) send equal names to one shard, so the
+        // pointer-dedup inside the shard sees every copy, and (b) be
+        // deterministic: a name's string-table offset is its shard's
+        // base plus its rank there, so a key that moves one name to
+        // another shard shifts every later shard's base and the n_strx
+        // of most of the symbol table. Keying by the name's address
+        // failed (b): stab strings such as N_OSO paths are heap
+        // allocations made in a parallel per-object pass, and their
+        // addresses follow thread scheduling, so the output was not
+        // reproducible (mold guarantees it is). Key by the entry's
+        // symbol id instead: it is assigned deterministically, equal
+        // interned names share it (so dedup is unchanged), and reading
+        // it touches no name bytes. The few id-less entries (N_SO,
+        // N_OSO: one or two per object) hash their name's tail.
+        const FIB: u64 = 0x9E37_79B9_7F4A_7C15;
+        let hashes: Vec<u64> = names
+            .par_iter()
+            .zip(data.entries.par_iter())
+            .map(|(n, (_, sym))| match sym {
+                Some(id) => (*id as u64).wrapping_mul(FIB),
+                None => {
+                    let b = n.as_bytes();
+                    xxhash_rust::xxh3::xxh3_64(&b[b.len().saturating_sub(16)..])
+                }
+            })
+            .collect();
         const NS: usize = 64;
         let mut bins: Vec<Vec<u32>> = vec![Vec::new(); NS];
         for (i, (&h, n)) in hashes.iter().zip(&names).enumerate() {
