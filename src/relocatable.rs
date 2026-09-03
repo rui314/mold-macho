@@ -61,9 +61,9 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
         ordinals[idx] = i as u8 + 1;
     }
     let mut nlists_out: Vec<NList> = Vec::new();
-    let mut index_of_sym: HashMap<usize, u32> = HashMap::new();
+    let mut index_of_sym: HashMap<crate::symbol::SymbolId, u32> = HashMap::new();
 
-    let sym_addr = |ctx: &Context<E>, id: usize| -> u64 {
+    let sym_addr = |ctx: &Context<E>, id: crate::symbol::SymbolId| -> u64 {
         let sym = &ctx.symtab[id];
         match sym.isec() {
             Some(isec) => {
@@ -126,13 +126,13 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
         if sym.is_weak_def() {
             n_desc |= N_WEAK_DEF;
         }
-        index_of_sym.insert(i, nlists_out.len() as u32);
+        index_of_sym.insert(i as u32, nlists_out.len() as u32);
         nlists_out.push(NList {
             n_strx: add_string(&mut strtab, sym.name()),
             n_type,
             n_sect,
             n_desc,
-            n_value: sym_addr(ctx, i),
+            n_value: sym_addr(ctx, i as u32),
         });
     }
     let nextdef = nlists_out.len() as u32 - nlocal;
@@ -153,7 +153,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
             n_value = sym.value;
             n_desc |= (sym.common_p2align as u16) << 8;
         }
-        index_of_sym.insert(i, nlists_out.len() as u32);
+        index_of_sym.insert(i as u32, nlists_out.len() as u32);
         nlists_out.push(NList {
             n_strx: add_string(&mut strtab, sym.name()),
             n_type: N_UNDF | N_EXT,

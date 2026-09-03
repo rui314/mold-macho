@@ -347,7 +347,7 @@ pub fn icf_sections<E: Arch>(ctx: &mut Context<E>) {
                     }
                     return (Edge::Isec(isec, sym.value), addend);
                 }
-                (Edge::Sym(sym_id), addend)
+                (Edge::Sym(sym_id as usize), addend)
             }
             RelocTarget::Section(isec) => {
                 let isec = ctx.resolve_isec(isec as usize);

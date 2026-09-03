@@ -10,7 +10,7 @@ use crate::error;
 use crate::error::{Diagnostics, HasDiagnostics};
 use crate::input_files::{DylibFile, ObjectFile};
 use crate::macho::{S_THREAD_LOCAL_REGULAR, S_THREAD_LOCAL_ZEROFILL};
-use crate::input_sections::{InputSection, InputSectionId, Reloc, RelocTarget};
+use crate::input_sections::{Reloc, RelocTarget};
 use crate::output_chunks::{Chunk, OutputSegment, SymtabData};
 use crate::symbol::{Origin, SymbolId, SymbolTable};
 
@@ -21,7 +21,7 @@ pub struct Context<E: Arch> {
     pub dylibs: Vec<DylibFile>,
     pub symtab: SymbolTable,
     /// All input sections, in one arena.
-    pub isecs: Vec<InputSection>,
+    pub isecs: crate::input_sections::InputSections,
     /// Per-symbol synthetic-slot indices (SymbolId-indexed), grown
     /// lazily; mold-rust's SymbolAux side table.
     pub sym_aux: Vec<crate::symbol::SymAux>,
@@ -134,7 +134,7 @@ impl<E: Arch> Context<E> {
             objs: Vec::new(),
             dylibs: Vec::new(),
             symtab: SymbolTable::default(),
-            isecs: Vec::new(),
+            isecs: Default::default(),
             sym_aux: Vec::new(),
             priority_counter: 0,
             lto_plugin: None,
@@ -209,7 +209,7 @@ impl<E: Arch> Context<E> {
     }
 
     /// Follows literal-merge redirects to the surviving subsection.
-    pub fn resolve_isec(&self, mut id: InputSectionId) -> InputSectionId {
+    pub fn resolve_isec(&self, mut id: usize) -> usize {
         while self.isecs[id].replacement != crate::input_sections::NO_REPLACEMENT {
             id = self.isecs[id].replacement as usize;
         }
@@ -243,7 +243,7 @@ impl<E: Arch> Context<E> {
 
     /// A subsection's relocations, sliced from its object's reloc arena
     /// (subsections keep only a rel_offset/nrels range, sold-style).
-    pub fn isec_relocs(&self, id: InputSectionId) -> &[crate::input_sections::Reloc] {
+    pub fn isec_relocs(&self, id: usize) -> &[crate::input_sections::Reloc] {
         let isec = &self.isecs[id];
         if isec.obj == u32::MAX {
             return &[];
@@ -263,7 +263,7 @@ impl<E: Arch> Context<E> {
     /// redirect is followed only when one exists, so the common case is
     /// one branch); an unplaced subsection reports 0.
     #[inline]
-    pub fn isec_addr(&self, id: InputSectionId) -> u64 {
+    pub fn isec_addr(&self, id: usize) -> u64 {
         let mut isec = &self.isecs[id];
         if isec.replacement != crate::input_sections::NO_REPLACEMENT {
             isec = &self.isecs[self.resolve_isec(id)];
@@ -331,7 +331,7 @@ impl<E: Arch> Context<E> {
     }
 
     /// Returns the input section a relocation's target lives in, if any.
-    pub fn reloc_target_isec(&self, obj: usize, rel: &Reloc) -> Option<InputSectionId> {
+    pub fn reloc_target_isec(&self, obj: usize, rel: &Reloc) -> Option<usize> {
         match rel.target() {
             RelocTarget::Sym(idx) => self.symtab[self.objs[obj].syms[idx as usize]].isec().map(|i| i as usize),
             RelocTarget::Section(idx) => Some(idx as usize),

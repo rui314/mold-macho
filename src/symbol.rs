@@ -2,7 +2,9 @@
 
 
 
-pub type SymbolId = usize;
+/// A symbol index, u32 as in mold-rust: every per-symbol and
+/// per-nlist vector of ids is half the size of a usize one.
+pub type SymbolId = u32;
 
 /// Where a symbol's definition comes from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -304,7 +306,7 @@ impl SymbolTable {
             .entry(Key { hash, key: name })
             .or_insert_with(|| {
                 self.syms.push(Symbol::new(name));
-                self.syms.len() - 1
+                (self.syms.len() - 1) as u32
             })
     }
 
@@ -324,7 +326,7 @@ impl SymbolTable {
     /// Creates an anonymous slot for a file-local symbol.
     pub fn add_local(&mut self, name: &'static str) -> SymbolId {
         self.syms.push(Symbol::new(name));
-        self.syms.len() - 1
+        (self.syms.len() - 1) as u32
     }
 
     /// Interns every (name, precomputed-hash) pair at once, returning
@@ -365,7 +367,7 @@ impl SymbolTable {
                     }
                     let idx = *newmap.entry(key).or_insert_with(|| {
                         news.push((name, hash));
-                        news.len() - 1
+                        (news.len() - 1) as u32
                     });
                     out.push((i, Resolved::New(idx as u32)));
                 }
@@ -412,16 +414,16 @@ impl SymbolTable {
             .zip(&bases)
             .for_each(|((shard, (_, news)), &b)| {
                 for (k, &(name, hash)) in news.iter().enumerate() {
-                    shard.insert(Key { hash, key: name }, b + k);
+                    shard.insert(Key { hash, key: name }, (b + k) as u32);
                 }
             });
 
         // Scatter each batch entry's resolved id in parallel; every
         // batch index appears in exactly one shard's output list, so
         // the writes are disjoint.
-        let mut ids = vec![0usize; batch.len()];
+        let mut ids = vec![0u32; batch.len()];
         {
-            struct IdPtr(*mut usize);
+            struct IdPtr(*mut u32);
             unsafe impl Sync for IdPtr {}
             let ptr = IdPtr(ids.as_mut_ptr());
             let ptr = &ptr;
@@ -429,7 +431,7 @@ impl SymbolTable {
                 for &(i, ref r) in out {
                     let v = match r {
                         Resolved::Old(id) => *id,
-                        Resolved::New(k) => b + *k as usize,
+                        Resolved::New(k) => (b + *k as usize) as u32,
                     };
                     // SAFETY: each batch index i is produced by exactly
                     // one shard, so these writes never overlap.
@@ -443,14 +445,30 @@ impl SymbolTable {
 
 impl std::ops::Index<SymbolId> for SymbolTable {
     type Output = Symbol;
-
+    #[inline]
     fn index(&self, id: SymbolId) -> &Symbol {
-        &self.syms[id]
+        &self.syms[id as usize]
     }
 }
 
 impl std::ops::IndexMut<SymbolId> for SymbolTable {
+    #[inline]
     fn index_mut(&mut self, id: SymbolId) -> &mut Symbol {
+        &mut self.syms[id as usize]
+    }
+}
+
+impl std::ops::Index<usize> for SymbolTable {
+    type Output = Symbol;
+    #[inline]
+    fn index(&self, id: usize) -> &Symbol {
+        &self.syms[id]
+    }
+}
+
+impl std::ops::IndexMut<usize> for SymbolTable {
+    #[inline]
+    fn index_mut(&mut self, id: usize) -> &mut Symbol {
         &mut self.syms[id]
     }
 }

@@ -539,7 +539,7 @@ fn claim_locals<E: Arch>(ctx: &mut Context<E>) {
                 continue;
             }
             // SAFETY: disjoint per object, as above.
-            let sym = unsafe { &mut *ptr.0.add(obj.syms[i]) };
+            let sym = unsafe { &mut *ptr.0.add(obj.syms[i] as usize) };
             match nlist.n_type() {
                 N_ABS => {
                     sym.set_origin(Origin::Obj((obj_idx) as u32));
@@ -596,20 +596,20 @@ fn do_resolve<E: Arch>(ctx: &mut Context<E>, only_alive: bool) {
         .for_each(|obj| {
             for (nlist, &sym_id) in obj.nlists.iter().zip(&obj.syms) {
                 if !nlist.is_stab() && nlist.is_extern() && nlist.n_type() == N_UNDF {
-                    used[sym_id].store(true, Ordering::Relaxed);
+                    used[sym_id as usize].store(true, Ordering::Relaxed);
                     if nlist.n_desc & N_WEAK_REF != 0 {
-                        weak_ref[sym_id].store(true, Ordering::Relaxed);
+                        weak_ref[sym_id as usize].store(true, Ordering::Relaxed);
                     }
                 }
             }
         });
     for name in &ctx.args.forced_undefined {
         if let Some(id) = ctx.symtab.get(name) {
-            used[id].store(true, Ordering::Relaxed);
+            used[id as usize].store(true, Ordering::Relaxed);
         }
     }
     if let Some(id) = ctx.symtab.get(&ctx.args.entry) {
-        used[id].store(true, Ordering::Relaxed);
+        used[id as usize].store(true, Ordering::Relaxed);
     }
 
     // The rank of a definition: (class << 32) | priority, lower is
@@ -639,7 +639,7 @@ fn do_resolve<E: Arch>(ctx: &mut Context<E>, only_alive: bool) {
         .for_each(|obj| {
             for (nlist, &sym_id) in obj.nlists.iter().zip(&obj.syms) {
                 if let Some(rank) = rank_of(obj, nlist) {
-                    best[sym_id].fetch_min(rank, Ordering::Relaxed);
+                    best[sym_id as usize].fetch_min(rank, Ordering::Relaxed);
                 }
             }
         });
@@ -665,18 +665,18 @@ fn do_resolve<E: Arch>(ctx: &mut Context<E>, only_alive: bool) {
                 let Some(rank) = rank_of(obj, nlist) else {
                     continue;
                 };
-                let won = best[sym_id].load(Ordering::Relaxed);
+                let won = best[sym_id as usize].load(Ordering::Relaxed);
                 if won != rank {
                     // Two live strong definitions of one name are an
                     // error whichever wins.
                     if only_alive && rank >> 32 == 0 && won >> 32 == 0 {
-                        duplicates.lock().unwrap().push((sym_id, obj_idx));
+                        duplicates.lock().unwrap().push((sym_id as usize, obj_idx));
                     }
                     continue;
                 }
                 // SAFETY: this object holds the unique minimum rank
                 // for sym_id, so no other thread writes this slot.
-                let sym = unsafe { &mut *syms_ptr.0.add(sym_id) };
+                let sym = unsafe { &mut *syms_ptr.0.add(sym_id as usize) };
                 sym.set_is_extern(true);
                 sym.set_is_imported(false);
                 sym.set_is_common(false);
@@ -705,7 +705,7 @@ fn do_resolve<E: Arch>(ctx: &mut Context<E>, only_alive: bool) {
                                 // A symbol in a discarded (debug)
                                 // section resolves as if undefined.
                                 sym.set_origin(Origin::Undef);
-                                best[sym_id].store(u64::MAX, Ordering::Relaxed);
+                                best[sym_id as usize].store(u64::MAX, Ordering::Relaxed);
                             }
                         }
                     }
@@ -724,7 +724,7 @@ fn do_resolve<E: Arch>(ctx: &mut Context<E>, only_alive: bool) {
     // Common symbols merge: the largest size and strictest alignment
     // win regardless of input order, gathered from every common claim
     // once the class-3 winners are known.
-    let commons: Vec<(usize, u64, u8)> = ctx
+    let commons: Vec<(crate::symbol::SymbolId, u64, u8)> = ctx
         .objs
         .par_iter()
         .filter(|obj| (!only_alive || obj.is_alive) && obj.is_alive)
@@ -734,7 +734,7 @@ fn do_resolve<E: Arch>(ctx: &mut Context<E>, only_alive: bool) {
                     && nlist.is_extern()
                     && nlist.n_type() == N_UNDF
                     && nlist.is_common()
-                    && best[sym_id].load(Ordering::Relaxed) >> 32 == 3
+                    && best[sym_id as usize].load(Ordering::Relaxed) >> 32 == 3
                 {
                     Some((sym_id, nlist.n_value, ((nlist.n_desc >> 8) & 0xf) as u8))
                 } else {
@@ -1057,7 +1057,7 @@ pub fn convert_init_offsets<E: Arch>(ctx: &mut Context<E>) {
 /// Hides the subsections of archive members that resolution left
 /// dead, so nothing of theirs reaches the output.
 pub fn remove_unreachable_files<E: Arch>(ctx: &mut Context<E>) {
-    for isec in &mut ctx.isecs {
+    for isec in ctx.isecs.iter_mut() {
         if isec.obj != u32::MAX && !ctx.objs[isec.obj as usize].is_alive {
             isec.is_alive = false;
         }
@@ -1185,8 +1185,8 @@ pub fn create_objc_msgsend_stubs<E: Arch>(ctx: &mut Context<E>) {
         let sel = sel.to_string();
         let idx = ctx.objc_stubs.len() as u32;
         ctx.symtab[i].set_origin(Origin::Synthetic);
-        ctx.sym_aux_mut(i).objc_stub_idx = idx;
-        ctx.objc_stubs.push((i, sel));
+        ctx.sym_aux_mut(i as u32).objc_stub_idx = idx;
+        ctx.objc_stubs.push((i as u32, sel));
     }
 
     if !ctx.objc_stubs.is_empty() {
@@ -1264,7 +1264,7 @@ pub fn auto_hide_weak_defs<E: Arch>(ctx: &mut Context<E>) {
                 continue;
             }
             let bits = if nlist.n_desc & N_WEAK_REF != 0 { SEEN } else { SEEN | NOT_HIDABLE };
-            flags[sym_id].fetch_or(bits, Ordering::Relaxed);
+            flags[sym_id as usize].fetch_or(bits, Ordering::Relaxed);
         }
     });
 
@@ -1368,8 +1368,8 @@ pub fn coalesce_weak_defs<E: Arch>(ctx: &mut Context<E>) {
 pub fn check_undefined_symbols<E: Arch>(ctx: &mut Context<E>) {
     // Errors name a file that wants the symbol; the map from symbol to
     // referencing object is built only once an error is certain.
-    let mut referencers: Option<std::collections::HashMap<usize, usize>> = None;
-    let mut who_wants = |ctx: &Context<E>, id: usize| -> String {
+    let mut referencers: Option<std::collections::HashMap<crate::symbol::SymbolId, usize>> = None;
+    let mut who_wants = |ctx: &Context<E>, id: crate::symbol::SymbolId| -> String {
         let map = referencers.get_or_insert_with(|| {
             let mut map = std::collections::HashMap::new();
             for (obj_idx, obj) in ctx.objs.iter().enumerate() {
@@ -1404,7 +1404,7 @@ pub fn check_undefined_symbols<E: Arch>(ctx: &mut Context<E>) {
                 sym.set_is_imported(true);
                 sym.set_is_extern(true);
             } else {
-                let file = who_wants(ctx, i);
+                let file = who_wants(ctx, i as u32);
                 error!(ctx, "undefined symbol: {}: {}", file, ctx.symtab[i].name());
             }
         }
@@ -1754,7 +1754,7 @@ pub fn add_synthetic_symbols<E: Arch>(ctx: &mut Context<E>) {
         let sym = &mut ctx.symtab[id];
         sym.set_origin(Origin::Synthetic);
         sym.set_is_extern(false);
-        ctx.boundary_syms.push((id, is_start, seg, sect));
+        ctx.boundary_syms.push((id as u32, is_start, seg, sect));
     }
 }
 
@@ -1885,7 +1885,7 @@ pub fn create_output_sections<E: Arch>(ctx: &mut Context<E>) {
         let ChunkKind::Output { isecs, .. } = &mut chunk.kind else {
             unreachable!()
         };
-        isecs.push(i);
+        isecs.push(i as u32);
         ctx.isecs[i].osec = chunk_idx as u32;
     }
 
@@ -1907,7 +1907,7 @@ pub fn create_output_sections<E: Arch>(ctx: &mut Context<E>) {
     if let Some(ranks) = order_file_ranks(ctx) {
         for chunk in &mut ctx.chunks {
             if let ChunkKind::Output { isecs, .. } = &mut chunk.kind {
-                isecs.sort_by_key(|&id| ranks[id]);
+                isecs.sort_by_key(|&id| ranks[id as usize]);
             }
         }
     }
@@ -1942,7 +1942,7 @@ pub fn create_output_sections<E: Arch>(ctx: &mut Context<E>) {
         let need_thunks = exec_total > E::BRANCH_RANGE / 2 - 64 * 1024 * 1024;
 
         let mut thunked: Vec<usize> = Vec::new();
-        let mut plain: Vec<(usize, Vec<usize>)> = Vec::new();
+        let mut plain: Vec<(usize, Vec<crate::input_sections::InputSectionId>)> = Vec::new();
         for chunk_idx in 0..ctx.chunks.len() {
             let ChunkKind::Output { isecs, .. } = &ctx.chunks[chunk_idx].kind else {
                 continue;
@@ -2567,7 +2567,7 @@ pub fn create_output_symtab<E: Arch>(
             n_desc: 0,
             n_value: 0,
         };
-        data.entries.push((ent, Some(i)));
+        data.entries.push((ent, Some(i as u32)));
     }
     data.nlocal = data.entries.len() as u32;
 
@@ -2597,7 +2597,7 @@ pub fn create_output_symtab<E: Arch>(
             n_desc,
             n_value: 0,
         };
-        data.entries.push((ent, Some(i)));
+        data.entries.push((ent, Some(i as u32)));
     }
     data.nextdef = data.entries.len() as u32 - data.nlocal;
 
@@ -2764,7 +2764,7 @@ pub fn create_output_symtab<E: Arch>(
     for (i, (_, sym)) in data.entries.iter().enumerate() {
         if let Some(id) = sym {
             if ctx.symtab[*id].is_extern() {
-                data.output_sym_indices[*id] = i as u32;
+                data.output_sym_indices[*id as usize] = i as u32;
             }
         }
     }
@@ -2838,6 +2838,7 @@ pub fn set_osec_offsets<E: Arch>(ctx: &mut Context<E>) {
                                 shared.isecs[shared.resolve_isec(isec)].is_alive
                             })
                     })
+                    .map(|i| i as u32)
                     .collect();
                 v.par_sort_unstable_by_key(|&i| crate::util::name_sort_key(shared.symtab[i].name()));
                 v
@@ -3041,7 +3042,7 @@ fn build_rebase_info<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
     let mut locs: Vec<u64> = Vec::new();
 
     // Pointers written for UNSIGNED relocations to local targets.
-    for isec in &ctx.isecs {
+    for isec in ctx.isecs.iter() {
         if !isec.is_alive || isec.replacement != crate::input_sections::NO_REPLACEMENT {
             continue;
         }
@@ -3175,7 +3176,7 @@ fn build_bind_info<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
 
     // Pointers in data sections initialized with an imported symbol's
     // address.
-    for isec in &ctx.isecs {
+    for isec in ctx.isecs.iter() {
         if !isec.is_alive || isec.replacement != crate::input_sections::NO_REPLACEMENT {
             continue;
         }
@@ -3749,7 +3750,7 @@ fn copy_chunk<E: Arch>(ctx: &Context<E>, chunk: &Chunk, buf: &mut [u8]) {
                 };
                 slice.copy_from_slice(isec.data());
                 let base = chunk.hdr.addr + isec.output_offset as u64;
-                E::apply_relocs(ctx, ctx.isec_relocs(id), id, base, slice);
+                E::apply_relocs(ctx, ctx.isec_relocs(id as usize), id as usize, base, slice);
             });
         }
         ChunkKind::Stubs => E::write_stubs(ctx, chunk.hdr.addr, buf),
@@ -3831,7 +3832,7 @@ fn copy_chunk<E: Arch>(ctx: &Context<E>, chunk: &Chunk, buf: &mut [u8]) {
         ChunkKind::IndirectSymtab => {
             let mut off = 0;
             for &id in ctx.stub_syms.iter().chain(&ctx.got_syms) {
-                let val = match ctx.symtab_data.output_sym_indices[id] {
+                let val = match ctx.symtab_data.output_sym_indices[id as usize] {
                     u32::MAX => INDIRECT_SYMBOL_LOCAL,
                     idx => idx,
                 };

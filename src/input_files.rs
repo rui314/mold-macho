@@ -32,7 +32,7 @@ pub struct ObjectFile {
     /// subsection references a contiguous range (rel_offset/nrels).
     pub relocs: Vec<crate::input_sections::Reloc>,
     /// All of this object's subsections, sorted by input address.
-    pub subsecs: Vec<usize>,
+    pub subsecs: Vec<crate::input_sections::InputSectionId>,
     /// The flags word of the object's __objc_imageinfo, if it has one.
     pub objc_image_info: Option<u32>,
     /// True if the object carries DWARF debug info, so the output gets
@@ -70,15 +70,15 @@ pub fn isec_relocs_of<'a>(
 /// input address), returning it with the offset within it.
 pub fn find_subsec(
     isecs: &[InputSection],
-    subsecs: &[usize],
+    subsecs: &[crate::input_sections::InputSectionId],
     addr: u64,
 ) -> Option<(usize, u64)> {
-    let i = subsecs.partition_point(|&id| isecs[id].input_addr as u64 <= addr);
+    let i = subsecs.partition_point(|&id| isecs[id as usize].input_addr as u64 <= addr);
     if i == 0 {
         return None;
     }
-    let id = subsecs[i - 1];
-    let isec = &isecs[id];
+    let id = subsecs[i - 1] as usize;
+    let isec = &isecs[id as usize];
     if addr < isec.input_addr as u64 + isec.size || (isec.size == 0 && addr == isec.input_addr as u64) {
         Some((id, addr - isec.input_addr as u64))
     } else {
@@ -148,7 +148,7 @@ pub struct StagedObject {
     pub linker_options: Vec<Vec<String>>,
     pub isecs: Vec<InputSection>,
     pub relocs: Vec<crate::input_sections::Reloc>,
-    pub subsecs: Vec<usize>,
+    pub subsecs: Vec<crate::input_sections::InputSectionId>,
     pub nlists: std::borrow::Cow<'static, [NList]>,
     pub sym_names: Vec<&'static str>,
     /// xxh3 of each extern non-stab name (0 otherwise), computed here
@@ -325,7 +325,7 @@ pub fn stage_object<E: Arch>(
 
     // Subsections of each section, by section ordinal.
     let mut by_ordinal: Vec<Vec<usize>> = vec![Vec::new(); sect_hdrs.len()];
-    let mut subsecs: Vec<usize> = Vec::new();
+    let mut subsecs: Vec<crate::input_sections::InputSectionId> = Vec::new();
 
     for (i, sect) in sect_hdrs.iter().enumerate() {
         // __eh_frame is re-synthesized from parsed CIE/FDE records, and
@@ -401,11 +401,11 @@ pub fn stage_object<E: Arch>(
                 nunwind: 0,
             });
             by_ordinal[i].push(isecs.len() - 1);
-            subsecs.push(isecs.len() - 1);
+            subsecs.push((isecs.len() - 1) as u32);
         }
     }
 
-    subsecs.sort_by_key(|&id| isecs[id].input_addr);
+    subsecs.sort_by_key(|&id| isecs[id as usize].input_addr);
 
     // Read each section's relocations and distribute them to its
     // subsections, rebasing location offsets and section-relative
@@ -605,7 +605,7 @@ pub fn integrate_objects<E: Arch>(
             let obj_idx = obj_base + i;
 
             let mut syms = Vec::with_capacity(st.nlists.len());
-            let mut next_local = base.locals;
+            let mut next_local = base.locals as u32;
             let mut next_id = base.ids;
             for nlist in st.nlists.iter() {
                 if nlist.is_stab() || !nlist.is_extern() {
@@ -631,7 +631,7 @@ pub fn integrate_objects<E: Arch>(
                 }
             }
             for sub in &mut st.subsecs {
-                *sub += base.isec;
+                *sub += base.isec as u32;
             }
             // Hand each subsection its compact-unwind range (records
             // arrive grouped by function), before the indices rebase.
@@ -660,7 +660,7 @@ pub fn integrate_objects<E: Arch>(
             for cie in &mut st.cies {
                 cie.obj = obj_idx;
                 if let Some(p) = &mut cie.personality {
-                    *p = syms[*p];
+                    *p = syms[*p as usize];
                 }
             }
             for fde in &mut st.fdes {
@@ -828,7 +828,7 @@ pub fn integrate_object_with<E: Arch>(
     for mut cie in staged.cies {
         cie.obj = obj_idx;
         if let Some(p) = &mut cie.personality {
-            *p = syms[*p];
+            *p = syms[*p as usize];
         }
         ctx.cies.push(cie);
     }
@@ -850,7 +850,7 @@ pub fn integrate_object_with<E: Arch>(
         hidden: staged.hidden,
         sect_hdrs: staged.sect_hdrs,
         relocs: obj_relocs,
-        subsecs: staged.subsecs.into_iter().map(|i| i + isec_base).collect(),
+        subsecs: staged.subsecs.into_iter().map(|i| i + isec_base as u32).collect(),
         objc_image_info: staged.objc_image_info,
         has_debug_info: staged.has_debug_info,
         nlists: staged.nlists,
@@ -1008,7 +1008,7 @@ const _: () = assert!(std::mem::size_of::<UnwindRecord>() == 32);
 impl UnwindRecord {
     #[inline]
     pub fn personality(&self) -> Option<SymbolId> {
-        (self.personality_sym != UNWIND_NONE).then_some(self.personality_sym as usize)
+        (self.personality_sym != UNWIND_NONE).then_some(self.personality_sym)
     }
     #[inline]
     pub fn lsda(&self) -> Option<(usize, u32)> {
@@ -1028,7 +1028,7 @@ fn parse_compact_unwind<E: Arch>(
     diag: &crate::error::Diagnostics,
     hdr: &MachSection,
     isecs: &[InputSection],
-    subsecs: &[usize],
+    subsecs: &[crate::input_sections::InputSectionId],
     nlists: &[NList],
     data: &'static [u8],
     file_name: &str,
@@ -1036,7 +1036,7 @@ fn parse_compact_unwind<E: Arch>(
 ) {
     let geo: Vec<(u64, u64, usize)> = subsecs
         .iter()
-        .map(|&id| (isecs[id].input_addr as u64, isecs[id].size, id))
+        .map(|&id| (isecs[id as usize].input_addr as u64, isecs[id as usize].size, id as usize))
         .collect();
     let find_subsec = |addr: u64| -> Option<(usize, u32)> {
         let i = geo.partition_point(|&(start, _, _)| start <= addr);
@@ -1202,7 +1202,7 @@ fn parse_eh_frame<E: Arch>(
     diag: &crate::error::Diagnostics,
     hdr: &MachSection,
     isecs: &[InputSection],
-    subsecs: &[usize],
+    subsecs: &[crate::input_sections::InputSectionId],
     nlists: &[NList],
     data: &'static [u8],
     file_name: &str,
@@ -1212,7 +1212,7 @@ fn parse_eh_frame<E: Arch>(
 ) {
     let geo: Vec<(u64, u64, usize)> = subsecs
         .iter()
-        .map(|&id| (isecs[id].input_addr as u64, isecs[id].size, id))
+        .map(|&id| (isecs[id as usize].input_addr as u64, isecs[id as usize].size, id as usize))
         .collect();
     let find_local = |addr: u64| -> Option<(usize, u32)> {
         let i = geo.partition_point(|&(start, _, _)| start <= addr);
@@ -1354,7 +1354,7 @@ fn parse_eh_frame<E: Arch>(
             fatal!(diag, "{file_name}: __eh_frame: unsupported personality reference");
         }
         // A local symbol index, mapped to a symbol at integration.
-        cie.personality = Some(r.r_symbolnum() as usize);
+        cie.personality = Some(r.r_symbolnum());
         cie.personality_offset = addr - cie.input_addr;
     }
 

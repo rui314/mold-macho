@@ -26,7 +26,7 @@ use crate::util::align_to;
 /// uses the entry only when the direct branch really cannot reach.
 pub fn create_range_extension_thunks<E: Arch>(
     ctx: &mut Context<E>,
-    isecs: &[usize],
+    isecs: &[crate::input_sections::InputSectionId],
 ) -> Vec<output_chunks::Thunk> {
     const BATCH: u64 = 10 * 1024 * 1024;
     const MAX_THUNK: u64 = 1024 * 1024;
@@ -98,7 +98,7 @@ pub fn create_range_extension_thunks<E: Arch>(
         }
 
         let thunk_off = align_to(off, 16);
-        let batch: Vec<usize> = isecs[batch_start..i].to_vec();
+        let batch: Vec<crate::input_sections::InputSectionId> = isecs[batch_start..i].to_vec();
         let fwd_ok = total_estimate - batch_start_off <= E::BRANCH_RANGE / 2 - MAX_THUNK;
         let n = scan_relocs_into_thunk::<E>(ctx, &batch, thunk_off, fwd_ok, &mut thunks);
         if n > 0 {
@@ -113,7 +113,7 @@ pub fn create_range_extension_thunks<E: Arch>(
 /// target. Returns the number of entries.
 fn scan_relocs_into_thunk<E: Arch>(
     ctx: &mut Context<E>,
-    batch: &[usize],
+    batch: &[crate::input_sections::InputSectionId],
     thunk_off: u64,
     forward_reachable: bool,
     thunks: &mut Vec<output_chunks::Thunk>,

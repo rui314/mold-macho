@@ -2,7 +2,54 @@
 
 use crate::macho::MachSection;
 
-pub type InputSectionId = usize;
+/// A subsection index, u32 as in mold-rust.
+pub type InputSectionId = u32;
+
+/// The subsection arena. Indexable by a u32 id or a usize (through
+/// Deref to the Vec), so id vectors can be u32 - half the size - while
+/// every arena access stays `isecs[id]`.
+#[derive(Debug, Default)]
+pub struct InputSections(pub Vec<InputSection>);
+
+impl std::ops::Deref for InputSections {
+    type Target = Vec<InputSection>;
+    #[inline]
+    fn deref(&self) -> &Vec<InputSection> {
+        &self.0
+    }
+}
+impl std::ops::DerefMut for InputSections {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut Vec<InputSection> {
+        &mut self.0
+    }
+}
+impl std::ops::Index<u32> for InputSections {
+    type Output = InputSection;
+    #[inline]
+    fn index(&self, id: u32) -> &InputSection {
+        &self.0[id as usize]
+    }
+}
+impl std::ops::IndexMut<u32> for InputSections {
+    #[inline]
+    fn index_mut(&mut self, id: u32) -> &mut InputSection {
+        &mut self.0[id as usize]
+    }
+}
+impl std::ops::Index<usize> for InputSections {
+    type Output = InputSection;
+    #[inline]
+    fn index(&self, id: usize) -> &InputSection {
+        &self.0[id]
+    }
+}
+impl std::ops::IndexMut<usize> for InputSections {
+    #[inline]
+    fn index_mut(&mut self, id: usize) -> &mut InputSection {
+        &mut self.0[id]
+    }
+}
 
 /// What a relocation refers to.
 #[derive(Clone, Copy, Debug)]

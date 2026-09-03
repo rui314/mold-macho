@@ -104,7 +104,7 @@ pub fn print_map<E: Arch>(ctx: &Context<E>) {
         if !sym.is_extern() && (sym.name().starts_with('l') || sym.name().starts_with('L')) {
             continue;
         }
-        syms.push((ctx.sym_addr(i), file_no[obj], sym.name(), isec, sym.value));
+        syms.push((ctx.sym_addr(i as u32), file_no[obj], sym.name(), isec, sym.value));
     }
 
     let mut sizes = vec![0u64; syms.len()];
