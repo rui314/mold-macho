@@ -161,7 +161,7 @@ impl Arch for X86_64 {
                 size: 1 << r.r_length(),
                 is_pcrel: r.is_pcrel(),
                 is_subtracted,
-                target,
+                target: target.pack(),
                 addend,
                 thunk_off: u32::MAX,
             });

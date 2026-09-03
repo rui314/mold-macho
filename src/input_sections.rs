@@ -28,12 +28,56 @@ pub struct Reloc {
     pub is_pcrel: bool,
     /// True if the previous record is a SUBTRACTOR paired with this one.
     pub is_subtracted: bool,
-    pub target: RelocTarget,
+    /// The target, packed into one word: a symbol or subsection index
+    /// in the low 31 bits, with `TARGET_SECTION` set for a subsection.
+    /// Read through `target()`, write through `set_target()` or
+    /// `RelocTarget::pack()`; as a two-word enum it padded the struct
+    /// from 24 to 32 bytes, and a debug link holds ~12M of these.
+    pub target: u32,
     pub addend: i64,
     /// For a branch that may be out of range: the offset of a
     /// range-extension thunk entry within the output section, assigned
     /// during layout. u32::MAX when the branch needs no thunk.
     pub thunk_off: u32,
+}
+
+// A Reloc is the size of an ELF RELA entry, which mold-rust reads from
+// the mapping without materializing anything; Mach-O needs the record
+// processed (ADDEND fusion, SUBTRACTOR pairing, subsection rebasing),
+// so this is the form that processing produces.
+const _: () = assert!(std::mem::size_of::<Reloc>() == 24);
+
+const TARGET_SECTION: u32 = 1 << 31;
+
+impl RelocTarget {
+    #[inline]
+    pub fn pack(self) -> u32 {
+        match self {
+            RelocTarget::Sym(i) => {
+                debug_assert!(i & TARGET_SECTION == 0);
+                i
+            }
+            RelocTarget::Section(i) => {
+                debug_assert!(i & TARGET_SECTION == 0);
+                i | TARGET_SECTION
+            }
+        }
+    }
+}
+
+impl Reloc {
+    #[inline]
+    pub fn target(&self) -> RelocTarget {
+        if self.target & TARGET_SECTION != 0 {
+            RelocTarget::Section(self.target & !TARGET_SECTION)
+        } else {
+            RelocTarget::Sym(self.target)
+        }
+    }
+    #[inline]
+    pub fn set_target(&mut self, t: RelocTarget) {
+        self.target = t.pack();
+    }
 }
 
 /// A subsection of an input object file's section.

@@ -344,7 +344,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
                 let r_address = (isec.output_offset as u64 + rel.offset as u64) as u32;
                 let length = rel.size.trailing_zeros();
 
-                match rel.target {
+                match rel.target() {
                     RelocTarget::Sym(idx) => {
                         let sym_id = ctx.objs[isec.obj as usize].syms[idx as usize];
                         let Some(&symnum) = index_of_sym.get(&sym_id) else {
@@ -587,7 +587,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
             buf[dst..dst + isec.data().len()].copy_from_slice(isec.data());
 
             for rel in crate::input_files::isec_relocs_of(&ctx.objs, isec) {
-                let RelocTarget::Section(target) = rel.target else {
+                let RelocTarget::Section(target) = rel.target() else {
                     continue;
                 };
                 let target = ctx.resolve_isec(target as usize);

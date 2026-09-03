@@ -426,12 +426,12 @@ pub fn stage_object<E: Arch>(
         rels.sort_unstable_by_key(|rel| rel.offset);
 
         for rel in &mut rels {
-            if let crate::input_sections::RelocTarget::Section(sect_pos) = rel.target {
+            if let crate::input_sections::RelocTarget::Section(sect_pos) = rel.target() {
                 let taddr = (sect_hdrs[sect_pos as usize].addr as i64 + rel.addend) as u64;
                 let Some((tsub, toff)) = find_subsec(&isecs, &subsecs, taddr) else {
                     fatal!(diag, "{}: relocation against a discarded section", mf.name);
                 };
-                rel.target = crate::input_sections::RelocTarget::Section(tsub as u32);
+                rel.set_target(crate::input_sections::RelocTarget::Section(tsub as u32));
                 rel.addend = toff as i64;
             }
         }
@@ -625,9 +625,10 @@ pub fn integrate_objects<E: Arch>(
             // indices; rebase them to global once over the object's
             // reloc arena (rel_offset/nrels stay object-local).
             for rel in &mut st.relocs {
-                if let crate::input_sections::RelocTarget::Section(local) = rel.target {
-                    rel.target =
-                        crate::input_sections::RelocTarget::Section(base.isec as u32 + local);
+                if let crate::input_sections::RelocTarget::Section(local) = rel.target() {
+                    rel.set_target(
+                        crate::input_sections::RelocTarget::Section(base.isec as u32 + local),
+                        );
                 }
             }
             for sub in &mut st.subsecs {
@@ -786,8 +787,8 @@ pub fn integrate_object_with<E: Arch>(
     }
     let mut obj_relocs = staged.relocs;
     for rel in &mut obj_relocs {
-        if let crate::input_sections::RelocTarget::Section(local) = rel.target {
-            rel.target = crate::input_sections::RelocTarget::Section(isec_base as u32 + local);
+        if let crate::input_sections::RelocTarget::Section(local) = rel.target() {
+            rel.set_target(crate::input_sections::RelocTarget::Section(isec_base as u32 + local));
         }
     }
 

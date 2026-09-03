@@ -1042,7 +1042,7 @@ pub fn convert_init_offsets<E: Arch>(ctx: &mut Context<E>) {
                         None => continue,
                     }
                 }
-                None => match rel.target {
+                None => match rel.target() {
                     crate::input_sections::RelocTarget::Section(isec) => {
                         (ctx.resolve_isec(isec as usize), rel.addend as u64)
                     }

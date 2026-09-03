@@ -114,7 +114,7 @@ pub fn dead_strip<E: Arch>(ctx: &mut Context<E>) {
     // serial walk to report stable chains.
     let edges_of = |id: usize, out: &mut Vec<usize>| {
         for rel in ctx.isec_relocs(id) {
-            match rel.target {
+            match rel.target() {
                 RelocTarget::Sym(idx) => {
                     let sym = &ctx.symtab[ctx.objs[ctx.isecs[id].obj as usize].syms[idx as usize]];
                     if let Some(isec) = sym.isec.map(|i| i as usize) {
@@ -175,7 +175,7 @@ pub fn dead_strip<E: Arch>(ctx: &mut Context<E>) {
         ) {
             let mut targets = Vec::new();
             for rel in gc.ctx.isec_relocs(id) {
-                match rel.target {
+                match rel.target() {
                     RelocTarget::Sym(idx) => {
                         let sym =
                             &gc.ctx.symtab[gc.ctx.objs[gc.ctx.isecs[id].obj as usize].syms[idx as usize]];
