@@ -297,9 +297,11 @@ fn parse_version(diag: &Diagnostics, arg: &str) -> u32 {
     encode_version(major, minor, patch)
 }
 
+/// ld64 takes the platform by name or by its PLATFORM_* number; Xcode
+/// passes the number for some prelink steps (`-platform_version 1 11.0`).
 fn parse_platform(diag: &Diagnostics, arg: &str) -> u32 {
     match arg {
-        "macos" | "macosx" => PLATFORM_MACOS,
+        "macos" | "macosx" | "1" => PLATFORM_MACOS,
         _ => fatal!(diag, "unsupported platform: {arg}"),
     }
 }
