@@ -2920,63 +2920,91 @@ pub fn set_osec_offsets<E: Arch>(ctx: &mut Context<E>) {
 
         let seg_vmaddr = addr;
         let seg_fileoff = fileoff;
-        let mut cursor = fileoff;
+        let mut cursor;
 
         let chunk_idxs = ctx.segments[seg_idx].chunks.clone();
 
-        // Regular chunks, in file order
-        for &idx in &chunk_idxs {
-            if ctx.chunks[idx].is_zerofill() {
-                continue;
+        // The output sections with range-extension thunks (executable
+        // sections of __TEXT). Once this segment is placed their addresses
+        // are final, so the pessimistic first-pass thunk entries can be
+        // trimmed and the segment placed again - mold-rust runs
+        // remove_redundant_thunks and then set_osec_offsets once more.
+        let thunked: Vec<usize> = chunk_idxs
+            .iter()
+            .copied()
+            .filter(|&i| matches!(&ctx.chunks[i].kind, ChunkKind::Output { thunks, .. } if !thunks.is_empty()))
+            .collect();
+        let mut thunks_trimmed = false;
+        loop {
+            cursor = seg_fileoff;
+            // Regular chunks, in file order
+            for &idx in &chunk_idxs {
+                if ctx.chunks[idx].is_zerofill() {
+                    continue;
+                }
+                let size = match &ctx.chunks[idx].kind {
+                    ChunkKind::MachHeader => header_size,
+                    ChunkKind::Symtab => {
+                        (ctx.symtab_data.entries.len() * size_of::<NList>()) as u64
+                    }
+                    ChunkKind::Strtab => ctx.symtab_data.strtab_size as u64,
+                    // Encoded once; the personality cells the encoding
+                    // cannot know yet (GOT addresses) come back as a
+                    // patch list for the copy phase.
+                    ChunkKind::UnwindInfo => {
+                        let (data, personalities) =
+                            t!("unwind_encode", output_chunks::encode_unwind_info(ctx));
+                        let len = data.len() as u64;
+                        unwind_cache = Some((data, personalities));
+                        len
+                    }
+                    ChunkKind::ChainedFixups => ctx.chained_data.len() as u64,
+                    ChunkKind::RebaseInfo => ctx.rebase_data.len() as u64,
+                    ChunkKind::BindInfo => ctx.bind_data.len() as u64,
+                    // Encoded with the other LINKEDIT tables when layout
+                    // reached __LINKEDIT, and copied out verbatim later.
+                    // (__unwind_info above cannot get the same treatment:
+                    // its content includes personality GOT addresses,
+                    // which the data segments haven't fixed yet when
+                    // __TEXT is sized.)
+                    ChunkKind::ExportTrie => trie_cache.as_ref().unwrap().len() as u64,
+                    ChunkKind::FunctionStarts => ctx.function_starts_data.len() as u64,
+                    ChunkKind::DataInCode => (ctx.dice_data.len() * 8) as u64,
+                    ChunkKind::CodeSignature => {
+                        cursor = align_to(cursor, 16);
+                        code_signature_size(&ctx.args.output, cursor)
+                    }
+                    _ => ctx.chunks[idx].hdr.size,
+                };
+                let chunk = &mut ctx.chunks[idx];
+                let p2align = match chunk.kind {
+                    ChunkKind::Symtab | ChunkKind::Strtab | ChunkKind::RebaseInfo
+                    | ChunkKind::BindInfo | ChunkKind::ChainedFixups | ChunkKind::ExportTrie
+                    | ChunkKind::FunctionStarts | ChunkKind::DataInCode => 3,
+                    ChunkKind::IndirectSymtab => 2,
+                    ChunkKind::CodeSignature => 4,
+                    _ => chunk.hdr.p2align,
+                };
+                cursor = align_to(cursor, 1 << p2align);
+                chunk.hdr.fileoff = cursor;
+                chunk.hdr.addr = seg_vmaddr + (cursor - seg_fileoff);
+                chunk.hdr.size = size;
+                cursor += size;
             }
-            let size = match &ctx.chunks[idx].kind {
-                ChunkKind::MachHeader => header_size,
-                ChunkKind::Symtab => {
-                    (ctx.symtab_data.entries.len() * size_of::<NList>()) as u64
+
+            if !thunked.is_empty() && !thunks_trimmed {
+                thunks_trimmed = true;
+                if crate::thunks::remove_redundant_thunks(ctx, &thunked) {
+                    // Sizes changed: place the segment again. __unwind_info
+                    // was encoded from the old function addresses.
+                    unwind_cache = None;
+                    continue;
                 }
-                ChunkKind::Strtab => ctx.symtab_data.strtab_size as u64,
-                // Encoded once; the personality cells the encoding
-                // cannot know yet (GOT addresses) come back as a
-                // patch list for the copy phase.
-                ChunkKind::UnwindInfo => {
-                    let (data, personalities) =
-                        t!("unwind_encode", output_chunks::encode_unwind_info(ctx));
-                    let len = data.len() as u64;
-                    unwind_cache = Some((data, personalities));
-                    len
-                }
-                ChunkKind::ChainedFixups => ctx.chained_data.len() as u64,
-                ChunkKind::RebaseInfo => ctx.rebase_data.len() as u64,
-                ChunkKind::BindInfo => ctx.bind_data.len() as u64,
-                // Encoded with the other LINKEDIT tables when layout
-                // reached __LINKEDIT, and copied out verbatim later.
-                // (__unwind_info above cannot get the same treatment:
-                // its content includes personality GOT addresses,
-                // which the data segments haven't fixed yet when
-                // __TEXT is sized.)
-                ChunkKind::ExportTrie => trie_cache.as_ref().unwrap().len() as u64,
-                ChunkKind::FunctionStarts => ctx.function_starts_data.len() as u64,
-                ChunkKind::DataInCode => (ctx.dice_data.len() * 8) as u64,
-                ChunkKind::CodeSignature => {
-                    cursor = align_to(cursor, 16);
-                    code_signature_size(&ctx.args.output, cursor)
-                }
-                _ => ctx.chunks[idx].hdr.size,
-            };
-            let chunk = &mut ctx.chunks[idx];
-            let p2align = match chunk.kind {
-                ChunkKind::Symtab | ChunkKind::Strtab | ChunkKind::RebaseInfo
-                | ChunkKind::BindInfo | ChunkKind::ChainedFixups | ChunkKind::ExportTrie
-                | ChunkKind::FunctionStarts | ChunkKind::DataInCode => 3,
-                ChunkKind::IndirectSymtab => 2,
-                ChunkKind::CodeSignature => 4,
-                _ => chunk.hdr.p2align,
-            };
-            cursor = align_to(cursor, 1 << p2align);
-            chunk.hdr.fileoff = cursor;
-            chunk.hdr.addr = seg_vmaddr + (cursor - seg_fileoff);
-            chunk.hdr.size = size;
-            cursor += size;
+            }
+            break;
+        }
+        if !thunked.is_empty() {
+            crate::thunks::gather_thunk_addresses(ctx, &thunked);
         }
 
         let filesize = cursor - seg_fileoff;

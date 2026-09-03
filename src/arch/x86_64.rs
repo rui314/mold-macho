@@ -163,7 +163,6 @@ impl Arch for X86_64 {
                 is_subtracted,
                 target: target.pack(),
                 addend,
-                thunk_off: u32::MAX,
             });
         }
         vec

@@ -391,7 +391,6 @@ impl Arch for Arm64 {
                 is_subtracted,
                 target: target.pack(),
                 addend,
-                thunk_off: u32::MAX,
             });
             i += 1;
         }
@@ -452,15 +451,15 @@ impl Arch for Arm64 {
                 ARM64_RELOC_BRANCH26 => {
                     let mut val = s.wrapping_add_signed(a).wrapping_sub(p) as i64;
                     if !(-(1 << 27)..1 << 27).contains(&val) {
-                        // Out of reach: branch through the thunk entry
-                        // assigned during layout.
-                        if r.thunk_off == u32::MAX {
-                            error!(ctx, "branch target out of range: {val:x}");
-                        } else {
-                            let isec = &ctx.isecs[isec_id];
-                            let thunk_addr =
-                                ctx.chunks[isec.osec as usize].hdr.addr + r.thunk_off as u64;
-                            val = thunk_addr.wrapping_sub(p) as i64;
+                        // Out of reach: branch through one of the
+                        // symbol's thunk entries that is within reach of
+                        // here (mold-rust's thunk_addrs lookup).
+                        let thunk = ctx.reloc_target_sym(obj, r).and_then(|sym| {
+                            crate::thunks::reachable_thunk_addr::<Self>(ctx, sym, p)
+                        });
+                        match thunk {
+                            Some(t) => val = t.wrapping_sub(p) as i64,
+                            None => error!(ctx, "branch target out of range: {val:x}"),
                         }
                     }
                     write32(loc, read32(loc) | bits(val as u64, 27, 2) as u32);

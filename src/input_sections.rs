@@ -81,10 +81,6 @@ pub struct Reloc {
     /// from 24 to 32 bytes, and a debug link holds ~12M of these.
     pub target: u32,
     pub addend: i64,
-    /// For a branch that may be out of range: the offset of a
-    /// range-extension thunk entry within the output section, assigned
-    /// during layout. u32::MAX when the branch needs no thunk.
-    pub thunk_off: u32,
 }
 
 // A Reloc is the size of an ELF RELA entry, which mold-rust reads from
