@@ -152,13 +152,37 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
                     n_strx: add_string(&mut strtab, sym.name()),
                     n_type: N_SECT,
                     n_sect: ordinals[ctx.isecs[isec].osec as usize],
-                    n_desc: 0,
+                    n_desc: nlist.n_desc & (N_ALT_ENTRY | N_NO_DEAD_STRIP),
                     n_value: sym_addr(ctx, sym_id),
                 });
             }
         }
     }
     let nlocal = nlists_out.len() as u32;
+
+    // The n_desc flags a defined global carries in its object, which the
+    // next link needs as much as this one did. N_ALT_ENTRY is the
+    // critical one: it marks a symbol that does not begin a new
+    // subsection (Swift's class metadata symbol $s..CN is an alt entry
+    // into the full-metadata object $s..CMf, referenced as CMf+0x18),
+    // and a link that splits there re-aligns the tail and moves the
+    // symbol away from every non-symbolic reference to it.
+    let mut desc_of: HashMap<crate::symbol::SymbolId, u16> = HashMap::new();
+    for (obj_idx, obj) in ctx.objs.iter().enumerate() {
+        if !obj.is_alive {
+            continue;
+        }
+        let r = obj.global_range();
+        for (nlist, &sym_id) in obj.nlists[r.clone()].iter().zip(&obj.syms[r]) {
+            if !nlist.is_stab()
+                && nlist.is_extern()
+                && nlist.n_type() != N_UNDF
+                && matches!(ctx.symtab[sym_id].origin(), Origin::Obj(o) if o as usize == obj_idx)
+            {
+                desc_of.insert(sym_id, nlist.n_desc);
+            }
+        }
+    }
 
     // Defined externals, sorted by name.
     let mut globals: Vec<usize> = (0..ctx.symtab.syms.len())
@@ -182,7 +206,8 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
             ),
             None => (N_ABS | N_EXT, 0),
         };
-        let mut n_desc = 0;
+        let mut n_desc = desc_of.get(&(i as u32)).copied().unwrap_or(0)
+            & (N_WEAK_DEF | N_ALT_ENTRY | N_NO_DEAD_STRIP | N_SYMBOL_RESOLVER | REFERENCED_DYNAMICALLY);
         if sym.is_weak_def() {
             n_desc |= N_WEAK_DEF;
         }
@@ -212,6 +237,8 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
         if sym.is_common() {
             n_value = sym.value;
             n_desc |= (sym.common_p2align as u16) << 8;
+        } else if sym.is_weak_ref() {
+            n_desc |= N_WEAK_REF;
         }
         index_of_sym.insert(i as u32, nlists_out.len() as u32);
         nlists_out.push(NList {

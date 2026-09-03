@@ -126,6 +126,7 @@ pub const N_WEAK_REF: u16 = 0x0040;
 pub const N_WEAK_DEF: u16 = 0x0080;
 pub const N_NO_DEAD_STRIP: u16 = 0x0020;
 pub const N_ALT_ENTRY: u16 = 0x0200;
+pub const N_SYMBOL_RESOLVER: u16 = 0x0100;
 pub const REFERENCED_DYNAMICALLY: u16 = 0x0010;
 
 // ARM64 relocation types
