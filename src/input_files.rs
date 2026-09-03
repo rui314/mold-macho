@@ -97,8 +97,12 @@ pub struct DylibFile {
     pub install_name: String,
     pub current_version: u32,
     pub compatibility_version: u32,
-    /// The 1-based ordinal used to refer to this dylib in bind records.
+    /// The 1-based ordinal used to refer to this dylib in bind records;
+    /// BIND_SPECIAL_DYLIB_MAIN_EXECUTABLE (0) for a -bundle_loader.
     pub dylib_idx: i32,
+    /// The -bundle_loader executable: its symbols bind to the main
+    /// executable at run time and it gets no LC_LOAD_DYLIB.
+    pub is_bundle_loader: bool,
     /// Position in input order, for resolution tie-breaking.
     pub priority: u32,
     /// True if loaded with LC_LOAD_WEAK_DYLIB: dyld tolerates the
@@ -1740,7 +1744,6 @@ pub fn parse_dylib_binary<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile
         }
     }
 
-    let idx = ctx.dylibs.len();
     let priority = ctx.next_priority();
     add_dylib(
         ctx,
@@ -1749,7 +1752,8 @@ pub fn parse_dylib_binary<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile
             install_name,
             current_version,
             compatibility_version,
-            dylib_idx: idx as i32 + 1,
+            dylib_idx: next_dylib_ordinal(ctx),
+            is_bundle_loader: false,
             priority,
             is_weak: false,
             is_reexported: false,
@@ -1786,6 +1790,138 @@ fn thread_local_section_ordinals(data: &[u8], hdr: &MachHeader) -> Vec<u8> {
         off += lc.cmdsize as usize;
     }
     ordinals
+}
+
+/// The ordinal the next LC_LOAD_DYLIB will have: dylibs are numbered
+/// in load-command order, and a -bundle_loader has no load command.
+pub fn next_dylib_ordinal<E: Arch>(ctx: &Context<E>) -> i32 {
+    ctx.dylibs.iter().filter(|d| !d.is_bundle_loader).count() as i32 + 1
+}
+
+/// The names in an export trie (LC_DYLD_EXPORTS_TRIE, or LC_DYLD_INFO's
+/// export section): what a stripped executable or dylib exports.
+fn export_trie_names(data: &[u8], off: usize, size: usize) -> Vec<&'static str> {
+    let trie = &data[off..(off + size).min(data.len())];
+    let mut names = Vec::new();
+    let mut stack: Vec<(usize, String)> = vec![(0, String::new())];
+    let read_uleb = |pos: &mut usize| -> u64 {
+        let mut val = 0u64;
+        let mut shift = 0;
+        while *pos < trie.len() {
+            let b = trie[*pos];
+            *pos += 1;
+            val |= ((b & 0x7f) as u64) << shift;
+            shift += 7;
+            if b & 0x80 == 0 {
+                break;
+            }
+        }
+        val
+    };
+    while let Some((node, prefix)) = stack.pop() {
+        if node >= trie.len() {
+            continue;
+        }
+        let mut pos = node;
+        let terminal = read_uleb(&mut pos) as usize;
+        if terminal > 0 {
+            names.push(String::leak(prefix.clone()) as &'static str);
+            pos += terminal;
+        }
+        let Some(&nchildren) = trie.get(pos) else { continue };
+        pos += 1;
+        for _ in 0..nchildren {
+            let end = trie[pos..].iter().position(|&b| b == 0).map_or(trie.len(), |n| pos + n);
+            let label = String::from_utf8_lossy(&trie[pos..end]);
+            pos = end + 1;
+            let child = read_uleb(&mut pos) as usize;
+            stack.push((child, format!("{prefix}{label}")));
+        }
+    }
+    names
+}
+
+/// Registers the -bundle_loader executable as the library the bundle's
+/// remaining undefined symbols may resolve to. Like a dylib, minus the
+/// install name; bound at run time as the main executable (ordinal 0)
+/// and without a load command of its own. Exports come from the symbol
+/// table's defined externals and the export trie (Xcode's test hosts
+/// are linked with -export_dynamic, and an executable may be stripped).
+pub fn parse_bundle_loader<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile) -> usize {
+    let data = mf.data;
+    let hdr = MachHeader::read_from(data);
+    if hdr.magic != MH_MAGIC_64 || hdr.filetype != MH_EXECUTE {
+        fatal!(ctx, "{}: -bundle_loader is not an executable", mf.name);
+    }
+
+    let mut symtab_cmd = None;
+    let mut dysymtab_cmd = None;
+    let mut trie: Option<(usize, usize)> = None;
+    let mut off = size_of::<MachHeader>();
+    for _ in 0..hdr.ncmds {
+        let lc = LoadCommand::read_from(&data[off..]);
+        match lc.cmd {
+            LC_SYMTAB => symtab_cmd = Some(SymtabCommand::read_from(&data[off..])),
+            LC_DYSYMTAB => dysymtab_cmd = Some(DysymtabCommand::read_from(&data[off..])),
+            LC_DYLD_EXPORTS_TRIE => {
+                let cmd = LinkEditDataCommand::read_from(&data[off..]);
+                trie = Some((cmd.dataoff as usize, cmd.datasize as usize));
+            }
+            LC_DYLD_INFO | LC_DYLD_INFO_ONLY => {
+                let cmd = DyldInfoCommand::read_from(&data[off..]);
+                if cmd.export_size != 0 {
+                    trie = Some((cmd.export_off as usize, cmd.export_size as usize));
+                }
+            }
+            _ => {}
+        }
+        off += lc.cmdsize as usize;
+    }
+
+    let mut exports: hashbrown::HashSet<&'static str> = hashbrown::HashSet::new();
+    let mut tlv_exports: hashbrown::HashSet<&'static str> = hashbrown::HashSet::new();
+    if let (Some(sym), Some(dysym)) = (symtab_cmd, dysymtab_cmd) {
+        let nlists: Vec<NList> = read_array(data, sym.symoff as usize, sym.nsyms as usize);
+        let strtab = &data[sym.stroff as usize..(sym.stroff + sym.strsize) as usize];
+        // SAFETY: input files are leaked, so the string table lives for
+        // the rest of the process.
+        let strtab: &'static [u8] = validate_strtab(unsafe { std::mem::transmute(strtab) });
+        let tlv_sects = thread_local_section_ordinals(data, &hdr);
+        let range = dysym.iextdefsym as usize..(dysym.iextdefsym + dysym.nextdefsym) as usize;
+        for nlist in &nlists[range] {
+            let name = symbol_name(strtab, nlist);
+            if tlv_sects.contains(&nlist.n_sect) {
+                tlv_exports.insert(name);
+            }
+            exports.insert(name);
+        }
+    }
+    if let Some((off, size)) = trie {
+        exports.extend(export_trie_names(data, off, size));
+    }
+
+    let priority = ctx.next_priority();
+    add_dylib(
+        ctx,
+        DylibFile {
+            path: mf.name.clone(),
+            install_name: mf.name.clone(),
+            current_version: encode_version(1, 0, 0),
+            compatibility_version: encode_version(1, 0, 0),
+            dylib_idx: BIND_SPECIAL_DYLIB_MAIN_EXECUTABLE,
+            is_bundle_loader: true,
+            priority,
+            is_weak: false,
+            is_reexported: false,
+            is_needed: false,
+            is_dead_strippable: false,
+            is_app_extension_safe: true,
+            sub_framework: None,
+            sub_clients: Vec::new(),
+            exports,
+            tlv_exports,
+        },
+    )
 }
 
 /// Reads a dylib binary's exported symbols and reexported install
@@ -1992,7 +2128,6 @@ fn interpret_ld_symbols<E: Arch>(ctx: &Context<E>, tbd: &mut tapi::TbdFile) {
 pub fn parse_dylib<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile) -> usize {
     let mut tbd = tapi::parse_cached(&ctx.diag, mf);
     interpret_ld_symbols(ctx, &mut tbd);
-    let idx = ctx.dylibs.len();
     let mut exports: hashbrown::HashSet<&'static str> =
         tbd.exports.into_iter().collect();
     exports.extend(tbd.weak_exports);
@@ -2037,7 +2172,8 @@ pub fn parse_dylib<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile) -> us
             install_name: tbd.install_name,
             current_version: tbd.current_version,
             compatibility_version: encode_version(1, 0, 0),
-            dylib_idx: idx as i32 + 1,
+            dylib_idx: next_dylib_ordinal(ctx),
+            is_bundle_loader: false,
             priority,
             is_weak: false,
             is_reexported: false,

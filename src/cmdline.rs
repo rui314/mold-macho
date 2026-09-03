@@ -48,6 +48,9 @@ pub struct Args {
     /// The output file type: MH_EXECUTE, MH_DYLIB or MH_BUNDLE.
     pub output_type: u32,
     pub install_name: Option<String>,
+    /// -bundle_loader: the executable a bundle's undefined symbols may
+    /// resolve to, bound at run time as the main executable.
+    pub bundle_loader: Option<String>,
     pub arch: Option<String>,
     pub entry: String,
     pub platform: u32,
@@ -208,6 +211,7 @@ impl Default for Args {
             output: "a.out".to_string(),
             output_type: MH_EXECUTE,
             install_name: None,
+            bundle_loader: None,
             arch: None,
             entry: "_main".to_string(),
             platform: PLATFORM_MACOS,
@@ -439,6 +443,7 @@ pub fn parse_args(diag: &Diagnostics, cmdline: &[String]) -> Args {
             "-F" => args.framework_paths.push(next_arg(&mut i).to_string()),
             "-dylib" => args.output_type = MH_DYLIB,
             "-bundle" => args.output_type = MH_BUNDLE,
+            "-bundle_loader" => args.bundle_loader = Some(next_arg(&mut i).to_string()),
             "-rpath" => args.rpaths.push(next_arg(&mut i).to_string()),
             "-install_name" | "-dylib_install_name" => {
                 args.install_name = Some(next_arg(&mut i).to_string())

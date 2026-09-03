@@ -556,7 +556,7 @@ pub fn create_load_commands<E: Arch>(ctx: &Context<E>) -> Vec<Vec<u8>> {
         }));
     }
 
-    for dylib in &ctx.dylibs {
+    for dylib in ctx.dylibs.iter().filter(|d| !d.is_bundle_loader) {
         vec.push(create_load_dylib_cmd(dylib));
     }
 

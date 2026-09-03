@@ -416,6 +416,18 @@ pub fn read_input_files<E: Arch>(ctx: &mut Context<E>) {
         }
     }
     ctx.args.inputs = inputs;
+
+    // -bundle_loader: the executable that will load this bundle. Its
+    // exports resolve the bundle's remaining undefined symbols, bound
+    // at run time to the main executable (XCTest bundles hosted by an
+    // app are linked this way).
+    if let Some(path) = ctx.args.bundle_loader.clone() {
+        if ctx.args.output_type != MH_BUNDLE {
+            fatal!(ctx, "-bundle_loader can only be used with -bundle");
+        }
+        let mf = MappedFile::must_open(&ctx.diag, Path::new(&path));
+        crate::input_files::parse_bundle_loader(ctx, mf);
+    }
     t!("load_pending", load_pending(ctx, queue));
 }
 
@@ -1597,7 +1609,9 @@ pub fn dead_strip_dylibs<E: Arch>(ctx: &mut Context<E>) {
     for (i, mut dylib) in old.into_iter().enumerate() {
         if used[i] {
             remap[i] = ctx.dylibs.len();
-            dylib.dylib_idx = ctx.dylibs.len() as i32 + 1;
+            if !dylib.is_bundle_loader {
+                dylib.dylib_idx = crate::input_files::next_dylib_ordinal(ctx);
+            }
             ctx.dylibs.push(dylib);
         }
     }
@@ -2763,8 +2777,9 @@ pub fn create_output_symtab<E: Arch>(
         };
         let n_strx = 0;
         names.push(sym.name());
-        // A flat-namespace import records the DYNAMIC_LOOKUP ordinal.
-        let ordinal = (ctx.bind_ordinal(dylib) as u8) as u16;
+        // A flat-namespace import records the DYNAMIC_LOOKUP ordinal, a
+        // -bundle_loader import the EXECUTABLE ordinal.
+        let ordinal = ctx.nlist_library_ordinal(dylib) as u16;
         let mut n_desc = ordinal << 8;
         if sym.is_weak_ref() {
             n_desc |= N_WEAK_REF;
@@ -3392,7 +3407,9 @@ fn build_bind_info<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
             unreachable!()
         };
         let ordinal = ctx.bind_ordinal(dylib);
-        if ordinal < 0 {
+        // The special ordinals (main executable 0, flat lookup -2) take
+        // the SPECIAL_IMM form, as ld64 emits them.
+        if ordinal <= 0 {
             buf.push(BIND_OPCODE_SET_DYLIB_SPECIAL_IMM | (ordinal & 0xf) as u8);
         } else if ordinal < 16 {
             buf.push(BIND_OPCODE_SET_DYLIB_ORDINAL_IMM | ordinal as u8);
@@ -3642,20 +3659,22 @@ fn build_chained_fixups<E: Arch>(ctx: &Context<E>) -> ChainedFixups {
         let Origin::Dylib(dylib) = s.origin() else {
             unreachable!()
         };
-        let ordinal = ctx.bind_ordinal(dylib) as u8;
         let weak = s.is_weak_ref() as u32;
         match import_format {
             DYLD_CHAINED_IMPORT => {
-                push32(&mut buf, ordinal as u32 | (weak << 8) | (name_offs[i] << 9));
+                let ordinal = ctx.chained_import_ordinal(dylib, 8) as u32;
+                push32(&mut buf, ordinal | (weak << 8) | (name_offs[i] << 9));
             }
             DYLD_CHAINED_IMPORT_ADDEND => {
-                push32(&mut buf, ordinal as u32 | (weak << 8) | (name_offs[i] << 9));
+                let ordinal = ctx.chained_import_ordinal(dylib, 8) as u32;
+                push32(&mut buf, ordinal | (weak << 8) | (name_offs[i] << 9));
                 push32(&mut buf, addend as u32);
             }
             _ => {
+                let ordinal = ctx.chained_import_ordinal(dylib, 16);
                 push64(
                     &mut buf,
-                    ordinal as u64 | ((weak as u64) << 16) | ((name_offs[i] as u64) << 32),
+                    ordinal | ((weak as u64) << 16) | ((name_offs[i] as u64) << 32),
                 );
                 push64(&mut buf, addend);
             }
