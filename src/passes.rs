@@ -466,32 +466,29 @@ pub fn load_autolink_deps<E: Arch>(ctx: &mut Context<E>) -> Autolinked {
         }
     }
 
+    // An auto-link option is a hint, and ld64 says nothing when it
+    // finds no library or framework for one. Header-only SDK
+    // frameworks make that routine: every Swift object importing
+    // CoreAudioTypes carries `-framework CoreAudioTypes`, whose
+    // framework directory holds headers and a module map but no
+    // binary (CotEditor's build printed the warning 317 times).
     let before = (ctx.objs.len(), ctx.dylibs.len());
     let mut queue: Vec<PendingObject> = Vec::new();
     for opt in pending {
         ctx.processed_linker_options.insert(opt.clone());
         let strs: Vec<&str> = opt.iter().map(String::as_str).collect();
-        match strs.as_slice() {
-            [flag] if flag.starts_with("-l") => {
-                let name = &flag[2..];
-                match find_library(ctx, name) {
-                    Some(path) => {
-                        if let Some(mf) = MappedFile::open(&ctx.diag, &path) {
-                            collect_file(ctx, mf, false, false, false, false, &mut queue);
-                        }
-                    }
-                    None => crate::warn!(ctx, "auto-linked library not found: -l{name}"),
-                }
+        let path = match strs.as_slice() {
+            [flag] if flag.starts_with("-l") => find_library(ctx, &flag[2..]),
+            ["-framework", name] => find_framework(ctx, name),
+            _ => {
+                crate::warn!(ctx, "unknown auto-link option: {:?}", opt);
+                None
             }
-            ["-framework", name] => match find_framework(ctx, name) {
-                Some(path) => {
-                    if let Some(mf) = MappedFile::open(&ctx.diag, &path) {
-                        collect_file(ctx, mf, false, false, false, false, &mut queue);
-                    }
-                }
-                None => crate::warn!(ctx, "auto-linked framework not found: {name}"),
-            },
-            _ => crate::warn!(ctx, "unknown auto-link option: {:?}", opt),
+        };
+        if let Some(path) = path {
+            if let Some(mf) = MappedFile::open(&ctx.diag, &path) {
+                collect_file(ctx, mf, false, false, false, false, &mut queue);
+            }
         }
     }
     load_pending(ctx, queue);
