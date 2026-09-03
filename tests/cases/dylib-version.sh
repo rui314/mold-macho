@@ -10,3 +10,10 @@ $CC --ld-path=$mold -shared -o $t/libfoo.dylib $t/a.o \
 otool -l $t/libfoo.dylib | grep -A5 LC_ID_DYLIB > $t/log
 grep -q 'current version 2.3.4' $t/log
 grep -q 'compatibility version 2.0.0' $t/log
+
+# The older -dylib_ spellings, which Xcode still passes.
+$CC --ld-path=$mold -shared -o $t/libbar.dylib $t/a.o \
+  -Wl,-dylib_current_version,5.6.7 -Wl,-dylib_compatibility_version,5.0.0
+otool -l $t/libbar.dylib | grep -A5 LC_ID_DYLIB > $t/log
+grep -q 'current version 5.6.7' $t/log
+grep -q 'compatibility version 5.0.0' $t/log

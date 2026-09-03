@@ -7,6 +7,11 @@ use crate::error::Diagnostics;
 use crate::fatal;
 use crate::macho::*;
 
+/// The Apple ld64 version whose command line this linker implements,
+/// reported by -version_details. Xcode passes flags according to this
+/// number (Xcode 26.6 ships ld-1267).
+pub const LD64_COMPAT_VERSION: &str = "1267";
+
 /// An input in command line order.
 #[derive(Clone, Debug)]
 pub enum InputArg {
@@ -517,10 +522,12 @@ pub fn parse_args(diag: &Diagnostics, cmdline: &[String]) -> Args {
                     Err(_) => fatal!(diag, "cannot read -unexported_symbols_list: {path}"),
                 }
             }
-            "-current_version" => {
+            // The -dylib_ spellings are the older names ld64 still
+            // accepts; Xcode passes -dylib_compatibility_version.
+            "-current_version" | "-dylib_current_version" => {
                 args.current_version = parse_version(diag, next_arg(&mut i))
             }
-            "-compatibility_version" => {
+            "-compatibility_version" | "-dylib_compatibility_version" => {
                 args.compatibility_version = parse_version(diag, next_arg(&mut i))
             }
             // ld64 prints its version banner to stdout and continues
@@ -531,6 +538,20 @@ pub fn parse_args(diag: &Diagnostics, cmdline: &[String]) -> Args {
                     env!("CARGO_PKG_VERSION")
                 );
                 version_shown = true;
+            }
+            // Xcode's build system runs `ld -version_details` before the
+            // first link and refuses to build if the output is not JSON.
+            // It decodes two keys: "version", an ld64 version it compares
+            // against thresholds to decide which flags to pass (e.g.
+            // -sdk_imports needs 1164), and "architectures". Apple's ld
+            // also reports its LTO and TAPI versions; they are ignored.
+            // We claim the ld64 version whose command line we implement
+            // so that Xcode drives us exactly as it drives ld-prime.
+            "-version_details" => {
+                println!(
+                    "{{\n\t\"version\": \"{LD64_COMPAT_VERSION}\",\n\t\"architectures\": [\n\t\t\"arm64\",\n\t\t\"x86_64\"\n\t]\n}}"
+                );
+                std::process::exit(0);
             }
             "-noall_load" => args.all_load = false,
             "-ObjC" => args.load_objc = true,
@@ -634,9 +655,13 @@ pub fn parse_args(diag: &Diagnostics, cmdline: &[String]) -> Args {
             }
 
             // Ignored options. ld64 takes -O<n> as a linker
-            // optimization level hint. This linker's output is always
+            // optimization level hint (Xcode passes -O0 for debug and
+            // -Os for release builds). This linker's output is always
             // deterministic, so -reproducible has nothing to switch on.
-            "-demangle" | "-reproducible" | "-O0" | "-O1" | "-O2" | "-O3" => {}
+            // -debug_variant silences ld64's warnings that only matter
+            // for binaries shipped to customers; there are none here.
+            "-demangle" | "-reproducible" | "-debug_variant" | "-O0" | "-O1" | "-O2" | "-O3"
+            | "-Os" | "-Oz" => {}
 
             "-lto_library" => args.lto_library = Some(next_arg(&mut i).to_string()),
 
