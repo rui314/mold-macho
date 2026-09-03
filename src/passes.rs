@@ -13,8 +13,8 @@ use crate::input_sections::InputSection;
 use crate::macho::*;
 use crate::mapped_file::MappedFile;
 use crate::output_chunks::{
-    self, Chunk, ChunkKind, OutputSegment, SymtabData, code_signature_size, mach_header_size,
-    section_ordinals,
+    self, Chunk, ChunkKind, OutputSegment, SymtabData, Tail, code_signature_size,
+    mach_header_size, section_ordinals,
 };
 use crate::arch::RelocClass;
 use crate::symbol::Origin;
@@ -2098,16 +2098,47 @@ pub fn create_output_sections<E: Arch>(ctx: &mut Context<E>) {
         chunk.hdr.size = ctx.objc_stubs.len() as u64 * E::OBJC_STUB_SIZE;
         ctx.chunks.push(chunk);
 
-        let mut chunk = Chunk::new("__TEXT", "__objc_methname", ChunkKind::ObjcMethname);
-        chunk.hdr.flags = S_CSTRING_LITERALS;
-        chunk.hdr.size = ctx.objc_methname_data.len() as u64;
-        ctx.chunks.push(chunk);
-
-        let mut chunk = Chunk::new("__DATA", "__objc_selrefs", ChunkKind::ObjcSelrefs);
-        chunk.hdr.flags = S_LITERAL_POINTERS | S_ATTR_NO_DEAD_STRIP;
-        chunk.hdr.p2align = 3;
-        chunk.hdr.size = ctx.objc_stubs.len() as u64 * 8;
-        ctx.chunks.push(chunk);
+        // The stubs' selector strings and reference slots join the
+        // sections of those names (as their tail): the Objective-C
+        // runtime uniques the selectors of one __objc_selrefs section
+        // per image, and a second one would leave every compiler-
+        // emitted @selector() unregistered.
+        // The input subsections are placed already, so the tail's
+        // offset and the section's final size are known here.
+        let tail_section = |ctx: &mut Context<E>,
+                            seg: &'static str,
+                            sect: &str,
+                            flags: u32,
+                            p2align: u32,
+                            tail: Tail,
+                            tail_size: u64| {
+            let idx = match ctx.chunks.iter().position(|c| {
+                matches!(c.kind, ChunkKind::Output { .. })
+                    && c.hdr.segname == seg
+                    && c.hdr.sectname == sect
+            }) {
+                Some(idx) => idx,
+                None => {
+                    let mut chunk = Chunk::new(
+                        seg,
+                        sect,
+                        ChunkKind::Output { isecs: Vec::new(), thunks: Vec::new() },
+                    );
+                    chunk.hdr.flags = flags;
+                    ctx.chunks.push(chunk);
+                    ctx.chunks.len() - 1
+                }
+            };
+            let chunk = &mut ctx.chunks[idx];
+            chunk.hdr.p2align = chunk.hdr.p2align.max(p2align);
+            chunk.tail = tail;
+            chunk.tail_off = align_to(chunk.hdr.size, 1 << p2align);
+            chunk.hdr.size = chunk.tail_off + tail_size;
+        };
+        let methname_size = ctx.objc_methname_data.len() as u64;
+        let selrefs_size = ctx.objc_stubs.len() as u64 * 8;
+        tail_section(ctx, "__TEXT", "__objc_methname", S_CSTRING_LITERALS, 0, Tail::ObjcMethname, methname_size);
+        tail_section(ctx, "__DATA", "__objc_selrefs", S_LITERAL_POINTERS | S_ATTR_NO_DEAD_STRIP, 3, Tail::ObjcSelrefs, selrefs_size);
     }
 
     // Sections synthesized from files by -sectcreate.
@@ -2848,6 +2879,11 @@ pub fn set_osec_offsets<E: Arch>(ctx: &mut Context<E>) {
             ChunkKind::ObjcStubs => ctx.objc_stubs_chunk = i,
             _ => {}
         }
+        match chunk.tail {
+            Tail::ObjcMethname => ctx.objc_methname_chunk = i,
+            Tail::ObjcSelrefs => ctx.objc_selrefs_chunk = i,
+            Tail::None => {}
+        }
     }
 
     // Chunk sizes that are independent of the layout.
@@ -3142,11 +3178,8 @@ fn build_rebase_info<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
     }
 
     // Selector reference slots hold pointers into __objc_methname.
-    if let Some(idx) = output_chunks::find_chunk(ctx, |k| matches!(k, ChunkKind::ObjcSelrefs)) {
-        let addr = ctx.chunks[idx].hdr.addr;
-        for i in 0..ctx.objc_stubs.len() {
-            locs.push(addr + i as u64 * 8);
-        }
+    for i in 0..ctx.objc_stubs.len() {
+        locs.push(ctx.objc_selref_addr(i));
     }
 
     // GOT slots that hold local addresses.
@@ -3380,11 +3413,8 @@ fn collect_fixups<E: Arch>(ctx: &Context<E>) -> Vec<(u64, Option<crate::symbol::
             fixups.push((addr + i as u64 * 8, sym, 0));
         }
     }
-    if let Some(idx) = output_chunks::find_chunk(ctx, |k| matches!(k, ChunkKind::ObjcSelrefs)) {
-        let addr = ctx.chunks[idx].hdr.addr;
-        for i in 0..ctx.objc_stubs.len() {
-            fixups.push((addr + i as u64 * 8, None, 0));
-        }
+    for i in 0..ctx.objc_stubs.len() {
+        fixups.push((ctx.objc_selref_addr(i), None, 0));
     }
 
     fixups.par_sort_unstable_by_key(|&(addr, _, _)| addr);
@@ -3816,6 +3846,20 @@ fn copy_chunk<E: Arch>(ctx: &Context<E>, chunk: &Chunk, buf: &mut [u8]) {
                 let base = chunk.hdr.addr + isec.output_offset as u64;
                 E::apply_relocs(ctx, ctx.isec_relocs(id as usize), id as usize, base, slice);
             });
+            // The linker-synthesized tail after the inputs.
+            let tail = &mut buf[chunk.tail_off as usize..];
+            match chunk.tail {
+                Tail::None => {}
+                Tail::ObjcMethname => {
+                    tail[..ctx.objc_methname_data.len()].copy_from_slice(&ctx.objc_methname_data);
+                }
+                Tail::ObjcSelrefs => {
+                    for i in 0..ctx.objc_stubs.len() {
+                        let val = ctx.objc_methname_addr(i);
+                        tail[i * 8..i * 8 + 8].copy_from_slice(&val.to_le_bytes());
+                    }
+                }
+            }
         }
         ChunkKind::Stubs => E::write_stubs(ctx, chunk.hdr.addr, buf),
         ChunkKind::Got => {
@@ -3846,19 +3890,6 @@ fn copy_chunk<E: Arch>(ctx: &Context<E>, chunk: &Chunk, buf: &mut [u8]) {
             }
         }
         ChunkKind::ObjcStubs => E::write_objc_stubs(ctx, chunk.hdr.addr, buf),
-        ChunkKind::ObjcMethname => {
-            buf[..ctx.objc_methname_data.len()].copy_from_slice(&ctx.objc_methname_data);
-        }
-        ChunkKind::ObjcSelrefs => {
-            let methname =
-                output_chunks::find_chunk(ctx, |k| matches!(k, ChunkKind::ObjcMethname))
-                    .unwrap();
-            let methname_addr = ctx.chunks[methname].hdr.addr;
-            for (i, &sel_off) in ctx.objc_methname_offs.iter().enumerate() {
-                let val = methname_addr + sel_off;
-                buf[i * 8..i * 8 + 8].copy_from_slice(&val.to_le_bytes());
-            }
-        }
         ChunkKind::UnwindInfo => {
             let data = &ctx.unwind_info_data;
             debug_assert_eq!(data.len() as u64, chunk.hdr.size);

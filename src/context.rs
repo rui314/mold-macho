@@ -80,7 +80,11 @@ pub struct Context<E: Arch> {
     pub got_chunk: usize,
     pub thread_ptrs_chunk: usize,
     pub objc_stubs_chunk: usize,
-    /// Contents of the synthesized __objc_methname section, and each
+    /// The output sections carrying the synthesized selector strings
+    /// and selector references as their tail (see Tail).
+    pub objc_methname_chunk: usize,
+    pub objc_selrefs_chunk: usize,
+    /// Contents of the synthesized __objc_methname tail, and each
     /// selector's offset in it.
     pub objc_methname_data: Vec<u8>,
     pub objc_methname_offs: Vec<u64>,
@@ -165,6 +169,8 @@ impl<E: Arch> Context<E> {
             got_chunk: usize::MAX,
             thread_ptrs_chunk: usize::MAX,
             objc_stubs_chunk: usize::MAX,
+            objc_methname_chunk: usize::MAX,
+            objc_selrefs_chunk: usize::MAX,
             objc_methname_data: Vec::new(),
             objc_methname_offs: Vec::new(),
             rebase_data: Vec::new(),
@@ -184,6 +190,20 @@ impl<E: Arch> Context<E> {
             output_size: 0,
             _marker: PhantomData,
         }
+    }
+
+    /// Address of the synthesized selector reference slot for objc stub
+    /// `i`: the tail of the __objc_selrefs output section.
+    pub fn objc_selref_addr(&self, i: usize) -> u64 {
+        let chunk = &self.chunks[self.objc_selrefs_chunk];
+        chunk.hdr.addr + chunk.tail_off + i as u64 * 8
+    }
+
+    /// Address of the synthesized selector name string for objc stub
+    /// `i`: in the tail of the __objc_methname output section.
+    pub fn objc_methname_addr(&self, i: usize) -> u64 {
+        let chunk = &self.chunks[self.objc_methname_chunk];
+        chunk.hdr.addr + chunk.tail_off + self.objc_methname_offs[i]
     }
 
     /// Returns the bind ordinal for a symbol imported from `dylib`:

@@ -7,7 +7,6 @@ use crate::error;
 use crate::fatal;
 use crate::input_sections::{Reloc, RelocTarget};
 use crate::macho::*;
-use crate::output_chunks;
 use crate::util::{bits, sign_extend};
 
 #[derive(Clone, Copy, Default)]
@@ -284,16 +283,12 @@ impl Arch for Arm64 {
     }
 
     fn write_objc_stubs(ctx: &Context<Self>, addr: u64, buf: &mut [u8]) {
-        let selrefs =
-            output_chunks::find_chunk(ctx, |k| matches!(k, output_chunks::ChunkKind::ObjcSelrefs))
-                .unwrap();
-        let selrefs_addr = ctx.chunks[selrefs].hdr.addr;
         let msgsend_got = ctx.sym_got_addr(ctx.objc_msgsend_sym.unwrap());
 
         for i in 0..ctx.objc_stubs.len() {
             let ent = &mut buf[i * 32..];
             let ent_addr = addr + i as u64 * 32;
-            let sel_addr = selrefs_addr + i as u64 * 8;
+            let sel_addr = ctx.objc_selref_addr(i);
 
             // adrp x1, sel@PAGE; ldr x1, [x1, sel@PAGEOFF]
             // adrp x16, _objc_msgSend@GOTPAGE; ldr x16, [...]; br x16

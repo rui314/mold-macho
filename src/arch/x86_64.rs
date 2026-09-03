@@ -6,7 +6,6 @@ use crate::error::Diagnostics;
 use crate::fatal;
 use crate::input_sections::{Reloc, RelocTarget};
 use crate::macho::*;
-use crate::output_chunks;
 
 #[derive(Clone, Copy, Default)]
 pub struct X86_64;
@@ -86,16 +85,12 @@ impl Arch for X86_64 {
     }
 
     fn write_objc_stubs(ctx: &Context<Self>, addr: u64, buf: &mut [u8]) {
-        let selrefs =
-            output_chunks::find_chunk(ctx, |k| matches!(k, output_chunks::ChunkKind::ObjcSelrefs))
-                .unwrap();
-        let selrefs_addr = ctx.chunks[selrefs].hdr.addr;
         let msgsend_got = ctx.sym_got_addr(ctx.objc_msgsend_sym.unwrap());
 
         for i in 0..ctx.objc_stubs.len() {
             let ent = &mut buf[i * 16..];
             let ent_addr = addr + i as u64 * 16;
-            let sel_addr = selrefs_addr + i as u64 * 8;
+            let sel_addr = ctx.objc_selref_addr(i);
 
             // mov sel(%rip), %rsi; jmp *_objc_msgSend@GOT(%rip); int3 x3
             ent[..16].copy_from_slice(&[

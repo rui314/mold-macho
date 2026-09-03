@@ -58,11 +58,6 @@ pub enum ChunkKind {
     ThreadPtrs,
     /// Linker-synthesized _objc_msgSend$<selector> stubs.
     ObjcStubs,
-    /// Selector name strings for the synthesized objc stubs.
-    ObjcMethname,
-    /// Selector references (pointers into __objc_methname) loaded by the
-    /// synthesized objc stubs.
-    ObjcSelrefs,
     /// The merged __objc_imageinfo section: the Objective-C runtime
     /// reads exactly one 8-byte record per image.
     ObjcImageInfo,
@@ -103,15 +98,38 @@ pub enum ChunkKind {
     CodeSignature,
 }
 
+/// Linker-synthesized data appended to an output section after its
+/// input subsections. The Objective-C runtime reads exactly one
+/// __objc_selrefs section per image (the selectors it uniques at load
+/// time) and one __objc_methname, so the selector references and name
+/// strings the _objc_msgSend$<selector> stubs need cannot form
+/// sections of their own next to the compilers'; they are laid out as
+/// the tail of the section of that name, which is created empty when
+/// no input provides one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tail {
+    None,
+    /// Selector name strings for the synthesized objc stubs.
+    ObjcMethname,
+    /// Selector references (pointers into __objc_methname) loaded by the
+    /// synthesized objc stubs.
+    ObjcSelrefs,
+}
+
 #[derive(Debug)]
 pub struct Chunk {
     pub hdr: ChunkHeader,
     pub kind: ChunkKind,
+    pub tail: Tail,
+    /// Offset of the tail within the section, set at layout.
+    pub tail_off: u64,
 }
 
 impl Chunk {
     pub fn new(segname: &'static str, sectname: &str, kind: ChunkKind) -> Chunk {
         Chunk {
+            tail: Tail::None,
+            tail_off: 0,
             hdr: ChunkHeader {
                 segname,
                 sectname: sectname.to_string(),
@@ -129,8 +147,6 @@ impl Chunk {
                         | ChunkKind::Got
                         | ChunkKind::ThreadPtrs
                         | ChunkKind::ObjcStubs
-                        | ChunkKind::ObjcMethname
-                        | ChunkKind::ObjcSelrefs
                         | ChunkKind::ObjcImageInfo
                         | ChunkKind::SectCreate { .. }
                         | ChunkKind::InitOffsets
