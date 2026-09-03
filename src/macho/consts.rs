@@ -206,6 +206,7 @@ pub const UNWIND_X86_64_MODE_DWARF: u32 = 0x0400_0000;
 
 // Export trie symbol flags
 pub const EXPORT_SYMBOL_FLAGS_WEAK_DEFINITION: u32 = 0x04;
+pub const EXPORT_SYMBOL_FLAGS_REEXPORT: u32 = 0x08;
 
 // Chained fixups (LC_DYLD_CHAINED_FIXUPS)
 pub const DYLD_CHAINED_PTR_64: u16 = 2;

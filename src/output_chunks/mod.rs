@@ -9,7 +9,7 @@ use crate::arch::Arch;
 use crate::context::Context;
 use crate::input_sections::InputSectionId;
 use crate::macho::*;
-use crate::symbol::SymbolId;
+use crate::symbol::{Origin, SymbolId};
 use crate::util::align_to;
 
 #[derive(Debug)]
@@ -701,14 +701,38 @@ pub fn copy_symtab<E: Arch>(ctx: &Context<E>, buf: &mut [u8]) {
     });
 }
 
+/// What an export trie terminal says about a symbol.
+#[derive(Clone, Copy)]
+enum Export {
+    /// A symbol defined in this image: flags and image-relative address.
+    Addr { flags: u32, addr: u64 },
+    /// A symbol re-exported from a dylib under this name (an -alias of
+    /// an imported symbol): the dylib's ordinal and the name it has
+    /// there.
+    Reexport { ordinal: u32, name: &'static str },
+}
+
+impl Export {
+    /// The terminal's payload after its size: flags, then either the
+    /// address or the ordinal and the re-exported name (an empty name
+    /// means the same name).
+    fn terminal_size(self) -> usize {
+        match self {
+            Export::Addr { flags, addr } => uleb_len(flags as u64) + uleb_len(addr),
+            Export::Reexport { ordinal, name } => {
+                uleb_len(EXPORT_SYMBOL_FLAGS_REEXPORT as u64) + uleb_len(ordinal as u64) + name.len() + 1
+            }
+        }
+    }
+}
+
 /// A node of the export trie under construction.
 #[derive(Default)]
 struct TrieNode {
     /// Edge labels borrow from the symbol names themselves.
     children: Vec<(&'static str, TrieNode)>,
-    /// (flags, image-relative address) for an exported symbol ending
-    /// here.
-    export: Option<(u32, u64)>,
+    /// The exported symbol ending here, if any.
+    export: Option<Export>,
     offset: usize,
     /// Pre-order index, assigned by flatten; lets the sizing pass name
     /// a child by index without a pointer hash map.
@@ -726,7 +750,7 @@ struct TrieNode {
 /// construction parallelizes at every branching level - splitting on
 /// leading bytes alone is useless when every Mach-O symbol starts
 /// with '_'. Construction stays linear in the total name length.
-fn build_trie(names: &[(&'static str, (u32, u64))], depth: usize) -> TrieNode {
+fn build_trie(names: &[(&'static str, Export)], depth: usize) -> TrieNode {
     use rayon::prelude::*;
     let mut node = TrieNode::default();
     let mut rest = names;
@@ -736,7 +760,7 @@ fn build_trie(names: &[(&'static str, (u32, u64))], depth: usize) -> TrieNode {
             rest = &rest[1..];
         }
     }
-    let mut groups: Vec<&[(&'static str, (u32, u64))]> = Vec::new();
+    let mut groups: Vec<&[(&'static str, Export)]> = Vec::new();
     while let Some(&(first, _)) = rest.first() {
         let b = first.as_bytes()[depth];
         let n = rest
@@ -746,7 +770,7 @@ fn build_trie(names: &[(&'static str, (u32, u64))], depth: usize) -> TrieNode {
         groups.push(&rest[..n]);
         rest = &rest[n..];
     }
-    let build_child = |group: &&[(&'static str, (u32, u64))]| {
+    let build_child = |group: &&[(&'static str, Export)]| {
         let first = group[0].0;
         let last = group[group.len() - 1].0;
         let common = depth
@@ -792,7 +816,7 @@ pub fn encode_export_trie<E: Arch>(
     // name - the same list the symbol table emits - so the trie only
     // filters the explicit export/unexport lists (order-preserving)
     // and never sorts.
-    let exports: Vec<(&'static str, (u32, u64))> = sorted_globals
+    let exports: Vec<(&'static str, Export)> = sorted_globals
         .par_iter()
         .filter_map(|&id| {
             let sym = &ctx.symtab[id];
@@ -804,12 +828,19 @@ pub fn encode_export_trie<E: Arch>(
             if ctx.args.unexported_symbols.iter().any(|pat| pat == sym.name()) {
                 return None;
             }
+            if let Some(&(_, target)) = ctx.indirect_aliases.iter().find(|&&(a, _)| a == id) {
+                let Origin::Dylib(dylib) = ctx.symtab[target].origin() else {
+                    return None;
+                };
+                let ordinal = ctx.bind_ordinal(dylib) as u32;
+                return Some((sym.name(), Export::Reexport { ordinal, name: ctx.symtab[target].name() }));
+            }
             let flags = if sym.is_weak_def() {
                 EXPORT_SYMBOL_FLAGS_WEAK_DEFINITION
             } else {
                 0
             };
-            Some((sym.name(), (flags, ctx.sym_addr(id) - base)))
+            Some((sym.name(), Export::Addr { flags, addr: ctx.sym_addr(id) - base }))
         })
         .collect();
     if exports.is_empty() {
@@ -891,7 +922,7 @@ pub fn encode_export_trie<E: Arch>(
             // SAFETY: nodes live in `root`, which outlives this function.
             let node = unsafe { &*np.0 };
             let terminal_size = match node.export {
-                Some((flags, addr)) => uleb_len(flags as u64) + uleb_len(addr),
+                Some(export) => export.terminal_size(),
                 None => 0,
             };
             let mut f = uleb_len(terminal_size as u64) + terminal_size + 1;
@@ -967,11 +998,19 @@ pub fn encode_export_trie<E: Arch>(
             let dst = unsafe { std::slice::from_raw_parts_mut(bp.0.add(start), end - start) };
             let mut p = 0;
             match node.export {
-                Some((flags, addr)) => {
-                    let terminal_size = uleb_len(flags as u64) + uleb_len(addr);
-                    p += write_uleb_at(dst, p, terminal_size as u64);
+                Some(export @ Export::Addr { flags, addr }) => {
+                    p += write_uleb_at(dst, p, export.terminal_size() as u64);
                     p += write_uleb_at(dst, p, flags as u64);
                     p += write_uleb_at(dst, p, addr);
+                }
+                Some(export @ Export::Reexport { ordinal, name }) => {
+                    p += write_uleb_at(dst, p, export.terminal_size() as u64);
+                    p += write_uleb_at(dst, p, EXPORT_SYMBOL_FLAGS_REEXPORT as u64);
+                    p += write_uleb_at(dst, p, ordinal as u64);
+                    dst[p..p + name.len()].copy_from_slice(name.as_bytes());
+                    p += name.len();
+                    dst[p] = 0;
+                    p += 1;
                 }
                 None => {
                     dst[p] = 0;

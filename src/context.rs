@@ -59,6 +59,9 @@ pub struct Context<E: Arch> {
     pub objc_stubs: Vec<(SymbolId, String)>,
     /// The _objc_msgSend symbol, once objc stubs exist.
     pub objc_msgsend_sym: Option<SymbolId>,
+    /// -alias names for imported symbols: (alias, imported target).
+    /// Emitted as N_INDR symbols and re-export trie entries.
+    pub indirect_aliases: Vec<(SymbolId, SymbolId)>,
     /// section$start/end and segment$start/end symbols to resolve
     /// after layout: (symbol, is_start, segment, section).
     pub boundary_syms: Vec<(SymbolId, bool, String, Option<String>)>,
@@ -160,6 +163,7 @@ impl<E: Arch> Context<E> {
             thread_ptr_syms: Vec::new(),
             objc_stubs: Vec::new(),
             objc_msgsend_sym: None,
+            indirect_aliases: Vec::new(),
             boundary_syms: Vec::new(),
             why_load: std::collections::HashMap::new(),
             export_trie_data: Vec::new(),
