@@ -1839,7 +1839,19 @@ fn dylib_binary_exports(
     (exports, tlv_exports, reexports, rpaths)
 }
 
+/// The directory dyld would use for a dylib's @loader_path: that of
+/// the real file, symlinks resolved. A framework's X.framework/X is a
+/// symlink to Versions/A/X, and its LC_RPATH entries are written for
+/// that location (XCTest's `@loader_path/../../../../PrivateFrameworks`
+/// reaches XCTestCore only from Versions/A). A fat file's name may
+/// carry the "(for architecture ...)" suffix the loader adds.
 fn dir_of(path: &str) -> String {
+    let path = path.split_once("(for architecture").map_or(path, |(p, _)| p);
+    if let Ok(real) = std::fs::canonicalize(path) {
+        if let Some(dir) = real.parent() {
+            return dir.to_string_lossy().into_owned();
+        }
+    }
     match path.rsplit_once('/') {
         Some((dir, _)) => dir.to_string(),
         None => ".".to_string(),
