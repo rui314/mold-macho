@@ -311,9 +311,9 @@ pub fn icf_sections<E: Arch>(ctx: &mut Context<E>) {
         let isec = &ctx.isecs[id];
         isec.is_alive
             && isec.replacement == crate::input_sections::NO_REPLACEMENT
-            && isec.hdr.segname() == "__TEXT"
-            && isec.hdr.flags & S_ATTR_PURE_INSTRUCTIONS != 0
-            && isec.hdr.flags & (S_ATTR_NO_DEAD_STRIP | S_ATTR_LIVE_SUPPORT) == 0
+            && ctx.hdr_of(isec).segname() == "__TEXT"
+            && ctx.hdr_of(isec).flags & S_ATTR_PURE_INSTRUCTIONS != 0
+            && ctx.hdr_of(isec).flags & (S_ATTR_NO_DEAD_STRIP | S_ATTR_LIVE_SUPPORT) == 0
             && weak_only[id] == Some(true)
             // Don't fold functions carrying debug info: it would leave
             // their DWARF describing folded-away code. ld64 disables
@@ -368,7 +368,7 @@ pub fn icf_sections<E: Arch>(ctx: &mut Context<E>) {
     let base_hash = |ctx: &Context<E>, id: usize| -> Digest {
         let isec = &ctx.isecs[id];
         let mut h = SipHash13_128::new(&KEY);
-        h.update(&isec.hdr.flags.to_ne_bytes());
+        h.update(&ctx.hdr_of(isec).flags.to_ne_bytes());
         h.update(&isec.size.to_ne_bytes());
         h.update(&isec.data().len().to_ne_bytes());
         h.update(isec.data());
@@ -531,7 +531,7 @@ pub fn icf_sections<E: Arch>(ctx: &mut Context<E>) {
             let (x, y) = (&ctx.isecs[a], &ctx.isecs[b]);
             let (xr, yr) = (ctx.isec_relocs(a), ctx.isec_relocs(b));
             x.data() == y.data()
-                && x.hdr.flags == y.hdr.flags
+                && ctx.hdr_of(x).flags == ctx.hdr_of(y).flags
                 && xr.len() == yr.len()
                 && xr.iter().zip(yr).all(|(r, s)| {
                     r.offset == s.offset

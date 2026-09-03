@@ -1,6 +1,5 @@
 //! Input sections.
 
-use crate::macho::MachSection;
 
 /// A subsection index, u32 as in mold-rust.
 pub type InputSectionId = u32;
@@ -143,16 +142,20 @@ pub struct InputSection {
     /// struct small; `usize::MAX` becomes `u32::MAX` for a synthetic
     /// section with no object).
     pub obj: u32,
-    /// The parent section's header. Subsections of one section share it,
-    /// so it is referenced, not embedded - mold-rust keeps only a
-    /// reference too. `p2align` is held inline because it is the one
-    /// header field the linker raises per subsection.
-    pub hdr: &'static MachSection,
+    /// Index of the parent section's header in the owning object's
+    /// section list (or in ctx.synthetic_hdrs for a synthetic section):
+    /// mold-rust's shndx. Resolved through Context::hdr_of; a u32 index
+    /// instead of an 8-byte header pointer. `p2align` is held inline
+    /// because it is the one header field the linker raises per
+    /// subsection.
+    pub shndx: u32,
     pub p2align: u8,
     /// This subsection's address in the object's address space. Object
     /// files stay well under 4 GiB, so a u32 holds it.
     pub input_addr: u32,
-    pub size: u64,
+    /// The subsection's size. One subsection is far under 4 GiB, so a
+    /// u32 holds it; arithmetic with 64-bit addresses casts up.
+    pub size: u32,
     /// The subsection contents, as a bare pointer - the length is
     /// `size` - or 0 when there are none (a zero-fill or empty
     /// section). Stored as an integer, not a slice, to save 8 bytes and
@@ -185,9 +188,9 @@ pub struct InputSection {
 }
 
 // InputSection is the highest-count struct in a link (millions on a
-// debug build), so it is kept compact - mold-rust's is 64 bytes; ours
-// carries a few Mach-O-specific fields more.
-const _: () = assert!(std::mem::size_of::<InputSection>() == 64);
+// debug build), so it is kept compact: 56 bytes, under mold-rust's 64
+// (ours carries the unwind range but no section-name/flags word).
+const _: () = assert!(std::mem::size_of::<InputSection>() == 56);
 
 impl InputSection {
     /// This subsection's bytes. Empty for a zero-fill or empty section;

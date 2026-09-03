@@ -10,7 +10,7 @@ use crate::error;
 use crate::error::{Diagnostics, HasDiagnostics};
 use crate::input_files::{DylibFile, ObjectFile};
 use crate::macho::{S_THREAD_LOCAL_REGULAR, S_THREAD_LOCAL_ZEROFILL};
-use crate::input_sections::{Reloc, RelocTarget};
+use crate::input_sections::{InputSection, Reloc, RelocTarget};
 use crate::output_chunks::{Chunk, OutputSegment, SymtabData};
 use crate::symbol::{Origin, SymbolId, SymbolTable};
 
@@ -22,6 +22,9 @@ pub struct Context<E: Arch> {
     pub symtab: SymbolTable,
     /// All input sections, in one arena.
     pub isecs: crate::input_sections::InputSections,
+    /// Section headers of the linker-synthesized input sections (those
+    /// with obj == u32::MAX), indexed by their shndx.
+    pub synthetic_hdrs: Vec<&'static crate::macho::MachSection>,
     /// Per-symbol synthetic-slot indices (SymbolId-indexed), grown
     /// lazily; mold-rust's SymbolAux side table.
     pub sym_aux: Vec<crate::symbol::SymAux>,
@@ -135,6 +138,7 @@ impl<E: Arch> Context<E> {
             dylibs: Vec::new(),
             symtab: SymbolTable::default(),
             isecs: Default::default(),
+            synthetic_hdrs: Vec::new(),
             sym_aux: Vec::new(),
             priority_counter: 0,
             lto_plugin: None,
@@ -206,6 +210,18 @@ impl<E: Arch> Context<E> {
             self.args.platform == crate::macho::PLATFORM_MACOS
                 && self.args.platform_minos >= crate::macho::encode_version(13, 0, 0)
         })
+    }
+
+    /// The parent section header of a subsection, through its object's
+    /// section list (or the synthetic table) - mold-rust resolves a
+    /// section's shdr through its file the same way.
+    #[inline]
+    pub fn hdr_of(&self, isec: &InputSection) -> &'static crate::macho::MachSection {
+        if isec.obj == u32::MAX {
+            self.synthetic_hdrs[isec.shndx as usize]
+        } else {
+            &self.objs[isec.obj as usize].sect_hdrs[isec.shndx as usize]
+        }
     }
 
     /// Follows literal-merge redirects to the surviving subsection.
@@ -342,7 +358,7 @@ impl<E: Arch> Context<E> {
     pub fn reloc_target_is_tls(&self, obj: usize, rel: &Reloc) -> bool {
         self.reloc_target_isec(obj, rel).is_some_and(|isec| {
             matches!(
-                self.isecs[isec].hdr.section_type(),
+                self.hdr_of(&self.isecs[isec]).section_type(),
                 S_THREAD_LOCAL_REGULAR | S_THREAD_LOCAL_ZEROFILL
             )
         })

@@ -42,7 +42,7 @@ pub fn create_range_extension_thunks<E: Arch>(
     // entries.
     let total_estimate: u64 = isecs
         .iter()
-        .map(|&id| ctx.isecs[id].size + 16)
+        .map(|&id| ctx.isecs[id].size as u64 + 16)
         .sum::<u64>();
     let total_estimate = total_estimate + (total_estimate / BATCH + 1) * MAX_THUNK;
 
@@ -63,7 +63,7 @@ pub fn create_range_extension_thunks<E: Arch>(
         // after it within reach; its thunk goes in front instead, where
         // at least branches from its first reach's worth of code can
         // use it.
-        let first_size = ctx.isecs[isecs[i]].size;
+        let first_size = ctx.isecs[isecs[i]].size as u64;
         if first_size > budget {
             let monster = isecs[i];
             // Scan the monster's relocations against a thunk placed here.
@@ -75,7 +75,7 @@ pub fn create_range_extension_thunks<E: Arch>(
             let isec = &mut ctx.isecs[monster];
             off = align_to(off, 1 << isec.p2align);
             isec.output_offset = off as u32;
-            off += isec.size;
+            off += isec.size as u64;
             i += 1;
             continue;
         }
@@ -86,14 +86,14 @@ pub fn create_range_extension_thunks<E: Arch>(
             let isec = &ctx.isecs[isecs[i]];
             let aligned = align_to(off, 1 << isec.p2align);
             if i != batch_start
-                && (aligned + isec.size - batch_start_off > budget
+                && (aligned + isec.size as u64 - batch_start_off > budget
                     || aligned - batch_start_off >= BATCH)
             {
                 break;
             }
             let isec = &mut ctx.isecs[isecs[i]];
             isec.output_offset = aligned as u32;
-            off = aligned + isec.size;
+            off = aligned + isec.size as u64;
             i += 1;
         }
 

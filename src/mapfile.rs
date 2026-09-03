@@ -114,7 +114,7 @@ pub fn print_map<E: Arch>(ctx: &Context<E>) {
         let (_, _, _, isec, value) = syms[idx];
         let end = match order.get(i + 1) {
             Some(&next) if syms[next].3 == isec => syms[next].4,
-            _ => ctx.isecs[isec].size,
+            _ => ctx.isecs[isec].size as u64,
         };
         sizes[idx] = end.saturating_sub(value);
     }
@@ -163,7 +163,7 @@ pub fn print_map<E: Arch>(ctx: &Context<E>) {
         for (i, &(file, value, isec, name)) in dead.iter().enumerate() {
             let end = match dead.get(i + 1) {
                 Some(&(_, next_value, next_isec, _)) if next_isec == isec => next_value,
-                _ => ctx.isecs[isec].size,
+                _ => ctx.isecs[isec].size as u64,
             };
             let _ = writeln!(
                 out,

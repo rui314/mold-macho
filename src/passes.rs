@@ -991,12 +991,13 @@ pub fn convert_common_symbols<E: Arch>(ctx: &mut Context<E>) {
             flags: S_ZEROFILL,
             ..Default::default()
         }));
+        ctx.synthetic_hdrs.push(hdr);
         ctx.isecs.push(InputSection {
             obj: u32::MAX,
-            hdr,
+            shndx: (ctx.synthetic_hdrs.len() - 1) as u32,
             p2align: p2align as u8,
             input_addr: 0,
-            size,
+            size: size as u32,
             data_ptr: 0,
             rel_offset: 0,
             nrels: 0,
@@ -1029,7 +1030,7 @@ pub fn convert_init_offsets<E: Arch>(ctx: &mut Context<E>) {
         return;
     }
     for i in 0..ctx.isecs.len() {
-        if ctx.isecs[i].hdr.section_type() != S_MOD_INIT_FUNC_POINTERS
+        if ctx.hdr_of(&ctx.isecs[i]).section_type() != S_MOD_INIT_FUNC_POINTERS
             || !ctx.isecs[i].is_alive
         {
             continue;
@@ -1128,7 +1129,7 @@ pub fn merge_literals<E: Arch>(ctx: &mut Context<E>) {
             if !isec.is_alive || isec.replacement != crate::input_sections::NO_REPLACEMENT {
                 return None;
             }
-            let ty = isec.hdr.section_type();
+            let ty = ctx.hdr_of(isec).section_type();
             if !matches!(
                 ty,
                 S_CSTRING_LITERALS | S_4BYTE_LITERALS | S_8BYTE_LITERALS | S_16BYTE_LITERALS
@@ -1630,7 +1631,7 @@ fn is_thread_local_sym<E: Arch>(ctx: &Context<E>, id: crate::symbol::SymbolId) -
     let sym = &ctx.symtab[id];
     match sym.origin() {
         crate::symbol::Origin::Obj(_) => sym.isec().map(|i| i as usize).is_some_and(|isec| {
-            ctx.isecs[isec].hdr.flags & SECTION_TYPE == S_THREAD_LOCAL_VARIABLES
+            ctx.hdr_of(&ctx.isecs[isec]).flags & SECTION_TYPE == S_THREAD_LOCAL_VARIABLES
         }),
         crate::symbol::Origin::Dylib(idx) => {
             idx != u32::MAX && ctx.dylibs[idx as usize].tlv_exports.contains(sym.name())
@@ -1846,21 +1847,22 @@ pub fn create_output_sections<E: Arch>(ctx: &mut Context<E>) {
         if !ctx.isecs[i].is_alive || ctx.isecs[i].replacement != crate::input_sections::NO_REPLACEMENT {
             continue;
         }
-        let hdr_ptr = ctx.isecs[i].hdr as *const crate::macho::MachSection;
+        let hdr = ctx.hdr_of(&ctx.isecs[i]);
+        let hdr_ptr = hdr as *const crate::macho::MachSection;
         let chunk_idx = if hdr_ptr == last_hdr {
             last_chunk
         } else {
-        let key = (ctx.isecs[i].hdr.segname, ctx.isecs[i].hdr.sectname);
+        let key = (hdr.segname, hdr.sectname);
         let idx = match by_name.get(&key) {
             Some(&idx) => idx,
             None => {
-                let segname: &'static str = match ctx.isecs[i].hdr.segname() {
+                let segname: &'static str = match hdr.segname() {
                     "__TEXT" => "__TEXT",
                     "__DATA_CONST" => "__DATA_CONST",
                     "__DATA" => "__DATA",
                     other => String::leak(other.to_string()),
                 };
-                let sectname = ctx.isecs[i].hdr.sectname().to_string();
+                let sectname = hdr.sectname().to_string();
                 let mut chunk = Chunk::new(
                     segname,
                     &sectname,
@@ -1872,7 +1874,7 @@ pub fn create_output_sections<E: Arch>(ctx: &mut Context<E>) {
                 // A final image never contains debug sections, so the
                 // attribute is dropped; a relocatable output keeps it,
                 // marking the carried DWARF for the next link.
-                chunk.hdr.flags = ctx.isecs[i].hdr.flags & attr_mask;
+                chunk.hdr.flags = hdr.flags & attr_mask;
                 ctx.chunks.push(chunk);
                 by_name.insert(key, ctx.chunks.len() - 1);
                 ctx.chunks.len() - 1
@@ -1890,7 +1892,7 @@ pub fn create_output_sections<E: Arch>(ctx: &mut Context<E>) {
         if chunk.hdr.flags & SECTION_TYPE == S_THREAD_LOCAL_VARIABLES {
             chunk.hdr.p2align = chunk.hdr.p2align.max(3);
         }
-        chunk.hdr.flags |= ctx.isecs[i].hdr.flags & !SECTION_TYPE & attr_mask;
+        chunk.hdr.flags |= hdr.flags & !SECTION_TYPE & attr_mask;
         let ChunkKind::Output { isecs, .. } = &mut chunk.kind else {
             unreachable!()
         };
@@ -1944,7 +1946,7 @@ pub fn create_output_sections<E: Arch>(ctx: &mut Context<E>) {
                 if chunk.hdr.flags & (S_ATTR_PURE_INSTRUCTIONS | S_ATTR_SOME_INSTRUCTIONS)
                     != 0
                 {
-                    exec_total += isecs.iter().map(|&id| ctx.isecs[id].size + 16).sum::<u64>();
+                    exec_total += isecs.iter().map(|&id| ctx.isecs[id].size as u64 + 16).sum::<u64>();
                 }
             }
         }
@@ -1975,7 +1977,7 @@ pub fn create_output_sections<E: Arch>(ctx: &mut Context<E>) {
                     let isec = &ctx.isecs[id];
                     off = align_to(off, 1 << isec.p2align);
                     offs.push(off);
-                    off += isec.size;
+                    off += isec.size as u64;
                 }
                 (*chunk_idx, offs, off)
             })
@@ -2002,7 +2004,7 @@ pub fn create_output_sections<E: Arch>(ctx: &mut Context<E>) {
             };
             let data_end = isecs
                 .last()
-                .map(|&id| ctx.isecs[id].output_offset as u64 + ctx.isecs[id].size)
+                .map(|&id| ctx.isecs[id].output_offset as u64 + ctx.isecs[id].size as u64)
                 .unwrap_or(0);
             let chunk = &mut ctx.chunks[chunk_idx];
             chunk.hdr.size = end.max(data_end);
@@ -2369,8 +2371,8 @@ pub fn create_output_symtab<E: Arch>(
                     }
 
                     let stab_name = sym.name();
-                    let is_text = isec.hdr.segname() == "__TEXT"
-                        && isec.hdr.flags
+                    let is_text = ctx.hdr_of(isec).segname() == "__TEXT"
+                        && ctx.hdr_of(isec).flags
                             & (S_ATTR_PURE_INSTRUCTIONS | S_ATTR_SOME_INSTRUCTIONS)
                             != 0;
                     if is_text {
@@ -2390,7 +2392,7 @@ pub fn create_output_symtab<E: Arch>(
                             NList {
                                 n_strx: 1,
                                 n_type: N_FUN,
-                                n_value: isec.size,
+                                n_value: isec.size as u64,
                                 ..Default::default()
                             },
                             None,
@@ -3292,8 +3294,8 @@ fn collect_fixups<E: Arch>(ctx: &Context<E>) -> Vec<(u64, Option<crate::symbol::
                         ctx,
                         "{}({},{}): unaligned base relocation",
                         file_display(&ctx.objs[isec.obj as usize]),
-                        isec.hdr.segname(),
-                        isec.hdr.sectname()
+                        ctx.hdr_of(isec).segname(),
+                        ctx.hdr_of(isec).sectname()
                     );
                 }
                 match ctx.reloc_target_sym(isec.obj as usize, rel) {
@@ -3684,8 +3686,8 @@ fn build_function_starts<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
             }
             let isec = &ctx.isecs[ctx.resolve_isec(sym.isec()? as usize)];
             if isec.is_alive
-                && isec.hdr.segname() == "__TEXT"
-                && isec.hdr.sectname() == "__text"
+                && ctx.hdr_of(isec).segname() == "__TEXT"
+                && ctx.hdr_of(isec).sectname() == "__text"
             {
                 Some(ctx.chunks[isec.osec as usize].hdr.addr + isec.output_offset as u64 + sym.value)
             } else {

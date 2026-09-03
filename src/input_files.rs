@@ -82,7 +82,7 @@ pub fn find_subsec(
     }
     let id = subsecs[i - 1] as usize;
     let isec = &isecs[id as usize];
-    if addr < isec.input_addr as u64 + isec.size || (isec.size == 0 && addr == isec.input_addr as u64) {
+    if addr < isec.input_addr as u64 + isec.size as u64 || (isec.size as u64 == 0 && addr == isec.input_addr as u64) {
         Some((id, addr - isec.input_addr as u64))
     } else {
         None
@@ -445,10 +445,10 @@ pub fn stage_object<E: Arch>(
             };
             isecs.push(InputSection {
                 obj: u32::MAX,
-                hdr: sect,
+                shndx: i as u32,
                 p2align: sect.p2align as u8,
                 input_addr: start as u32,
-                size: end - start,
+                size: (end - start) as u32,
                 data_ptr: if contents.is_empty() { 0 } else { contents.as_ptr() as usize },
                 rel_offset: 0,
                 nrels: 0,
@@ -1100,7 +1100,7 @@ fn parse_compact_unwind<E: Arch>(
 ) {
     let geo: Vec<(u64, u64, usize)> = subsecs
         .iter()
-        .map(|&id| (isecs[id as usize].input_addr as u64, isecs[id as usize].size, id as usize))
+        .map(|&id| (isecs[id as usize].input_addr as u64, isecs[id as usize].size as u64, id as usize))
         .collect();
     let find_subsec = |addr: u64| -> Option<(usize, u32)> {
         let i = geo.partition_point(|&(start, _, _)| start <= addr);
@@ -1285,7 +1285,7 @@ fn parse_eh_frame<E: Arch>(
 ) {
     let geo: Vec<(u64, u64, usize)> = subsecs
         .iter()
-        .map(|&id| (isecs[id as usize].input_addr as u64, isecs[id as usize].size, id as usize))
+        .map(|&id| (isecs[id as usize].input_addr as u64, isecs[id as usize].size as u64, id as usize))
         .collect();
     let find_local = |addr: u64| -> Option<(usize, u32)> {
         let i = geo.partition_point(|&(start, _, _)| start <= addr);

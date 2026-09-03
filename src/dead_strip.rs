@@ -55,12 +55,12 @@ pub fn dead_strip<E: Arch>(ctx: &mut Context<E>) {
                     return None;
                 }
                 let keep_type = matches!(
-                    isec.hdr.section_type(),
+                    ctx.hdr_of(isec).section_type(),
                     S_MOD_INIT_FUNC_POINTERS | S_INIT_FUNC_OFFSETS | S_THREAD_LOCAL_VARIABLES
                 );
                 let keep_attr =
-                    isec.hdr.flags & (S_ATTR_NO_DEAD_STRIP | S_ATTR_LIVE_SUPPORT) != 0;
-                if keep_type || keep_attr || isec.hdr.sectname() == "__objc_imageinfo" {
+                    ctx.hdr_of(isec).flags & (S_ATTR_NO_DEAD_STRIP | S_ATTR_LIVE_SUPPORT) != 0;
+                if keep_type || keep_attr || ctx.hdr_of(isec).sectname() == "__objc_imageinfo" {
                     Some(id)
                 } else {
                     None
@@ -335,7 +335,7 @@ fn print_why_live<E: Arch>(ctx: &Context<E>, pred: &[usize], live: &[bool]) {
             .get(&isec)
             .copied()
             .map(String::from)
-            .unwrap_or_else(|| format!("{},{}", sec.hdr.segname(), sec.hdr.sectname()));
+            .unwrap_or_else(|| format!("{},{}", ctx.hdr_of(sec).segname(), ctx.hdr_of(sec).sectname()));
         if sec.obj == u32::MAX {
             return name;
         }
