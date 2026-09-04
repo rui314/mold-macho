@@ -75,6 +75,10 @@ pub struct Context<E: Arch> {
     /// merge_objc_categories), each placed as the tail of the output
     /// section it names.
     pub data_blobs: Vec<crate::passes::DataBlob>,
+    /// Local symbols the linker names itself, on synthesized data:
+    /// ld64's __OBJC_$_INSTANCE_METHODS_Foo(A|B) on a merged method
+    /// list, and the like. (name, subsection).
+    pub extra_local_syms: Vec<(&'static str, u32)>,
     /// The _objc_msgSend symbol, once objc stubs exist.
     pub objc_msgsend_sym: Option<SymbolId>,
     /// -alias names for imported symbols: (alias, imported target).
@@ -193,6 +197,7 @@ impl<E: Arch> Context<E> {
             objc_extra_selrefs: Vec::new(),
             objc_methlists: Vec::new(),
             data_blobs: Vec::new(),
+            extra_local_syms: Vec::new(),
             dylib_load_seq: 0,
             thread_ptr_syms: Vec::new(),
             objc_stubs: Vec::new(),

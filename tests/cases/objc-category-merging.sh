@@ -88,6 +88,11 @@ grep -q '^pa pb base $' $t/props
 nm $t/exe > $t/nm
 ! grep -q 'CATEGORY_INSTANCE_METHODS_Foo' $t/nm
 ! grep -q 'OBJC_\$_CATEGORY_Foo' $t/nm
+# ld64 names the merged lists after the class and its categories.
+grep -q ' s __OBJC_\$_INSTANCE_METHODS_Foo(A|B)$' $t/nm
+grep -q ' s __OBJC_\$_CLASS_METHODS_Foo(A|B)$' $t/nm
+grep -q ' s __OBJC_CLASS_PROTOCOLS_\$_Foo(A|B)$' $t/nm
+[ "$(grep -c 'INSTANCE_METHODS_Foo' $t/nm)" = 1 ]
 
 # Classic method lists (below macOS 11 on x86-64) merge too.
 if [ $ARCH = x86_64 ]; then

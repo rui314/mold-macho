@@ -2313,6 +2313,14 @@ pub fn objc_ref_addr<E: Arch>(ctx: &Context<E>, r: ObjcRef) -> u64 {
     }
 }
 
+fn objc_cstring_at<E: Arch>(ctx: &Context<E>, r: Option<ObjcRef>) -> Option<String> {
+    let (isec, off) = objc_ref_location(ctx, r?)?;
+    let data = ctx.isecs[isec as usize].data();
+    let bytes = data.get(off as usize..)?;
+    let end = bytes.iter().position(|&b| b == 0)?;
+    Some(String::from_utf8_lossy(&bytes[..end]).into_owned())
+}
+
 /// Merges the categories of a class defined in the image into the
 /// class itself, as ld64 does by default (-objc_category_merging):
 /// the runtime then has no categories to attach at load. The merged
@@ -2381,6 +2389,7 @@ pub fn merge_objc_categories<E: Arch>(ctx: &mut Context<E>) {
         cat: (u32, u64),
         nonlazy: bool,
         merged: bool,
+        name: String,
     }
     struct ListSect {
         isec: u32,
@@ -2421,7 +2430,8 @@ pub fn merge_objc_categories<E: Arch>(ctx: &mut Context<E>) {
                 let idx = match cat_index.get(&cat) {
                     Some(&idx) => idx,
                     None => {
-                        cats.push(Category { cat, nonlazy: false, merged: false });
+                        let name = objc_cstring_at(ctx, objc_pointer_at(ctx, cat.0, 0))?;
+                        cats.push(Category { cat, nonlazy: false, merged: false, name });
                         cat_index.insert(cat, cats.len() - 1);
                         cats_of.entry(cls).or_default().push(cats.len() - 1);
                         cats.len() - 1
@@ -2714,10 +2724,9 @@ pub fn merge_objc_categories<E: Arch>(ctx: &mut Context<E>) {
                 new_blob(ctx, "__objc_const", fields)
             }
         };
-        // The class's original lists are superseded: they resolve to
-        // the merged one (so their symbols name it, as ld64's
-        // __OBJC_$_INSTANCE_METHODS_Foo(A|B) does); the categories'
-        // are simply dropped with the categories.
+        // The class's original lists and the categories' are dropped
+        // (the merged list carries ld64's name); a superseded list
+        // that is still referred to resolves to the merged one.
         let supersede = |ctx: &mut Context<E>, r: Option<ObjcRef>, merged: Option<u32>| {
             if let Some((isec, 0)) = r.and_then(|r| objc_ref_location(ctx, r)) {
                 let resolved = ctx.resolve_isec(isec as usize);
@@ -2734,6 +2743,18 @@ pub fn merge_objc_categories<E: Arch>(ctx: &mut Context<E>) {
             }
         };
 
+        // ld64 names the merged lists after the class and its
+        // categories: __OBJC_$_INSTANCE_METHODS_Foo(A|B).
+        let class_name = objc_cstring_at(ctx, objc_pointer_at(ctx, ro.0, ro.1 + 24)).unwrap_or_default();
+        let suffix = format!(
+            "{}({})",
+            class_name,
+            cat_ids.iter().map(|&ci| cats[ci].name.as_str()).collect::<Vec<_>>().join("|")
+        );
+        let name_it = |ctx: &mut Context<E>, prefix: &str, isec: u32| {
+            let name: &'static str = String::leak(format!("{prefix}{suffix}"));
+            ctx.extra_local_syms.push((name, isec));
+        };
         let imethods = if m.any_imethods { Some(new_methlist(ctx, std::mem::take(&mut m.imethods))) } else { None };
         let cmethods = if m.any_cmethods { Some(new_methlist(ctx, std::mem::take(&mut m.cmethods))) } else { None };
         let protocols = if m.any_protocols {
@@ -2743,6 +2764,15 @@ pub fn merge_objc_categories<E: Arch>(ctx: &mut Context<E>) {
         } else {
             None
         };
+        if let Some(l) = imethods {
+            name_it(ctx, "__OBJC_$_INSTANCE_METHODS_", l);
+        }
+        if let Some(l) = cmethods {
+            name_it(ctx, "__OBJC_$_CLASS_METHODS_", l);
+        }
+        if let Some(l) = protocols {
+            name_it(ctx, "__OBJC_CLASS_PROTOCOLS_$_", l);
+        }
         let props = |ctx: &mut Context<E>, list: &[(ObjcRef, ObjcRef)]| -> u32 {
             let mut fields = vec![DataField::Bytes(16u32.to_le_bytes().to_vec()), DataField::Bytes((list.len() as u32).to_le_bytes().to_vec())];
             for &(n, a) in list {
@@ -2755,10 +2785,10 @@ pub fn merge_objc_categories<E: Arch>(ctx: &mut Context<E>) {
         let cprops = if m.any_cprops { Some(props(ctx, &m.cprops)) } else { None };
 
         if imethods.is_some() {
-            supersede(ctx, base_im, imethods);
+            supersede(ctx, base_im, None);
         }
         if cmethods.is_some() {
-            supersede(ctx, base_cm, cmethods);
+            supersede(ctx, base_cm, None);
         }
         // Superseded protocol and property lists go away (ld64's output
         // keeps only the merged ones).
@@ -4267,6 +4297,25 @@ pub fn create_output_symtab<E: Arch>(
                 names.push(name);
                 data.entries.push((ent, Some(sym_id)));
             }
+        }
+        // Locals the linker named itself, on synthesized data whose
+        // addresses are final by now.
+        for &(name, isec) in &ctx.extra_local_syms {
+            let sec = &ctx.isecs[isec as usize];
+            if !sec.is_alive() || sec.osec == u32::MAX {
+                continue;
+            }
+            names.push(name);
+            data.entries.push((
+                NList {
+                    n_strx: 0,
+                    n_type: N_SECT,
+                    n_sect: ordinals[sec.osec as usize],
+                    n_desc: 0,
+                    n_value: ctx.isec_addr(isec as usize),
+                },
+                None,
+            ));
         }
     }
     if std::env::var_os("MOLD_TIMING").is_some() {

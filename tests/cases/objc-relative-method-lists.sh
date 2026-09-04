@@ -62,7 +62,8 @@ otool -ov $t/exe > $t/ov
 grep -q 'imp .*other:' $t/ov
 grep -q 'imp .*cextra' $t/ov
 nm -m $t/exe | grep '__objc_methlist)' | awk '{print $NF}' > $t/syms
-grep -q 'INSTANCE_METHODS_Foo$' $t/syms
+# Category merging (on by default) names the list after Foo and Extra.
+grep -q 'INSTANCE_METHODS_Foo(Extra)$' $t/syms
 grep -q 'PROTOCOL_INSTANCE_METHODS_OPT_Greeter$' $t/syms
 grep -q 'CATEGORY_INSTANCE_METHODS_NSObject_\$_Ext2$' $t/syms
 # No fixups land in the lists.
