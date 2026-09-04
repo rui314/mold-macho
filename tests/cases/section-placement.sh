@@ -55,8 +55,9 @@ _coal: .quad 4
 EOF2
 
 # Classic dyld info (macOS 11) keeps __mod_init_func as a section.
+# (Category merging is off so the category list stays to be placed.)
 $CC --ld-path=$mold -o $t/exe $t/a.o $t/b.o $t/c.o -framework Foundation \
-  -mmacosx-version-min=11.0
+  -mmacosx-version-min=11.0 -Wl,-no_objc_category_merging
 otool -l $t/exe | awk '/^ *sectname/{s=$2} /^ *segname/{g=$2} /^ *flags/{if (s != "") print g","s, $2; s=""}' > $t/sects
 
 for s in __const __cfstring __objc_classlist __objc_catlist __objc_protolist \
@@ -114,7 +115,7 @@ $t/exe
 # From macOS 15 on, protocol references are dyld's to fix up and move
 # to __DATA_CONST like the other lists.
 $CC --ld-path=$mold -o $t/exe15 $t/a.o $t/b.o $t/c.o -framework Foundation \
-  -mmacosx-version-min=15.0
+  -mmacosx-version-min=15.0 -Wl,-no_objc_category_merging
 otool -l $t/exe15 | awk '/^ *sectname/{s=$2} /^ *segname/{g=$2} /^ *flags/{if (s != "") print g","s, $2; s=""}' > $t/sects15
 grep -q '^__DATA_CONST,__objc_protorefs 0x00000000$' $t/sects15
 ! grep -q '__DATA,__objc_protorefs' $t/sects15
@@ -122,7 +123,8 @@ grep -q '^__TEXT,__init_offsets 0x00000016$' $t/sects15
 $t/exe15
 
 # -no_data_const keeps everything in __DATA.
-$CC --ld-path=$mold -o $t/exe2 $t/a.o $t/b.o $t/c.o -framework Foundation -Wl,-no_data_const
+$CC --ld-path=$mold -o $t/exe2 $t/a.o $t/b.o $t/c.o -framework Foundation -Wl,-no_data_const \
+  -Wl,-no_objc_category_merging
 otool -l $t/exe2 | grep -q 'segname __DATA_CONST' && exit 1
 otool -l $t/exe2 | grep -A1 'sectname __cfstring' | grep -q 'segname __DATA'
 $t/exe2

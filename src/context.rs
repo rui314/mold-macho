@@ -71,6 +71,10 @@ pub struct Context<E: Arch> {
     /// The method lists rewritten in relative form, with their synthetic
     /// subsections in the __objc_methlist chunk.
     pub objc_methlists: Vec<crate::passes::ObjcMethList>,
+    /// Objective-C data records the linker synthesized (see
+    /// merge_objc_categories), each placed as the tail of the output
+    /// section it names.
+    pub objc_blobs: Vec<crate::passes::ObjcBlob>,
     /// The _objc_msgSend symbol, once objc stubs exist.
     pub objc_msgsend_sym: Option<SymbolId>,
     /// -alias names for imported symbols: (alias, imported target).
@@ -177,6 +181,7 @@ impl<E: Arch> Context<E> {
             objc_classref_slots: Vec::new(),
             objc_extra_selrefs: Vec::new(),
             objc_methlists: Vec::new(),
+            objc_blobs: Vec::new(),
             dylib_load_seq: 0,
             thread_ptr_syms: Vec::new(),
             objc_stubs: Vec::new(),

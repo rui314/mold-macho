@@ -2084,7 +2084,7 @@ pub fn convert_objc_method_lists<E: Arch>(ctx: &mut Context<E>) {
     // Every method list the runtime would visit.
     let mut lists: Vec<u32> = Vec::new();
     let mut seen: hashbrown::HashSet<u32> = hashbrown::HashSet::new();
-    let mut classes_seen: hashbrown::HashSet<u32> = hashbrown::HashSet::new();
+    let mut classes_seen: hashbrown::HashSet<(u32, u64)> = hashbrown::HashSet::new();
     let mut note = |ctx: &Context<E>, r: Option<ObjcRef>, lists: &mut Vec<u32>| {
         if let Some((isec, 0)) = r.and_then(|r| objc_ref_location(ctx, r)) {
             if seen.insert(isec) {
@@ -2095,11 +2095,11 @@ pub fn convert_objc_method_lists<E: Arch>(ctx: &mut Context<E>) {
     fn visit_class<E: Arch>(
         ctx: &Context<E>,
         cls: (u32, u64),
-        classes_seen: &mut hashbrown::HashSet<u32>,
+        classes_seen: &mut hashbrown::HashSet<(u32, u64)>,
         note: &mut impl FnMut(&Context<E>, Option<ObjcRef>, &mut Vec<u32>),
         lists: &mut Vec<u32>,
     ) {
-        if cls.1 != 0 || !classes_seen.insert(cls.0) {
+        if !classes_seen.insert(cls) {
             return;
         }
         // class_t: isa, superclass, cache, vtable, data (the ro).
@@ -2242,6 +2242,637 @@ pub fn convert_objc_method_lists<E: Arch>(ctx: &mut Context<E>) {
             if let Some(&synth) = repoint.get(&isec) {
                 ctx.symtab[id].set_isec(Some(synth));
             }
+        }
+    }
+}
+
+/// A field of a synthesized Objective-C data record.
+#[derive(Clone, Debug)]
+pub enum ObjcField {
+    Bytes(Vec<u8>),
+    /// An 8-byte pointer, rebased at load (or null).
+    Ptr(ObjcRef),
+}
+
+/// A synthesized Objective-C data record, placed in the tail of the
+/// output section `sect` (mapped to its segment like an input section
+/// of that name) as the synthetic subsection `isec`.
+#[derive(Debug)]
+pub struct ObjcBlob {
+    pub sect: &'static str,
+    pub isec: u32,
+    pub fields: Vec<ObjcField>,
+}
+
+impl ObjcBlob {
+    pub fn size(&self) -> u64 {
+        self.fields
+            .iter()
+            .map(|f| match f {
+                ObjcField::Bytes(b) => b.len() as u64,
+                ObjcField::Ptr(_) => 8,
+            })
+            .sum()
+    }
+}
+
+/// The address a synthesized record's reference resolves to.
+pub fn objc_ref_addr<E: Arch>(ctx: &Context<E>, r: ObjcRef) -> u64 {
+    match r {
+        ObjcRef::Isec(isec, off) => ctx.isec_addr(isec as usize) + off,
+        ObjcRef::Sym(id, addend) => (ctx.sym_addr(id) as i64 + addend) as u64,
+        ObjcRef::TailSelref(n) => ctx.objc_selref_addr(n),
+        ObjcRef::Null => 0,
+    }
+}
+
+/// Merges the categories of a class defined in the image into the
+/// class itself, as ld64 does by default (-objc_category_merging):
+/// the runtime then has no categories to attach at load. The merged
+/// method list holds the categories' methods, last category first,
+/// then the class's own (a category's method precedes the class's,
+/// as after attachment); the protocol list likewise; the property
+/// lists take the categories in order, then the class's. The
+/// class_ro_t records are rewritten to point at the merged lists
+/// (their symbols follow), the categories leave __objc_catlist, and a
+/// class that absorbed a +load category joins __objc_nlclslist. A
+/// category on a class from another image, or one whose data is not
+/// in the expected shape, is left alone. Runs after the method lists
+/// have been rewritten in relative form, when it merges those; with
+/// classic lists the merged list is a classic one.
+pub fn merge_objc_categories<E: Arch>(ctx: &mut Context<E>) {
+    if ctx.args.relocatable || !ctx.args.objc_category_merging.unwrap_or(true) {
+        return;
+    }
+    let relative = objc_relative_method_lists(ctx);
+
+    // Classes defined here: class_t location -> (metaclass, ro, meta ro).
+    struct Class {
+        ro: (u32, u64),
+        meta_ro: (u32, u64),
+        nonlazy: bool,
+    }
+    let mut classes: hashbrown::HashMap<(u32, u64), Class> = hashbrown::HashMap::new();
+    let mut class_order: Vec<(u32, u64)> = Vec::new();
+    let mut nlclslist_sects = false;
+    for i in 0..ctx.isecs.len() {
+        let isec = &ctx.isecs[i];
+        if !isec.is_alive() || isec.obj == u32::MAX {
+            continue;
+        }
+        let h = ctx.hdr_of(isec);
+        let nonlazy = match h.sectname() {
+            "__objc_classlist" => false,
+            "__objc_nlclslist" => {
+                nlclslist_sects = true;
+                true
+            }
+            _ => continue,
+        };
+        for off in (0..isec.size as u64).step_by(8) {
+            let Some(cls) = objc_pointer_at(ctx, i as u32, off).and_then(|r| objc_ref_location(ctx, r)) else { continue };
+            let ro = objc_pointer_at(ctx, cls.0, cls.1 + 32).and_then(|r| objc_ref_location(ctx, r));
+            let meta = objc_pointer_at(ctx, cls.0, cls.1).and_then(|r| objc_ref_location(ctx, r));
+            let meta_ro = meta.and_then(|m| objc_pointer_at(ctx, m.0, m.1 + 32)).and_then(|r| objc_ref_location(ctx, r));
+            let (Some(ro), Some(_meta), Some(meta_ro)) = (ro, meta, meta_ro) else { continue };
+            if !classes.contains_key(&cls) {
+                class_order.push(cls);
+            }
+            let entry = classes.entry(cls).or_insert(Class { ro, meta_ro, nonlazy: false });
+            entry.nonlazy |= nonlazy;
+        }
+    }
+    if classes.is_empty() {
+        return;
+    }
+
+    // The categories, in __objc_catlist order, by class. A category
+    // sits in __objc_catlist and, if it has a +load, in
+    // __objc_nlcatlist too; a list subsection may hold several.
+    struct Category {
+        cat: (u32, u64),
+        nonlazy: bool,
+        merged: bool,
+    }
+    struct ListSect {
+        isec: u32,
+        nonlazy: bool,
+        /// Each entry: the category it names, if mergeable.
+        entries: Vec<Option<usize>>,
+        /// The entries as references, for rebuilding the list.
+        refs: Vec<ObjcRef>,
+    }
+    let mut cats: Vec<Category> = Vec::new();
+    let mut cat_index: hashbrown::HashMap<(u32, u64), usize> = hashbrown::HashMap::new();
+    let mut cats_of: hashbrown::HashMap<(u32, u64), Vec<usize>> = hashbrown::HashMap::new();
+    let mut list_sects: Vec<ListSect> = Vec::new();
+    for i in 0..ctx.isecs.len() {
+        let isec = &ctx.isecs[i];
+        if !isec.is_alive() || isec.obj == u32::MAX {
+            continue;
+        }
+        let h = ctx.hdr_of(isec);
+        let nonlazy = match h.sectname() {
+            "__objc_catlist" => false,
+            "__objc_nlcatlist" => true,
+            _ => continue,
+        };
+        let mut ls = ListSect { isec: i as u32, nonlazy, entries: Vec::new(), refs: Vec::new() };
+        for off in (0..isec.size as u64).step_by(8) {
+            let r = objc_pointer_at(ctx, i as u32, off).unwrap_or(ObjcRef::Null);
+            ls.refs.push(r);
+            let mergeable = (|| {
+                let cat = objc_ref_location(ctx, r)?;
+                if cat.1 != 0 || ctx.isecs[cat.0 as usize].size < 48 {
+                    return None;
+                }
+                let cls = objc_pointer_at(ctx, cat.0, 8).and_then(|r| objc_ref_location(ctx, r))?;
+                if !classes.contains_key(&cls) {
+                    return None;
+                }
+                let idx = match cat_index.get(&cat) {
+                    Some(&idx) => idx,
+                    None => {
+                        cats.push(Category { cat, nonlazy: false, merged: false });
+                        cat_index.insert(cat, cats.len() - 1);
+                        cats_of.entry(cls).or_default().push(cats.len() - 1);
+                        cats.len() - 1
+                    }
+                };
+                cats[idx].nonlazy |= nonlazy;
+                Some(idx)
+            })();
+            ls.entries.push(mergeable);
+        }
+        list_sects.push(ls);
+    }
+    if cats_of.is_empty() {
+        return;
+    }
+
+    // The methods of a list (already rewritten in relative form, or
+    // classic), or None if the list is not in a shape we can merge.
+    let methods_of = |ctx: &Context<E>, r: Option<ObjcRef>| -> Option<Vec<ObjcMethod>> {
+        let Some(r) = r else { return Some(Vec::new()) };
+        let (isec, off) = objc_ref_location(ctx, r)?;
+        if off != 0 {
+            return None;
+        }
+        let resolved = ctx.resolve_isec(isec as usize) as u32;
+        if let Some(list) = ctx.objc_methlists.iter().find(|l| l.isec == resolved) {
+            return Some(list.methods.clone());
+        }
+        if relative {
+            return None;
+        }
+        let data = ctx.isecs[isec as usize].data();
+        if data.len() < 8 {
+            return None;
+        }
+        let entsize_flags = u32::from_le_bytes(data[0..4].try_into().unwrap());
+        let count = u32::from_le_bytes(data[4..8].try_into().unwrap()) as u64;
+        if entsize_flags != 24 || 8 + 24 * count != data.len() as u64 {
+            return None;
+        }
+        let mut methods = Vec::new();
+        for i in 0..count {
+            let at = 8 + 24 * i;
+            methods.push(ObjcMethod {
+                name: objc_pointer_at(ctx, isec, at)?,
+                types: objc_pointer_at(ctx, isec, at + 8).unwrap_or(ObjcRef::Null),
+                imp: objc_pointer_at(ctx, isec, at + 16).unwrap_or(ObjcRef::Null),
+            });
+        }
+        Some(methods)
+    };
+    // A protocol list: count (8 bytes) then pointers.
+    let protocols_of = |ctx: &Context<E>, r: Option<ObjcRef>| -> Option<Vec<ObjcRef>> {
+        let Some(r) = r else { return Some(Vec::new()) };
+        let (isec, off) = objc_ref_location(ctx, r)?;
+        let data = ctx.isecs[isec as usize].data();
+        let count = u64::from_le_bytes(data.get(off as usize..off as usize + 8)?.try_into().unwrap());
+        (0..count).map(|i| objc_pointer_at(ctx, isec, off + 8 + 8 * i)).collect()
+    };
+    // A property list: entsize (16), count, then (name, attributes).
+    let properties_of = |ctx: &Context<E>, r: Option<ObjcRef>| -> Option<Vec<(ObjcRef, ObjcRef)>> {
+        let Some(r) = r else { return Some(Vec::new()) };
+        let (isec, off) = objc_ref_location(ctx, r)?;
+        let data = ctx.isecs[isec as usize].data();
+        let entsize = u32::from_le_bytes(data.get(off as usize..off as usize + 4)?.try_into().unwrap());
+        let count = u32::from_le_bytes(data.get(off as usize + 4..off as usize + 8)?.try_into().unwrap()) as u64;
+        if entsize != 16 {
+            return None;
+        }
+        (0..count)
+            .map(|i| {
+                let at = off + 8 + 16 * i;
+                Some((objc_pointer_at(ctx, isec, at)?, objc_pointer_at(ctx, isec, at + 8).unwrap_or(ObjcRef::Null)))
+            })
+            .collect()
+    };
+    // A pointer field's reference must be to data in this image (or
+    // null) for a synthesized record to hold it as a plain rebase.
+    let local = |ctx: &Context<E>, r: ObjcRef| -> bool {
+        match r {
+            ObjcRef::Null | ObjcRef::Isec(..) | ObjcRef::TailSelref(_) => true,
+            ObjcRef::Sym(id, _) => !ctx.symtab[id].is_imported() && ctx.symtab[id].isec().is_some(),
+        }
+    };
+
+    let mut methlist_hdr: Option<u32> = None;
+    let mut methlist_off: u64 = ctx
+        .objc_methlists
+        .last()
+        .map(|l| ctx.isecs[l.isec as usize].output_offset as u64 + ctx.isecs[l.isec as usize].size as u64)
+        .unwrap_or(0);
+    let mut nonlazy_classes: Vec<(u32, u64)> = Vec::new();
+
+    for cls in class_order {
+        let Some(cat_ids) = cats_of.get(&cls) else { continue };
+        let cat_ids = cat_ids.clone();
+        let info = &classes[&cls];
+        // Gather everything first; give up on the class if anything is
+        // not in shape.
+        struct Merged {
+            imethods: Vec<ObjcMethod>,
+            cmethods: Vec<ObjcMethod>,
+            protocols: Vec<ObjcRef>,
+            iprops: Vec<(ObjcRef, ObjcRef)>,
+            cprops: Vec<(ObjcRef, ObjcRef)>,
+            any_imethods: bool,
+            any_cmethods: bool,
+            any_protocols: bool,
+            any_iprops: bool,
+            any_cprops: bool,
+        }
+        let mut m = Merged {
+            imethods: Vec::new(),
+            cmethods: Vec::new(),
+            protocols: Vec::new(),
+            iprops: Vec::new(),
+            cprops: Vec::new(),
+            any_imethods: false,
+            any_cmethods: false,
+            any_protocols: false,
+            any_iprops: false,
+            any_cprops: false,
+        };
+        let mut ok = true;
+        for &ci in cat_ids.iter().rev() {
+            let (c, coff) = cats[ci].cat;
+            let im = objc_pointer_at(ctx, c, coff + 16);
+            let cm = objc_pointer_at(ctx, c, coff + 24);
+            let pr = objc_pointer_at(ctx, c, coff + 32);
+            match (methods_of(ctx, im), methods_of(ctx, cm), protocols_of(ctx, pr)) {
+                (Some(a), Some(b), Some(p)) => {
+                    m.any_imethods |= im.is_some();
+                    m.any_cmethods |= cm.is_some();
+                    m.any_protocols |= pr.is_some();
+                    m.imethods.extend(a);
+                    m.cmethods.extend(b);
+                    m.protocols.extend(p);
+                }
+                _ => {
+                    ok = false;
+                    break;
+                }
+            }
+        }
+        if ok {
+            for &ci in cat_ids.iter() {
+                let (c, coff) = cats[ci].cat;
+                let ip = objc_pointer_at(ctx, c, coff + 40);
+                let cp = if ctx.isecs[c as usize].size >= coff as u32 + 56 { objc_pointer_at(ctx, c, coff + 48) } else { None };
+                match (properties_of(ctx, ip), properties_of(ctx, cp)) {
+                    (Some(a), Some(b)) => {
+                        m.any_iprops |= ip.is_some();
+                        m.any_cprops |= cp.is_some();
+                        m.iprops.extend(a);
+                        m.cprops.extend(b);
+                    }
+                    _ => {
+                        ok = false;
+                        break;
+                    }
+                }
+            }
+        }
+        // The class's own lists follow.
+        let (ro, meta_ro) = (info.ro, info.meta_ro);
+        let base_im = objc_pointer_at(ctx, ro.0, ro.1 + 32);
+        let base_cm = objc_pointer_at(ctx, meta_ro.0, meta_ro.1 + 32);
+        let base_pr = objc_pointer_at(ctx, ro.0, ro.1 + 40);
+        let base_ip = objc_pointer_at(ctx, ro.0, ro.1 + 64);
+        let base_cp = objc_pointer_at(ctx, meta_ro.0, meta_ro.1 + 64);
+        if ok {
+            match (
+                methods_of(ctx, base_im),
+                methods_of(ctx, base_cm),
+                protocols_of(ctx, base_pr),
+                properties_of(ctx, base_ip),
+                properties_of(ctx, base_cp),
+            ) {
+                (Some(a), Some(b), Some(p), Some(ip), Some(cp)) => {
+                    m.imethods.extend(a);
+                    m.cmethods.extend(b);
+                    m.protocols.extend(p);
+                    m.iprops.extend(ip);
+                    m.cprops.extend(cp);
+                }
+                _ => ok = false,
+            }
+        }
+        if ok && !relative {
+            ok = m.imethods.iter().chain(&m.cmethods).all(|x| local(ctx, x.name) && local(ctx, x.types) && local(ctx, x.imp));
+        }
+        if ok {
+            ok = m.protocols.iter().all(|&r| local(ctx, r))
+                && m.iprops.iter().chain(&m.cprops).all(|&(a, b)| local(ctx, a) && local(ctx, b));
+        }
+        if !ok {
+            continue;
+        }
+
+        // Emit the merged lists.
+        let mut new_blob = |ctx: &mut Context<E>, sect: &'static str, fields: Vec<ObjcField>| -> u32 {
+            let hdr: &'static MachSection = Box::leak(Box::new(MachSection {
+                sectname: str_to_name(sect),
+                segname: str_to_name("__DATA"),
+                p2align: 3,
+                flags: 0,
+                ..Default::default()
+            }));
+            ctx.synthetic_hdrs.push(hdr);
+            let shndx = (ctx.synthetic_hdrs.len() - 1) as u32;
+            let blob = ObjcBlob { sect, isec: 0, fields };
+            let size = blob.size();
+            ctx.isecs.push(InputSection {
+                obj: u32::MAX,
+                shndx,
+                p2align: 3,
+                input_addr: 0,
+                size: size as u32,
+                data_ptr: 0,
+                rel_offset: 0,
+                nrels: 0,
+                osec: u32::MAX,
+                output_offset: 0,
+                flags: InputSection::flags_placed(),
+                replacement: crate::input_sections::NO_REPLACEMENT,
+                unwind_offset: 0,
+                nunwind: 0,
+            });
+            let isec = (ctx.isecs.len() - 1) as u32;
+            ctx.objc_blobs.push(ObjcBlob { isec, ..blob });
+            isec
+        };
+        let mut new_methlist = |ctx: &mut Context<E>, methods: Vec<ObjcMethod>| -> u32 {
+            if relative {
+                let shndx = *methlist_hdr.get_or_insert_with(|| {
+                    let hdr: &'static MachSection = Box::leak(Box::new(MachSection {
+                        sectname: str_to_name("__objc_methlist"),
+                        segname: str_to_name("__TEXT"),
+                        p2align: 2,
+                        flags: S_REGULAR,
+                        ..Default::default()
+                    }));
+                    ctx.synthetic_hdrs.push(hdr);
+                    (ctx.synthetic_hdrs.len() - 1) as u32
+                });
+                let size = 8 + 12 * methods.len() as u64;
+                methlist_off = align_to(methlist_off, 4);
+                ctx.isecs.push(InputSection {
+                    obj: u32::MAX,
+                    shndx,
+                    p2align: 2,
+                    input_addr: 0,
+                    size: size as u32,
+                    data_ptr: 0,
+                    rel_offset: 0,
+                    nrels: 0,
+                    osec: u32::MAX,
+                    output_offset: methlist_off as u32,
+                    flags: InputSection::flags_placed(),
+                    replacement: crate::input_sections::NO_REPLACEMENT,
+                    unwind_offset: 0,
+                    nunwind: 0,
+                });
+                methlist_off += size;
+                let isec = (ctx.isecs.len() - 1) as u32;
+                ctx.objc_methlists.push(ObjcMethList { isec, methods });
+                isec
+            } else {
+                let mut fields = vec![ObjcField::Bytes(24u32.to_le_bytes().to_vec()), ObjcField::Bytes((methods.len() as u32).to_le_bytes().to_vec())];
+                for m in &methods {
+                    fields.push(ObjcField::Ptr(m.name));
+                    fields.push(ObjcField::Ptr(m.types));
+                    fields.push(ObjcField::Ptr(m.imp));
+                }
+                new_blob(ctx, "__objc_const", fields)
+            }
+        };
+        // The class's original lists are superseded: they resolve to
+        // the merged one (so their symbols name it, as ld64's
+        // __OBJC_$_INSTANCE_METHODS_Foo(A|B) does); the categories'
+        // are simply dropped with the categories.
+        let supersede = |ctx: &mut Context<E>, r: Option<ObjcRef>, merged: Option<u32>| {
+            if let Some((isec, 0)) = r.and_then(|r| objc_ref_location(ctx, r)) {
+                let resolved = ctx.resolve_isec(isec as usize);
+                if Some(resolved as u32) != merged {
+                    ctx.objc_methlists.retain(|l| l.isec as usize != resolved);
+                    ctx.isecs[resolved].set_alive(false);
+                    if let Some(merged) = merged {
+                        ctx.isecs[resolved].replacement = merged;
+                        if resolved != isec as usize {
+                            ctx.isecs[isec as usize].replacement = merged;
+                        }
+                    }
+                }
+            }
+        };
+
+        let imethods = if m.any_imethods { Some(new_methlist(ctx, std::mem::take(&mut m.imethods))) } else { None };
+        let cmethods = if m.any_cmethods { Some(new_methlist(ctx, std::mem::take(&mut m.cmethods))) } else { None };
+        let protocols = if m.any_protocols {
+            let mut fields = vec![ObjcField::Bytes((m.protocols.len() as u64).to_le_bytes().to_vec())];
+            fields.extend(m.protocols.iter().map(|&r| ObjcField::Ptr(r)));
+            Some(new_blob(ctx, "__objc_const", fields))
+        } else {
+            None
+        };
+        let props = |ctx: &mut Context<E>, list: &[(ObjcRef, ObjcRef)]| -> u32 {
+            let mut fields = vec![ObjcField::Bytes(16u32.to_le_bytes().to_vec()), ObjcField::Bytes((list.len() as u32).to_le_bytes().to_vec())];
+            for &(n, a) in list {
+                fields.push(ObjcField::Ptr(n));
+                fields.push(ObjcField::Ptr(a));
+            }
+            new_blob(ctx, "__objc_const", fields)
+        };
+        let iprops = if m.any_iprops { Some(props(ctx, &m.iprops)) } else { None };
+        let cprops = if m.any_cprops { Some(props(ctx, &m.cprops)) } else { None };
+
+        if imethods.is_some() {
+            supersede(ctx, base_im, imethods);
+        }
+        if cmethods.is_some() {
+            supersede(ctx, base_cm, cmethods);
+        }
+        // Superseded protocol and property lists go away (ld64's output
+        // keeps only the merged ones).
+        let retire = |ctx: &mut Context<E>, r: Option<ObjcRef>| {
+            if let Some((isec, 0)) = r.and_then(|r| objc_ref_location(ctx, r)) {
+                ctx.isecs[isec as usize].set_alive(false);
+            }
+        };
+        if protocols.is_some() {
+            retire(ctx, base_pr);
+        }
+        if iprops.is_some() {
+            retire(ctx, base_ip);
+        }
+        if cprops.is_some() {
+            retire(ctx, base_cp);
+        }
+        for &ci in cat_ids.iter() {
+            let (c, coff) = cats[ci].cat;
+            supersede(ctx, objc_pointer_at(ctx, c, coff + 16), None);
+            supersede(ctx, objc_pointer_at(ctx, c, coff + 24), None);
+            for field in [32, 40, 48] {
+                if ctx.isecs[c as usize].size as u64 >= coff + field + 8 {
+                    retire(ctx, objc_pointer_at(ctx, c, coff + field));
+                }
+            }
+        }
+
+        // New ro records with the merged lists, replacing the class's
+        // (their symbols follow). class_ro_t: flags, instanceStart,
+        // instanceSize, reserved, then ivarLayout, name, baseMethods,
+        // baseProtocols, ivars, weakIvarLayout, baseProperties.
+        let rewrite_ro = |ctx: &mut Context<E>, ro: (u32, u64), methods: Option<u32>, protocols: Option<u32>, props: Option<u32>, new_blob: &mut dyn FnMut(&mut Context<E>, &'static str, Vec<ObjcField>) -> u32| {
+            let data = ctx.isecs[ro.0 as usize].data()[ro.1 as usize..ro.1 as usize + 16].to_vec();
+            let mut fields = vec![ObjcField::Bytes(data)];
+            for (k, field) in [16u64, 24, 32, 40, 48, 56, 64].into_iter().enumerate() {
+                let sub = match k {
+                    2 => methods,
+                    3 => protocols,
+                    6 => props,
+                    _ => None,
+                };
+                let r = match sub {
+                    Some(isec) => ObjcRef::Isec(isec, 0),
+                    None => objc_pointer_at(ctx, ro.0, ro.1 + field).unwrap_or(ObjcRef::Null),
+                };
+                fields.push(ObjcField::Ptr(r));
+            }
+            let blob = new_blob(ctx, "__objc_const", fields);
+            let isec = ro.0 as usize;
+            if ro.1 == 0 && ctx.isecs[isec].size as u64 == 72 {
+                ctx.isecs[isec].set_alive(false);
+                ctx.isecs[isec].replacement = blob;
+            }
+            blob
+        };
+        // The ro must be a subsection of its own to be replaced.
+        if ro.1 != 0 || ctx.isecs[ro.0 as usize].size != 72 || meta_ro.1 != 0 || ctx.isecs[meta_ro.0 as usize].size != 72 {
+            continue;
+        }
+        // Only now is the merge irrevocable: drop the categories.
+        rewrite_ro(ctx, ro, imethods, protocols, iprops, &mut new_blob);
+        rewrite_ro(ctx, meta_ro, cmethods, protocols, cprops, &mut new_blob);
+        let mut any_nonlazy = false;
+        for &ci in cat_ids.iter() {
+            ctx.isecs[cats[ci].cat.0 as usize].set_alive(false);
+            cats[ci].merged = true;
+            any_nonlazy |= cats[ci].nonlazy;
+        }
+        if any_nonlazy && !info.nonlazy {
+            nonlazy_classes.push(cls);
+        }
+    }
+
+    // The category lists lose the merged entries: a subsection all of
+    // whose entries merged goes away, one with survivors is rebuilt.
+    for ls in &list_sects {
+        let merged: Vec<bool> = ls.entries.iter().map(|e| e.is_some_and(|ci| cats[ci].merged)).collect();
+        if !merged.iter().any(|&m| m) {
+            continue;
+        }
+        ctx.isecs[ls.isec as usize].set_alive(false);
+        let survivors: Vec<ObjcField> = ls
+            .refs
+            .iter()
+            .zip(&merged)
+            .filter(|(_, &m)| !m)
+            .map(|(&r, _)| ObjcField::Ptr(r))
+            .collect();
+        if survivors.is_empty() {
+            continue;
+        }
+        let sect: &'static str = if ls.nonlazy { "__objc_nlcatlist" } else { "__objc_catlist" };
+        let hdr: &'static MachSection = Box::leak(Box::new(MachSection {
+            sectname: str_to_name(sect),
+            segname: str_to_name("__DATA"),
+            p2align: 3,
+            flags: S_ATTR_NO_DEAD_STRIP,
+            ..Default::default()
+        }));
+        ctx.synthetic_hdrs.push(hdr);
+        let shndx = (ctx.synthetic_hdrs.len() - 1) as u32;
+        ctx.isecs.push(InputSection {
+            obj: u32::MAX,
+            shndx,
+            p2align: 3,
+            input_addr: 0,
+            size: (survivors.len() * 8) as u32,
+            data_ptr: 0,
+            rel_offset: 0,
+            nrels: 0,
+            osec: u32::MAX,
+            output_offset: 0,
+            flags: InputSection::flags_placed(),
+            replacement: crate::input_sections::NO_REPLACEMENT,
+            unwind_offset: 0,
+            nunwind: 0,
+        });
+        let isec = (ctx.isecs.len() - 1) as u32;
+        ctx.objc_blobs.push(ObjcBlob { sect, isec, fields: survivors });
+    }
+
+    // Classes that absorbed a +load category become non-lazy.
+    if !nonlazy_classes.is_empty() {
+        let _ = nlclslist_sects;
+        for cls in nonlazy_classes {
+            let hdr: &'static MachSection = Box::leak(Box::new(MachSection {
+                sectname: str_to_name("__objc_nlclslist"),
+                segname: str_to_name("__DATA"),
+                p2align: 3,
+                flags: S_ATTR_NO_DEAD_STRIP,
+                ..Default::default()
+            }));
+            ctx.synthetic_hdrs.push(hdr);
+            let shndx = (ctx.synthetic_hdrs.len() - 1) as u32;
+            ctx.isecs.push(InputSection {
+                obj: u32::MAX,
+                shndx,
+                p2align: 3,
+                input_addr: 0,
+                size: 8,
+                data_ptr: 0,
+                rel_offset: 0,
+                nrels: 0,
+                osec: u32::MAX,
+                output_offset: 0,
+                flags: InputSection::flags_placed(),
+                replacement: crate::input_sections::NO_REPLACEMENT,
+                unwind_offset: 0,
+                nunwind: 0,
+            });
+            let isec = (ctx.isecs.len() - 1) as u32;
+            ctx.objc_blobs.push(ObjcBlob {
+                sect: "__objc_nlclslist",
+                isec,
+                fields: vec![ObjcField::Ptr(ObjcRef::Isec(cls.0, cls.1))],
+            });
         }
     }
 }
@@ -2826,7 +3457,7 @@ pub fn create_output_sections<E: Arch>(ctx: &mut Context<E>) {
         chunk.hdr.size = ctx.objc_stubs.len() as u64 * E::OBJC_STUB_SIZE;
         ctx.chunks.push(chunk);
     }
-    if !ctx.objc_stubs.is_empty() || !ctx.objc_extra_selrefs.is_empty() {
+    {
 
         // The stubs' selector strings and reference slots join the
         // sections of those names (as their tail): the Objective-C
@@ -2864,20 +3495,68 @@ pub fn create_output_sections<E: Arch>(ctx: &mut Context<E>) {
             chunk.tail = tail;
             chunk.tail_off = align_to(chunk.hdr.size, 1 << p2align);
             chunk.hdr.size = chunk.tail_off + tail_size;
+            idx
         };
         let methname_size = ctx.objc_methname_data.len() as u64;
         let selrefs_size = (ctx.objc_stubs.len() + ctx.objc_extra_selrefs.len()) as u64 * 8;
         if methname_size > 0 {
             tail_section(ctx, "__TEXT", "__objc_methname", S_CSTRING_LITERALS, 0, Tail::ObjcMethname, methname_size);
         }
-        tail_section(ctx, "__DATA", "__objc_selrefs", S_LITERAL_POINTERS | S_ATTR_NO_DEAD_STRIP, 3, Tail::ObjcSelrefs, selrefs_size);
+        if selrefs_size > 0 {
+            tail_section(ctx, "__DATA", "__objc_selrefs", S_LITERAL_POINTERS | S_ATTR_NO_DEAD_STRIP, 3, Tail::ObjcSelrefs, selrefs_size);
+        }
+    // Synthesized Objective-C records go in the tail of the section
+    // they name; each blob's subsection is placed there.
+    if !ctx.objc_blobs.is_empty() {
+        let mut sects: Vec<&'static str> = ctx.objc_blobs.iter().map(|b| b.sect).collect();
+        sects.sort();
+        sects.dedup();
+        for sect in sects {
+            let (seg, out) = output_section_for(false, ctx.args.data_const, objc_refs_are_const(ctx), "__DATA", sect).unwrap();
+            let flags = output_section_flags(seg, out, 0);
+            let mut size = 0u64;
+            let mut offs = Vec::new();
+            for b in ctx.objc_blobs.iter().filter(|b| b.sect == sect) {
+                size = align_to(size, 8);
+                offs.push((b.isec, size));
+                size += b.size();
+            }
+            let idx = tail_section(ctx, seg, out, flags, 3, Tail::ObjcBlobs, size);
+            let tail_off = ctx.chunks[idx].tail_off;
+            for (isec, off) in offs {
+                ctx.isecs[isec as usize].osec = idx as u32;
+                ctx.isecs[isec as usize].output_offset = (tail_off + off) as u32;
+            }
+        }
+    }
     }
 
     if !ctx.objc_methlists.is_empty() {
         let mut chunk = Chunk::new("__TEXT", "__objc_methlist", ChunkKind::ObjcMethlist);
-        chunk.hdr.p2align = 2;
-        let last = ctx.objc_methlists.last().unwrap().isec as usize;
-        chunk.hdr.size = ctx.isecs[last].output_offset as u64 + ctx.isecs[last].size as u64;
+        chunk.hdr.p2align = 3;
+        // ld64 lays the lists out sorted by their symbol's name, each
+        // 8-byte aligned; category merging also retires some after
+        // their first placement.
+        let mut name_of: hashbrown::HashMap<u32, &'static str> = hashbrown::HashMap::new();
+        for sym in ctx.symtab.syms.iter() {
+            if let Some(isec) = sym.isec() {
+                let r = ctx.resolve_isec(isec as usize) as u32;
+                let e = name_of.entry(r).or_insert(sym.name());
+                if sym.name() < *e {
+                    *e = sym.name();
+                }
+            }
+        }
+        let mut order: Vec<usize> = (0..ctx.objc_methlists.len()).collect();
+        order.sort_by_key(|&i| (name_of.get(&ctx.objc_methlists[i].isec).copied().unwrap_or(""), i));
+        let mut off = 0u64;
+        for i in order {
+            let isec = ctx.objc_methlists[i].isec as usize;
+            off = align_to(off, 8);
+            ctx.isecs[isec].output_offset = off as u32;
+            off += ctx.isecs[isec].size as u64;
+        }
+        chunk.hdr.size = off;
         ctx.chunks.push(chunk);
         let idx = (ctx.chunks.len() - 1) as u32;
         for i in 0..ctx.objc_methlists.len() {
@@ -3786,7 +4465,7 @@ pub fn set_osec_offsets<E: Arch>(ctx: &mut Context<E>) {
         match chunk.tail {
             Tail::ObjcMethname => ctx.objc_methname_chunk = i,
             Tail::ObjcSelrefs => ctx.objc_selrefs_chunk = i,
-            Tail::None => {}
+            Tail::ObjcBlobs | Tail::None => {}
         }
     }
 
@@ -4086,6 +4765,10 @@ fn build_rebase_info<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
     for i in 0..ctx.objc_stubs.len() + ctx.objc_extra_selrefs.len() {
         locs.push(ctx.objc_selref_addr(i));
     }
+    // Pointer fields of the synthesized Objective-C records.
+    for (addr, _) in objc_blob_pointers(ctx) {
+        locs.push(addr);
+    }
 
     // GOT slots that hold local addresses.
     if let Some(idx) = output_chunks::find_chunk(ctx, |k| matches!(k, ChunkKind::Got)) {
@@ -4259,6 +4942,28 @@ const MAX_INLINE_ADDEND: u64 = 255;
 /// Collects every dynamic fixup location: rebases (the linker wrote an
 /// absolute address that dyld must slide) and binds (dyld writes an
 /// imported symbol's address), with the bind addends.
+/// The (address, target) of every non-null pointer field of the
+/// synthesized Objective-C records: each is a rebase.
+fn objc_blob_pointers<E: Arch>(ctx: &Context<E>) -> Vec<(u64, u64)> {
+    let mut out = Vec::new();
+    for b in &ctx.objc_blobs {
+        let mut at = ctx.isec_addr(b.isec as usize);
+        for f in &b.fields {
+            match f {
+                ObjcField::Bytes(bytes) => at += bytes.len() as u64,
+                ObjcField::Ptr(r) => {
+                    let target = objc_ref_addr(ctx, *r);
+                    if target != 0 {
+                        out.push((at, target));
+                    }
+                    at += 8;
+                }
+            }
+        }
+    }
+    out
+}
+
 fn collect_fixups<E: Arch>(ctx: &Context<E>) -> Vec<(u64, Option<crate::symbol::SymbolId>, u64)> {
     use rayon::prelude::*;
 
@@ -4324,6 +5029,9 @@ fn collect_fixups<E: Arch>(ctx: &Context<E>) -> Vec<(u64, Option<crate::symbol::
     }
     for i in 0..ctx.objc_stubs.len() + ctx.objc_extra_selrefs.len() {
         fixups.push((ctx.objc_selref_addr(i), None, 0));
+    }
+    for (addr, _) in objc_blob_pointers(ctx) {
+        fixups.push((addr, None, 0));
     }
 
     fixups.par_sort_unstable_by_key(|&(addr, _, _)| addr);
@@ -4792,6 +5500,27 @@ fn copy_chunk<E: Arch>(ctx: &Context<E>, chunk: &Chunk, buf: &mut [u8]) {
                 Tail::None => {}
                 Tail::ObjcMethname => {
                     tail[..ctx.objc_methname_data.len()].copy_from_slice(&ctx.objc_methname_data);
+                }
+                Tail::ObjcBlobs => {
+                    for b in ctx
+                        .objc_blobs
+                        .iter()
+                        .filter(|b| std::ptr::eq(&ctx.chunks[ctx.isecs[b.isec as usize].osec as usize], chunk))
+                    {
+                        let mut at = ctx.isecs[b.isec as usize].output_offset as usize - chunk.tail_off as usize;
+                        for f in &b.fields {
+                            match f {
+                                ObjcField::Bytes(bytes) => {
+                                    tail[at..at + bytes.len()].copy_from_slice(bytes);
+                                    at += bytes.len();
+                                }
+                                ObjcField::Ptr(r) => {
+                                    tail[at..at + 8].copy_from_slice(&objc_ref_addr(ctx, *r).to_le_bytes());
+                                    at += 8;
+                                }
+                            }
+                        }
+                    }
                 }
                 Tail::ObjcSelrefs => {
                     for i in 0..ctx.objc_stubs.len() {

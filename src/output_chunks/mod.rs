@@ -117,6 +117,10 @@ pub enum Tail {
     /// Selector references (pointers into __objc_methname) loaded by the
     /// synthesized objc stubs.
     ObjcSelrefs,
+    /// Objective-C data the linker synthesized (merged class data:
+    /// class_ro_t records, protocol and property lists, classic method
+    /// lists) in the section of that name.
+    ObjcBlobs,
 }
 
 #[derive(Debug)]
