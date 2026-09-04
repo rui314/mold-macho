@@ -3221,11 +3221,15 @@ fn output_section_for(
             other => String::leak(other.to_string()),
         }
     };
+    // The __LLVM segment (bitcode, Swift's module hash) is dropped from
+    // every output, -r included.
+    if segname == "__LLVM" {
+        return None;
+    }
     if relocatable {
         return Some((intern_seg(segname), String::leak(sectname.to_string())));
     }
     match (segname, sectname) {
-        ("__LLVM", _) => None,
         ("__DATA", "__objc_clsrolist") => None,
         ("__TEXT", "__StaticInit") => Some(("__TEXT", "__text")),
         ("__TEXT", "__literal4" | "__literal8" | "__literal16") => Some(("__TEXT", "__const")),
