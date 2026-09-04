@@ -171,7 +171,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
                 index_of_sym.insert(sym_id, nlists_out.len() as u32);
                 nlists_out.push(NList {
                     n_strx: add_string(&mut strtab, sym.name()),
-                    n_type: N_SECT,
+                    n_type: N_PEXT | N_SECT,
                     n_sect: ordinals[ctx.isecs[isec].osec as usize],
                     n_desc: nlist.n_desc & (N_ALT_ENTRY | N_NO_DEAD_STRIP),
                     n_value: sym_addr(ctx, sym_id),

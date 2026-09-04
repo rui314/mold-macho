@@ -15,7 +15,8 @@ nm -m $t/a.o | grep -q 'private external _hidden_fn'
 
 $mold -r -arch $ARCH -o $t/r.o $t/a.o
 nm -m $t/r.o > $t/nm
-grep -q 'non-external (was a private external) _hidden_fn\|non-external _hidden_fn' $t/nm
+# ld64 keeps N_PEXT on the demoted symbol (nm: "was a private external").
+grep -q 'non-external (was a private external) _hidden_fn' $t/nm
 grep -q ' external _visible_fn' $t/nm
 
 $mold -r -arch $ARCH -keep_private_externs -o $t/k.o $t/a.o
