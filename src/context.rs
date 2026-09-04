@@ -52,6 +52,10 @@ pub struct Context<E: Arch> {
     pub stub_syms: Vec<SymbolId>,
     /// Symbols with a __got slot, in slot order.
     pub got_syms: Vec<SymbolId>,
+    /// Synthetic subsections standing for __got slots that absorbed
+    /// __objc_classrefs entries (see fold_objc_classrefs); their osec
+    /// is set once the __got chunk exists.
+    pub objc_classref_slots: Vec<u32>,
     /// Thread-local symbols with a __thread_ptrs slot, in slot order.
     pub thread_ptr_syms: Vec<SymbolId>,
     /// _objc_msgSend$<selector> symbols, in __objc_stubs entry order,
@@ -160,6 +164,7 @@ impl<E: Arch> Context<E> {
             symtab_data: SymtabData::default(),
             stub_syms: Vec::new(),
             got_syms: Vec::new(),
+            objc_classref_slots: Vec::new(),
             thread_ptr_syms: Vec::new(),
             objc_stubs: Vec::new(),
             objc_msgsend_sym: None,

@@ -84,6 +84,14 @@ impl Arch for Arm64 {
     // answer is always yes (the ldr's shape is verified when the
     // rewrite happens - compilers emit nothing else for these
     // relocations).
+    fn got_load_form(r_type: u8) -> Option<u8> {
+        match r_type {
+            ARM64_RELOC_PAGE21 => Some(ARM64_RELOC_GOT_LOAD_PAGE21),
+            ARM64_RELOC_PAGEOFF12 => Some(ARM64_RELOC_GOT_LOAD_PAGEOFF12),
+            _ => None,
+        }
+    }
+
     fn can_relax_got_load(_data: &[u8], _offset: u32, _r_type: u8) -> bool {
         true
     }

@@ -65,6 +65,15 @@ pub trait Arch: Copy + Default + Send + Sync + 'static {
     /// instruction shape the relaxation rewrites.
     fn can_relax_got_load(data: &[u8], offset: u32, r_type: u8) -> bool;
 
+    /// The GOT-load form of a plain relocation that loads a pointer
+    /// from a data slot (adrp/ldr, or a RIP-relative mov): the type a
+    /// reference to an __objc_classrefs slot is rewritten to when the
+    /// slot folds into __got, so that the ordinary GOT-load handling
+    /// then loads the class from its GOT entry or, for a class defined
+    /// in the image, relaxes the load to its address. None for other
+    /// relocation types.
+    fn got_load_form(r_type: u8) -> Option<u8>;
+
     /// Writes the __stubs section: for each symbol in `ctx.stub_syms`, a
     /// jump through the symbol's __got slot. `addr` is the section's
     /// address and `buf` its bytes in the output.

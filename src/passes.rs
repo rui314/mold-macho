@@ -9,7 +9,7 @@ use crate::error;
 use crate::fatal;
 use crate::filetype::{get_file_type, FileType};
 use crate::input_files;
-use crate::input_sections::InputSection;
+use crate::input_sections::{InputSection, RelocTarget};
 use crate::macho::*;
 use crate::mapped_file::MappedFile;
 use crate::output_chunks::{
@@ -1097,7 +1097,7 @@ pub fn convert_init_offsets<E: Arch>(ctx: &mut Context<E>) {
                     }
                 }
                 None => match rel.target() {
-                    crate::input_sections::RelocTarget::Section(isec) => {
+                    RelocTarget::Section(isec) => {
                         (ctx.resolve_isec(isec as usize), rel.addend as u64)
                     }
                     _ => continue,
@@ -1755,6 +1755,151 @@ fn add_got<E: Arch>(ctx: &mut Context<E>, id: crate::symbol::SymbolId) {
     }
 }
 
+/// Folds __objc_classrefs into __got, as ld-prime does from a
+/// deployment target of macOS 15 on. A class reference is an 8-byte
+/// slot holding a class's address, fixed up by dyld - exactly what a
+/// GOT entry for the class symbol is. So the code that loads a class
+/// from its slot (adrp/ldr on arm64, a RIP-relative mov on x86-64) is
+/// retargeted at the class symbol as a GOT load: an imported class is
+/// then read from its GOT entry, shared by every reference in the
+/// image, and a class defined in the image relaxes to computing the
+/// address directly (adrp/add, lea), needing no slot at all. The image
+/// has no __objc_classrefs section and none of the slots' local
+/// symbols (_OBJC_CLASSLIST_REFERENCES_$_n); the runtime only ever
+/// read the section to remap references to swapped classes, which
+/// macOS 15's dyld handles through the GOT. ld-prime turned
+/// NetNewsWire's 581 class references into 168 GOT entries.
+///
+/// A reference that cannot become a GOT load (the slot's address
+/// taken, or a pointer to it) keeps the slot: it is replaced by a
+/// synthetic subsection standing for the class's GOT entry.
+pub fn fold_objc_classrefs<E: Arch>(ctx: &mut Context<E>) {
+    if ctx.args.relocatable || !objc_refs_are_const(ctx) {
+        return;
+    }
+    let mut got_hdr: Option<u32> = None;
+    for obj_idx in 0..ctx.objs.len() {
+        if !ctx.objs[obj_idx].is_alive {
+            continue;
+        }
+        // The object's class-reference slots: slot subsection -> the
+        // class symbol (its index in the object, and globally).
+        let mut slots: hashbrown::HashMap<u32, (u32, crate::symbol::SymbolId)> =
+            hashbrown::HashMap::new();
+        for &i in &ctx.objs[obj_idx].subsecs {
+            let isec = &ctx.isecs[i];
+            if !isec.is_alive()
+                || isec.replacement != crate::input_sections::NO_REPLACEMENT
+                || isec.size != 8
+            {
+                continue;
+            }
+            let h = ctx.hdr_of(isec);
+            if h.segname() != "__DATA" || h.sectname() != "__objc_classrefs" {
+                continue;
+            }
+            let rels = ctx.isec_relocs(i as usize);
+            if rels.len() != 1 {
+                continue;
+            }
+            let rel = rels[0];
+            let RelocTarget::Sym(idx) = rel.target() else { continue };
+            if E::classify_reloc(rel.r_type) != RelocClass::Plain
+                || rel.size != 8
+                || rel.is_pcrel
+                || rel.is_subtracted
+                || rel.addend != 0
+            {
+                continue;
+            }
+            slots.insert(i, (idx, ctx.objs[obj_idx].syms[idx as usize]));
+        }
+        if slots.is_empty() {
+            continue;
+        }
+
+        // Retarget the loads; note the slots something else refers to.
+        let mut keep: hashbrown::HashSet<u32> = hashbrown::HashSet::new();
+        let subsecs = ctx.objs[obj_idx].subsecs.clone();
+        for &i in &subsecs {
+            let isec = &ctx.isecs[i];
+            if !isec.is_alive() || slots.contains_key(&i) {
+                continue;
+            }
+            let (data, rel_offset, nrels) = (isec.data(), isec.rel_offset as usize, isec.nrels as usize);
+            for k in rel_offset..rel_offset + nrels {
+                let rel = ctx.objs[obj_idx].relocs[k];
+                let slot = match rel.target() {
+                    RelocTarget::Section(t) if rel.addend == 0 => t,
+                    RelocTarget::Sym(idx) => {
+                        let sym = &ctx.symtab[ctx.objs[obj_idx].syms[idx as usize]];
+                        match sym.isec() {
+                            Some(t) if sym.value == 0 && rel.addend == 0 => t,
+                            _ => continue,
+                        }
+                    }
+                    _ => continue,
+                };
+                let Some(&(class_idx, _)) = slots.get(&slot) else { continue };
+                match E::got_load_form(rel.r_type) {
+                    Some(form) if E::can_relax_got_load(data, rel.offset, form) => {
+                        let r = &mut ctx.objs[obj_idx].relocs[k];
+                        r.r_type = form;
+                        r.set_target(RelocTarget::Sym(class_idx));
+                    }
+                    _ => {
+                        keep.insert(slot);
+                    }
+                }
+            }
+        }
+
+        for (&slot, &(_, class)) in &slots {
+            if ctx.symtab[class].is_imported() || keep.contains(&slot) {
+                add_got(ctx, class);
+            }
+            if !keep.contains(&slot) {
+                ctx.isecs[slot as usize].set_alive(false);
+                continue;
+            }
+            // A synthetic subsection standing for the GOT entry; not
+            // alive, since the __got chunk writes the slot and the
+            // slot's local symbol is not emitted.
+            let shndx = *got_hdr.get_or_insert_with(|| {
+                let hdr: &'static MachSection = Box::leak(Box::new(MachSection {
+                    sectname: str_to_name("__got"),
+                    segname: str_to_name(data_seg(ctx)),
+                    p2align: 3,
+                    flags: S_NON_LAZY_SYMBOL_POINTERS,
+                    ..Default::default()
+                }));
+                ctx.synthetic_hdrs.push(hdr);
+                (ctx.synthetic_hdrs.len() - 1) as u32
+            });
+            let output_offset = ctx.sym_aux(class).got_idx * 8;
+            ctx.isecs.push(InputSection {
+                obj: u32::MAX,
+                shndx,
+                p2align: 3,
+                input_addr: 0,
+                size: 8,
+                data_ptr: 0,
+                rel_offset: 0,
+                nrels: 0,
+                osec: u32::MAX,
+                output_offset,
+                flags: std::sync::atomic::AtomicU8::new(0),
+                replacement: crate::input_sections::NO_REPLACEMENT,
+                unwind_offset: 0,
+                nunwind: 0,
+            });
+            let synth = (ctx.isecs.len() - 1) as u32;
+            ctx.isecs[slot as usize].replacement = synth;
+            ctx.objc_classref_slots.push(synth);
+        }
+    }
+}
+
 /// Defines the symbols the linker itself provides.
 pub fn add_synthetic_symbols<E: Arch>(ctx: &mut Context<E>) {
     if ctx.args.output_type == MH_EXECUTE {
@@ -2303,6 +2448,10 @@ pub fn create_output_sections<E: Arch>(ctx: &mut Context<E>) {
         chunk.hdr.reserved1 = ctx.stub_syms.len() as u32;
         chunk.hdr.size = ctx.got_syms.len() as u64 * 8;
         ctx.chunks.push(chunk);
+        let got = (ctx.chunks.len() - 1) as u32;
+        for &slot in &ctx.objc_classref_slots {
+            ctx.isecs[slot as usize].osec = got;
+        }
     }
 
     if !ctx.init_funcs.is_empty() {

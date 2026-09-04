@@ -192,6 +192,7 @@ pub fn link<E: Arch>(cmdline: &[String], diag: &Diagnostics) -> Result<i32, Stri
     passes::add_entry_stub(&mut ctx);
     passes::scan_unwind_personalities(&mut ctx);
     passes::scan_objc_stubs(&mut ctx);
+    passes::fold_objc_classrefs(&mut ctx);
 
     // Decide the output layout
     let tt = std::time::Instant::now();

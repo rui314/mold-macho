@@ -56,6 +56,13 @@ impl Arch for X86_64 {
     // REX prefix before it); with a local target the load of the
     // slot's content is the same as computing the address, so the
     // opcode becomes lea (0x8d). Anything else keeps the GOT.
+    fn got_load_form(r_type: u8) -> Option<u8> {
+        match r_type {
+            X86_64_RELOC_SIGNED => Some(X86_64_RELOC_GOT_LOAD),
+            _ => None,
+        }
+    }
+
     fn can_relax_got_load(data: &[u8], offset: u32, _r_type: u8) -> bool {
         offset >= 2 && data.get(offset as usize - 2) == Some(&0x8b)
     }
