@@ -134,6 +134,11 @@ pub fn link<E: Arch>(cmdline: &[String], diag: &Diagnostics) -> Result<i32, Stri
     passes::remove_unreachable_files(&mut ctx);
     if ctx.args.relocatable {
         passes::merge_literals(&mut ctx);
+        // ld64 -r keeps one copy of each weak definition (the marker
+        // stays on it for the final link to auto-hide); Swift's
+        // per-object conformance and metadata records doubled
+        // NetNewsWire's RSCore prelink's __DATA,__const otherwise.
+        passes::coalesce_weak_defs(&mut ctx);
         passes::create_output_sections(&mut ctx);
         crate::relocatable::link(&mut ctx);
         ctx.diag.checkpoint();

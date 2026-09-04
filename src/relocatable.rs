@@ -330,7 +330,8 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
     let mut cu_relocs: Vec<MachRel> = Vec::new();
     for rec in &ctx.unwind_records {
         let isec = &ctx.isecs[rec.isec as usize];
-        if !isec.is_alive() || rec.fde().is_some() {
+        // A coalesced-away weak definition's record goes with it.
+        if !isec.is_alive() || isec.replacement != crate::input_sections::NO_REPLACEMENT || rec.fde().is_some() {
             continue;
         }
         let entry = cu_data.len() as u32;
