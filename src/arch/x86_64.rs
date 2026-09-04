@@ -54,6 +54,10 @@ impl Arch for X86_64 {
         false
     }
 
+    fn reloc_bias(r_type: u8) -> i64 {
+        reloc_bias(r_type)
+    }
+
     // GOT_LOAD marks "movq sym@GOTPCREL(%rip), %reg" (opcode 0x8b,
     // REX prefix before it); with a local target the load of the
     // slot's content is the same as computing the address, so the

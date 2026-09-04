@@ -62,6 +62,13 @@ pub trait Arch: Copy + Default + Send + Sync + 'static {
     /// needs an explicit addend record when its addend is nonzero.
     fn relocatable_needs_addend(r_type: u8) -> bool;
 
+    /// The distance folded into a pcrel relocation's embedded addend
+    /// beyond the field itself (x86-64's SIGNED_1/2/4), which a field
+    /// written back for a relocatable output must leave out again.
+    fn reloc_bias(_r_type: u8) -> i64 {
+        0
+    }
+
     /// Classifies a relocation type by how it uses its target.
     fn classify_reloc(r_type: u8) -> RelocClass;
 
