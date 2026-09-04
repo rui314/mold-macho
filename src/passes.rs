@@ -2064,7 +2064,7 @@ pub fn create_output_sections<E: Arch>(ctx: &mut Context<E>) {
                 let mut off = 0;
                 for &id in isecs {
                     let isec = &ctx.isecs[id];
-                    off = align_to(off, 1 << isec.p2align);
+                    off = isec.align_offset(off);
                     offs.push(off);
                     off += isec.size as u64;
                 }

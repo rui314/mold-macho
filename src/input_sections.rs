@@ -205,6 +205,18 @@ impl InputSection {
         std::sync::atomic::AtomicU8::new(0)
     }
     #[inline]
+    /// The next output offset at or after `off` where this subsection
+    /// may start. ld64 keeps each atom at the offset it had within its
+    /// input section modulo the section's alignment (an 8-byte atom at
+    /// offset 8 of a 16-aligned section stays 8 mod 16), rather than
+    /// rounding every atom up to the section's alignment; the latter
+    /// pads the output by an average of half the alignment per atom
+    /// (NetNewsWire's __TEXT,__const was 11KB larger than ld-prime's).
+    pub fn align_offset(&self, off: u64) -> u64 {
+        let align = 1u64 << self.p2align;
+        crate::util::align_to_mod(off, align, self.input_addr as u64 & (align - 1))
+    }
+
     pub fn is_alive(&self) -> bool {
         self.flags.load(std::sync::atomic::Ordering::Relaxed) & IS_ALIVE != 0
     }

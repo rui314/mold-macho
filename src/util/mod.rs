@@ -7,6 +7,20 @@ pub fn align_to(val: u64, align: u64) -> u64 {
     (val + align - 1) & !(align - 1)
 }
 
+/// Rounds `val` up to the next value congruent to `modulus` modulo
+/// `align`: the smallest x >= val with x % align == modulus. ld64
+/// places every atom this way, keeping the offset it had within its
+/// section modulo the section's alignment, not merely rounding up to
+/// the section's alignment.
+pub fn align_to_mod(val: u64, align: u64, modulus: u64) -> u64 {
+    debug_assert!(align.is_power_of_two() && modulus < align);
+    if val <= modulus {
+        modulus
+    } else {
+        align_to(val - modulus, align) + modulus
+    }
+}
+
 /// Returns the bit field of `val` from bit `hi` down to bit `lo`,
 /// inclusive.
 pub fn bits(val: u64, hi: u32, lo: u32) -> u64 {

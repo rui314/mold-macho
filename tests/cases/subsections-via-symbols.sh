@@ -35,5 +35,14 @@ int main() {
 }
 EOF
 
+# _fn2 sits 4 bytes into a 16-aligned section; ld64 keeps it at
+# 4 mod 16 in the output (an atom keeps its offset modulo its section's
+# alignment), so the two functions stay 4 bytes apart - not 16, which
+# rounding each atom up to the section alignment would give. (This is
+# sold's test, whose expectation of 16 came from that rounding.)
 $CC --ld-path=$mold -o $t/exe $t/a.o $t/b.o $t/c.o
-$t/exe | grep -q '^16 1$'
+if [ $ARCH = arm64 ]; then
+  $t/exe | grep -q '^4 1$'
+else
+  $t/exe | grep -q '^1 1$'   # a one-byte nop
+fi
