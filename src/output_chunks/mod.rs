@@ -684,20 +684,22 @@ pub fn copy_mach_header<E: Arch>(ctx: &Context<E>, buf: &mut [u8]) {
             idx != u32::MAX && sym.is_used() && ctx.dylibs[idx as usize].weak_exports.contains(sym.name())
         }
         _ => false,
-    }) || ctx.fixup_imports.iter().any(|&(id, _)| ctx.is_weak_coalesced(id))
+    }) || ctx.fixup_imports.iter().any(|&(id, _)| ctx.binds_weak_lookup(id))
         || !ctx.weak_bind_data.is_empty()
     {
         hdr.flags |= MH_BINDS_TO_WEAK;
     }
-    // MH_WEAK_DEFINES advertises exported weak symbols; auto-hidden
-    // and private-extern weak definitions don't count, since no other
-    // image can coalesce against them.
+    // MH_WEAK_DEFINES advertises exported weak symbols (auto-hidden and
+    // private-extern weak definitions don't count, since no other
+    // image can coalesce against them) and strong definitions that
+    // override a dylib's weak export, which dyld must let win.
     if ctx.symtab.syms.iter().any(|sym| {
         sym.is_weak_def()
             && sym.is_extern()
             && !sym.is_private_extern()
             && sym.isec().map(|i| i as usize).is_some_and(|isec| ctx.isecs[isec].is_alive())
-    }) {
+    }) || (0..ctx.symtab.syms.len()).any(|i| ctx.overrides_weak_export(i as u32))
+    {
         hdr.flags |= MH_WEAK_DEFINES;
     }
     // -bind_at_load makes the stubs bind through the GOT instead of

@@ -1910,6 +1910,14 @@ pub fn scan_relocations<E: Arch>(ctx: &mut Context<E>) {
         }
 
         match class {
+            // A call to a symbol dyld resolves by weak lookup - one of
+            // this image's own coalescable weak definitions, or a
+            // dylib's weak export - goes through a stub and a GOT slot,
+            // never a lazy pointer, as ld64 does.
+            RelocClass::Branch if ctx.binds_weak_lookup(id) => {
+                add_stub(ctx, id);
+                add_got(ctx, id);
+            }
             RelocClass::Branch if sym.is_imported() => {
                 // A stub jumps through the symbol's lazy pointer, or,
                 // without lazy binding, its GOT slot.
@@ -1919,13 +1927,6 @@ pub fn scan_relocations<E: Arch>(ctx: &mut Context<E>) {
                 } else {
                     add_got(ctx, id);
                 }
-            }
-            // A call to one of this image's own coalescable weak
-            // definitions goes through a stub and a GOT slot dyld
-            // binds by weak lookup (never lazily), as ld64 does.
-            RelocClass::Branch if ctx.is_weak_coalesced(id) => {
-                add_stub(ctx, id);
-                add_got(ctx, id);
             }
             RelocClass::Got => add_got(ctx, id),
             RelocClass::GotLoad if ctx.binds_at_runtime(id) => add_got(ctx, id),
@@ -3788,7 +3789,9 @@ pub fn create_output_sections<E: Arch>(ctx: &mut Context<E>) {
         chunk.hdr.size = ctx.stub_syms.len() as u64 * E::STUB_SIZE;
         ctx.chunks.push(chunk);
     }
-    if ctx.lazy_binding() && !ctx.stub_syms.is_empty() {
+    // (A stub bound by weak lookup goes through the GOT; only lazily
+    // bound stubs need the helper and lazy pointers.)
+    if ctx.lazy_binding() && ctx.stub_syms.iter().any(|&id| !ctx.binds_weak_lookup(id)) {
         let mut chunk = Chunk::new("__TEXT", "__stub_helper", ChunkKind::StubHelper);
         chunk.hdr.flags = S_ATTR_PURE_INSTRUCTIONS | S_ATTR_SOME_INSTRUCTIONS;
         chunk.hdr.p2align = 2;
@@ -5249,10 +5252,13 @@ fn build_rebase_info<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
     for (addr, _) in data_blob_pointers(ctx) {
         locs.push(addr);
     }
-    // Lazy pointers start out pointing at their stub helper entries.
+    // Lazy pointers start out pointing at their stub helper entries (a
+    // weak-lookup stub's GOT slot is rebased with the GOT).
     if ctx.lazy_binding() {
         for i in 0..ctx.stub_syms.len() {
-            locs.push(ctx.stub_ptr_addr(i, ctx.stub_syms[i]));
+            if !ctx.binds_weak_lookup(ctx.stub_syms[i]) {
+                locs.push(ctx.stub_ptr_addr(i, ctx.stub_syms[i]));
+            }
         }
     }
 
@@ -5333,9 +5339,9 @@ fn build_lazy_bind_info<E: Arch>(ctx: &Context<E>) -> (Vec<u8>, Vec<u32>) {
     let mut offsets = Vec::with_capacity(ctx.stub_syms.len());
     for (i, &id) in ctx.stub_syms.iter().enumerate() {
         offsets.push(buf.len() as u32);
-        // A stub for one of this image's weak definitions jumps
-        // through its GOT slot (bound by weak lookup), not lazily.
-        if ctx.is_weak_coalesced(id) {
+        // A stub for a symbol bound by weak lookup jumps through its
+        // GOT slot, not lazily.
+        if ctx.binds_weak_lookup(id) {
             continue;
         }
         let addr = ctx.stub_ptr_addr(i, id);
@@ -5584,7 +5590,7 @@ fn build_weak_bind_info<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
     if let Some(idx) = output_chunks::find_chunk(ctx, |k| matches!(k, ChunkKind::Got)) {
         let got_addr = ctx.chunks[idx].hdr.addr;
         for (i, &id) in ctx.got_syms.iter().enumerate() {
-            if ctx.is_weak_coalesced(id) {
+            if ctx.binds_weak_lookup(id) {
                 binds.push((id, got_addr + i as u64 * 8));
             }
         }
@@ -5604,18 +5610,29 @@ fn build_weak_bind_info<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
                 continue;
             }
             if let Some(id) = ctx.reloc_target_sym(isec.obj as usize, rel) {
-                if ctx.is_weak_coalesced(id) {
+                if ctx.binds_weak_lookup(id) {
                     binds.push((id, base + rel.offset as u64));
                 }
             }
         }
     }
-    if binds.is_empty() {
+    // Strong definitions overriding a dylib's weak export are listed
+    // first, by name, flagged non-weak, with no location: dyld then
+    // knows this image's copy wins coalescing.
+    let mut overrides: Vec<crate::symbol::SymbolId> =
+        (0..ctx.symtab.syms.len() as u32).filter(|&i| ctx.overrides_weak_export(i)).collect();
+    if binds.is_empty() && overrides.is_empty() {
         return Vec::new();
     }
+    overrides.sort_by(|&a, &b| ctx.symtab[a].name().cmp(ctx.symtab[b].name()));
     binds.sort_by(|a, b| ctx.symtab[a.0].name().cmp(ctx.symtab[b.0].name()).then(a.1.cmp(&b.1)));
 
     let mut buf = Vec::new();
+    for id in overrides {
+        buf.push(BIND_OPCODE_SET_SYMBOL_TRAILING_FLAGS_IMM | BIND_SYMBOL_FLAGS_NON_WEAK_DEFINITION);
+        buf.extend_from_slice(ctx.symtab[id].name().as_bytes());
+        buf.push(0);
+    }
     let mut last: Option<crate::symbol::SymbolId> = None;
     for (id, addr) in binds {
         if last != Some(id) {
@@ -5776,7 +5793,9 @@ fn build_chained_fixups<E: Arch>(ctx: &Context<E>) -> ChainedFixups {
         // winner.
         let ordinal_bits = |bits: u32| -> u64 {
             match s.origin() {
-                Origin::Dylib(dylib) => ctx.chained_import_ordinal(dylib, bits),
+                Origin::Dylib(dylib) if !ctx.binds_weak_lookup(sym) => {
+                    ctx.chained_import_ordinal(dylib, bits)
+                }
                 _ => (BIND_SPECIAL_DYLIB_WEAK_LOOKUP as i64 as u64) & ((1u64 << bits) - 1),
             }
         };

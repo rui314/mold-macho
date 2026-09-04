@@ -477,7 +477,7 @@ impl<E: Arch> Context<E> {
     /// definition of this image always goes through its GOT slot (the
     /// lazy binder cannot do weak lookup), as in ld64.
     pub fn stub_ptr_addr(&self, i: usize, id: SymbolId) -> u64 {
-        if self.lazy_binding() && !self.is_weak_coalesced(id) {
+        if self.lazy_binding() && !self.binds_weak_lookup(id) {
             self.chunks[self.lazy_ptrs_chunk].hdr.addr + i as u64 * 8
         } else {
             self.sym_got_addr(id)
@@ -507,6 +507,41 @@ impl<E: Arch> Context<E> {
     /// a weak definition subject to coalescing.
     pub fn binds_at_runtime(&self, id: SymbolId) -> bool {
         self.symtab[id].is_imported() || self.is_weak_coalesced(id)
+    }
+
+    /// True for a definition this image exports that some dylib in the
+    /// link exports as a weak definition: the program's own operator
+    /// new overriding libc++'s. dyld must let it win coalescing, so
+    /// the image is marked WEAK_DEFINES and, with classic dyld info,
+    /// the symbol is listed in the weak_bind stream as a non-weak
+    /// definition (ld64 does both).
+    pub fn overrides_weak_export(&self, id: SymbolId) -> bool {
+        let sym = &self.symtab[id];
+        matches!(sym.origin(), Origin::Obj(_))
+            && sym.is_extern()
+            && !sym.is_private_extern()
+            && !sym.is_weak_def()
+            && self.dylibs.iter().any(|d| d.weak_exports.contains(sym.name()))
+    }
+
+    /// True if dyld resolves this symbol by weak lookup - searching
+    /// every loaded image for the coalesced definition - rather than
+    /// in one dylib: a coalescable weak definition of this image, or
+    /// an import that its dylib exports as a weak definition (libc++'s
+    /// operator new and delete, which a program may override). ld64
+    /// binds both with library ordinal -3, never lazily, and lists
+    /// them in the classic weak_bind stream.
+    pub fn binds_weak_lookup(&self, id: SymbolId) -> bool {
+        if self.is_weak_coalesced(id) {
+            return true;
+        }
+        let sym = &self.symtab[id];
+        match sym.origin() {
+            Origin::Dylib(d) if d != u32::MAX => {
+                self.dylibs[d as usize].weak_exports.contains(sym.name())
+            }
+            _ => false,
+        }
     }
 
     /// The address a branch to `id` targets: the symbol's stub when it

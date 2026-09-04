@@ -200,6 +200,7 @@ pub const BIND_OPCODE_SET_ADDEND_SLEB: u8 = 0x60;
 pub const BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB: u8 = 0x70;
 pub const BIND_OPCODE_DO_BIND: u8 = 0x90;
 pub const BIND_SYMBOL_FLAGS_WEAK_IMPORT: u8 = 0x1;
+pub const BIND_SYMBOL_FLAGS_NON_WEAK_DEFINITION: u8 = 0x8;
 
 // Rebase opcodes, for the LC_DYLD_INFO rebase stream
 pub const REBASE_TYPE_POINTER: u8 = 1;
