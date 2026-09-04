@@ -29,7 +29,8 @@ $t/exe
 # Two copies of a weak definition may differ by trailing zero padding
 # only (Swift's __swift5_typeref strings come with or without a pad
 # byte from one object to the next); ld64 discards the loser
-# regardless, and so do we. A copy that differs in content is kept.
+# regardless, and so do we. Copies of the same size fold as before
+# (the content is the compiler's promise, not compared).
 cat <<EOF2 | $CC -o $t/w1.o -c -xassembler -
 .section __TEXT,__swift5_typeref
 .globl _sym
@@ -45,6 +46,7 @@ _other: .asciz "aaaa"
 .globl _w1
 .p2align 2
 _w1: ret
+.subsections_via_symbols
 EOF2
 cat <<EOF2 | $CC -o $t/w2.o -c -xassembler -
 .section __TEXT,__swift5_typeref
@@ -60,6 +62,7 @@ _other: .asciz "bbbb"
 .globl _w2
 .p2align 2
 _w2: ret
+.subsections_via_symbols
 EOF2
 $mold -r -arch $ARCH -o $t/w.o $t/w1.o $t/w2.o
 otool -l $t/w.o | grep -A3 'sectname __swift5_typeref' | grep -q 'size 0x0000000000000013'

@@ -693,11 +693,17 @@ fn do_resolve<E: Arch>(ctx: &mut Context<E>, only_alive: bool) {
         }
     }
 
-    // The rank of a definition: (class << 32) | priority, lower is
-    // better. Ranks race into `best` with an atomic minimum, as in
-    // mold: the race is order-free because the winner is the same
-    // whatever the interleaving, and since each object has a unique
-    // priority, exactly one object ends up owning each symbol.
+    // The rank of a definition: (class << 40) | (alignment term << 32)
+    // | priority, lower is better. Ranks race into `best` with an
+    // atomic minimum, as in mold: the race is order-free because the
+    // winner is the same whatever the interleaving, and since each
+    // object has a unique priority, exactly one object ends up owning
+    // each symbol. Among weak definitions ld64 keeps the copy with the
+    // greatest alignment (a Swift metadata record comes 8-aligned from
+    // one object and 16-aligned from another; the first copy wins only
+    // at equal alignment), so a live weak definition's rank carries
+    // its subsection's alignment, inverted.
+    let isecs_for_rank = &ctx.isecs;
     let rank_of = |obj: &crate::input_files::ObjectFile, nlist: &NList| -> Option<u64> {
         if nlist.is_stab() || !nlist.is_extern() {
             return None;
@@ -710,7 +716,15 @@ fn do_resolve<E: Arch>(ctx: &mut Context<E>, only_alive: bool) {
             N_UNDF if nlist.is_common() && obj.is_alive => 3,
             _ => return None,
         };
-        Some((class << 32) | obj.priority as u64)
+        let mut align_term = 0u64;
+        if class == 1 && nlist.n_type() == N_SECT {
+            if let Some((isec, _)) =
+                crate::input_files::find_subsec(isecs_for_rank, &obj.subsecs, nlist.n_value)
+            {
+                align_term = 63 - isecs_for_rank[isec].p2align as u64;
+            }
+        }
+        Some((class << 40) | (align_term << 32) | obj.priority as u64)
     };
 
     let best: Vec<AtomicU64> = (0..n).map(|_| AtomicU64::new(u64::MAX)).collect();
@@ -751,7 +765,7 @@ fn do_resolve<E: Arch>(ctx: &mut Context<E>, only_alive: bool) {
                 if won != rank {
                     // Two live strong definitions of one name are an
                     // error whichever wins.
-                    if only_alive && rank >> 32 == 0 && won >> 32 == 0 {
+                    if only_alive && rank >> 40 == 0 && won >> 40 == 0 {
                         duplicates.lock().unwrap().push((sym_id as usize, obj_idx));
                     }
                     continue;
