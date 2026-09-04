@@ -232,7 +232,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
         // makes PLCrashReporter's template instantiations local; ours
         // stayed exported after the -r prelink lost the marker).
         let mut n_desc = desc_of.get(&(i as u32)).copied().unwrap_or(0)
-            & (N_WEAK_DEF | N_WEAK_REF | N_ALT_ENTRY | N_NO_DEAD_STRIP | N_SYMBOL_RESOLVER | REFERENCED_DYNAMICALLY);
+            & (N_WEAK_DEF | N_WEAK_REF | N_ALT_ENTRY | N_NO_DEAD_STRIP | N_SYMBOL_RESOLVER | N_COLD_FUNC | REFERENCED_DYNAMICALLY);
         if sym.is_weak_def() {
             n_desc |= N_WEAK_DEF;
         }
