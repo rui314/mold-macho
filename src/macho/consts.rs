@@ -95,6 +95,11 @@ pub const S_ATTR_NO_DEAD_STRIP: u32 = 0x1000_0000;
 pub const S_ATTR_LIVE_SUPPORT: u32 = 0x0800_0000;
 pub const S_ATTR_DEBUG: u32 = 0x0200_0000;
 pub const S_ATTR_SOME_INSTRUCTIONS: u32 = 0x0000_0400;
+pub const S_ATTR_NO_TOC: u32 = 0x4000_0000;
+pub const S_ATTR_STRIP_STATIC_SYMS: u32 = 0x2000_0000;
+pub const S_ATTR_SELF_MODIFYING_CODE: u32 = 0x0400_0000;
+pub const S_ATTR_EXT_RELOC: u32 = 0x0000_0200;
+pub const S_ATTR_LOC_RELOC: u32 = 0x0000_0100;
 
 // Symbol types (n_type field of nlist)
 pub const N_STAB: u8 = 0xe0;

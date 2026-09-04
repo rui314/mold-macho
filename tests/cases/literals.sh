@@ -15,6 +15,10 @@ double pi2() { return 3.1415926535; }
 int main() {}
 EOF
 
-# The two identical 8-byte literals coalesce into one.
+# The two identical 8-byte literals coalesce into one, and the merged
+# pool lands in __TEXT,__const as ld64 places it (a final image has
+# no __literal4/8/16 sections).
 $CC --ld-path=$mold -o $t/exe $t/a.o $t/b.o
-objdump -h $t/exe | grep -Eq ' __literal8\s+00000008\s'
+objdump -h $t/exe > $t/sections
+grep -Eq ' __const\s+00000008\s' $t/sections
+! grep -q '__literal8' $t/sections

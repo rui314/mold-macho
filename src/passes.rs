@@ -1894,21 +1894,173 @@ pub fn fix_synthetic_symbols<E: Arch>(ctx: &mut Context<E>) {
 
 /// Well-known section names are ordered the way ld64 orders them/// Well-known section names are ordered the way ld64 orders them; unknown
 /// sections come after, in input order.
+/// Where a section sits within its segment, as ld64 orders them
+/// (measured over the app corpus: these relative positions never vary
+/// in ld-prime's output, everything else follows input order). The
+/// synthesized code sections lead __TEXT; dyld's tables lead
+/// __DATA_CONST, then the read-only ObjC lists in a fixed order; the
+/// ObjC runtime data leads __DATA in the order the compiler emits it,
+/// __data next.
 fn output_section_rank(segname: &str, sectname: &str) -> u32 {
     match (segname, sectname) {
         ("__TEXT", "__text") => 0,
-        ("__TEXT", _) => 1,
+        ("__TEXT", "__stubs") => 1,
+        ("__TEXT", "__stub_helper") => 2,
+        ("__TEXT", "__objc_stubs") => 3,
+        ("__TEXT", "__init_offsets") => 4,
+        ("__TEXT", "__objc_methlist") => 5,
+        ("__TEXT", _) => 10,
+        ("__DATA_CONST", "__got") => 0,
+        ("__DATA_CONST", "__mod_init_func") => 1,
+        ("__DATA_CONST", "__mod_term_func") => 2,
+        ("__DATA_CONST", "__const") => 3,
+        ("__DATA_CONST", "__cfstring") => 4,
+        ("__DATA_CONST", "__objc_classlist") => 5,
+        ("__DATA_CONST", "__objc_nlclslist") => 6,
+        ("__DATA_CONST", "__objc_catlist") => 7,
+        ("__DATA_CONST", "__objc_nlcatlist") => 8,
+        ("__DATA_CONST", "__objc_protolist") => 9,
+        ("__DATA_CONST", "__objc_imageinfo") => 10,
+        ("__DATA_CONST", "__objc_protorefs") => 11,
+        ("__DATA_CONST", "__objc_superrefs") => 12,
+        ("__DATA_CONST", _) => 20,
+        ("__DATA", "__la_symbol_ptr") => 0,
+        ("__DATA", "__got") => 1,
+        ("__DATA", "__objc_const") => 2,
+        ("__DATA", "__objc_selrefs") => 3,
+        ("__DATA", "__objc_classrefs") => 4,
+        ("__DATA", "__objc_superrefs") => 5,
+        ("__DATA", "__objc_ivar") => 6,
+        ("__DATA", "__objc_data") => 7,
+        ("__DATA", "__data") => 8,
         // The thread-local initialization image must be contiguous:
         // __thread_data last among file-backed __DATA sections, and
         // __thread_bss first among zero-fill ones (zero-fill sections
         // sort after all file-backed ones).
-        ("__DATA", "__thread_vars") => 8,
-        ("__DATA", "__thread_data") => 9,
+        ("__DATA", "__thread_vars") => 30,
+        ("__DATA", "__thread_data") => 31,
         ("__DATA", "__thread_bss") => 0,
         ("__DATA", "__bss") => 3,
         ("__DATA", "__common") => 4,
-        _ => 2,
+        _ => 10,
     }
+}
+
+/// The segment for read-only-after-fixup data: __DATA_CONST unless
+/// -no_data_const.
+fn data_seg<E: Arch>(ctx: &Context<E>) -> &'static str {
+    if ctx.args.data_const { "__DATA_CONST" } else { "__DATA" }
+}
+
+/// Sections a final link places in __DATA_CONST: data that needs no
+/// writes after dyld's fixups. ld64's list, as seen in ld-prime's
+/// output across the app corpus.
+const DATA_CONST_SECTIONS: &[&str] = &[
+    "__cfstring",
+    "__const",
+    "__got",
+    "__mod_init_func",
+    "__mod_term_func",
+    "__objc_arraydata",
+    "__objc_arrayobj",
+    "__objc_boolobj",
+    "__objc_dictobj",
+    "__objc_doubleobj",
+    "__objc_floatobj",
+    "__objc_intobj",
+    "__objc_catlist",
+    "__objc_classlist",
+    "__objc_imageinfo",
+    "__objc_nlcatlist",
+    "__objc_nlclslist",
+    "__objc_protolist",
+];
+
+/// Protocol and superclass references are written by the Objective-C
+/// runtime on older systems, so they stay in __DATA - with their input
+/// flags - unless the deployment target is macOS 15 or later, where
+/// ld64 moves them to __DATA_CONST (dyld fixes them up there).
+fn objc_refs_are_const<E: Arch>(ctx: &Context<E>) -> bool {
+    ctx.args.platform == crate::macho::PLATFORM_MACOS
+        && ctx.args.platform_minos >= crate::macho::encode_version(15, 0, 0)
+}
+
+/// The output section an input section lands in, or None for one a
+/// final link consumes or drops. Like ld64: __StaticInit joins
+/// __text; the fixed-size literal pools (__literal4/8/16), already
+/// merged per element, join __TEXT,__const; the __LLVM segment
+/// (bitcode, __swift_modhash, __cmdline, __asm) is never copied into
+/// an image; __objc_clsrolist is a compiler-to-linker list of the
+/// class_ro_t records of generic Swift classes (nothing references
+/// it and ld-prime emits no such section); and the __DATA sections
+/// that need no writes after fixups move to __DATA_CONST. A -r output
+/// keeps every input section as it came.
+fn output_section_for(
+    relocatable: bool,
+    data_const: bool,
+    objc_const_refs: bool,
+    segname: &str,
+    sectname: &str,
+) -> Option<(&'static str, &'static str)> {
+    let intern_seg = |seg: &str| -> &'static str {
+        match seg {
+            "__TEXT" => "__TEXT",
+            "__DATA_CONST" => "__DATA_CONST",
+            "__DATA" => "__DATA",
+            other => String::leak(other.to_string()),
+        }
+    };
+    if relocatable {
+        return Some((intern_seg(segname), String::leak(sectname.to_string())));
+    }
+    match (segname, sectname) {
+        ("__LLVM", _) => None,
+        ("__DATA", "__objc_clsrolist") => None,
+        ("__TEXT", "__StaticInit") => Some(("__TEXT", "__text")),
+        ("__TEXT", "__literal4" | "__literal8" | "__literal16") => Some(("__TEXT", "__const")),
+        ("__DATA", sect) if data_const && DATA_CONST_SECTIONS.contains(&sect) => {
+            Some(("__DATA_CONST", String::leak(sect.to_string())))
+        }
+        ("__DATA", sect @ ("__objc_protorefs" | "__objc_superrefs")) if data_const && objc_const_refs => {
+            Some(("__DATA_CONST", String::leak(sect.to_string())))
+        }
+        _ => Some((intern_seg(segname), String::leak(sectname.to_string()))),
+    }
+}
+
+/// The flags an output section carries in a final image. ld64 keeps
+/// the section type (a coalesced input section becomes regular; a
+/// literal pool folded into __TEXT,__const is regular) and the
+/// instruction attributes, drops every other input attribute
+/// (no_dead_strip, live_support, strip_static_syms, no_toc: they
+/// direct the linker, not dyld), and marks just the ObjC list sections
+/// the runtime scans as no-dead-strip. __eh_frame gets the fixed
+/// flags the compiler gives it.
+fn output_section_flags(segname: &str, sectname: &str, input: u32) -> u32 {
+    if segname == "__TEXT" && sectname == "__eh_frame" {
+        return S_COALESCED | S_ATTR_NO_TOC | S_ATTR_STRIP_STATIC_SYMS | S_ATTR_LIVE_SUPPORT;
+    }
+    // The two reference lists the runtime may still write keep the
+    // flags they came with (coalesced, no-dead-strip) while in __DATA.
+    if segname == "__DATA" && matches!(sectname, "__objc_protorefs" | "__objc_superrefs") {
+        return input & (SECTION_TYPE | S_ATTR_NO_DEAD_STRIP);
+    }
+    let mut ty = input & SECTION_TYPE;
+    if ty == S_COALESCED || (segname == "__TEXT" && sectname == "__const") {
+        ty = S_REGULAR;
+    }
+    let mut attrs = input & (S_ATTR_PURE_INSTRUCTIONS | S_ATTR_SOME_INSTRUCTIONS);
+    if attrs & S_ATTR_PURE_INSTRUCTIONS != 0 {
+        attrs |= S_ATTR_SOME_INSTRUCTIONS;
+    }
+    if matches!(
+        sectname,
+        "__objc_classlist" | "__objc_catlist" | "__objc_nlclslist" | "__objc_nlcatlist"
+            | "__objc_selrefs" | "__objc_classrefs"
+    ) {
+        attrs |= S_ATTR_NO_DEAD_STRIP;
+    }
+    ty | attrs
 }
 
 /// Creates output section chunks and appends each input section to its
@@ -1920,8 +2072,13 @@ pub fn create_output_sections<E: Arch>(ctx: &mut Context<E>) {
     // sections as needed. Keyed by the raw 16-byte name pairs, so the
     // hot loop does no allocation and no linear scans; chunks are
     // still created in first-encounter order.
-    let attr_mask = if ctx.args.relocatable { !0 } else { !S_ATTR_DEBUG };
+    let relocatable = ctx.args.relocatable;
+    let objc_const_refs = objc_refs_are_const(ctx);
     let mut by_name: hashbrown::HashMap<([u8; 16], [u8; 16]), usize> =
+        hashbrown::HashMap::new();
+    // Output chunks by their (possibly renamed) output section names:
+    // several input section names can land in one output section.
+    let mut by_out: hashbrown::HashMap<(&'static str, &'static str), usize> =
         hashbrown::HashMap::new();
     // All subsections of one input section share the exact same leaked
     // header pointer and are contiguous in the arena, and a header
@@ -1945,34 +2102,53 @@ pub fn create_output_sections<E: Arch>(ctx: &mut Context<E>) {
         let idx = match by_name.get(&key) {
             Some(&idx) => idx,
             None => {
-                let segname: &'static str = match hdr.segname() {
-                    "__TEXT" => "__TEXT",
-                    "__DATA_CONST" => "__DATA_CONST",
-                    "__DATA" => "__DATA",
-                    other => String::leak(other.to_string()),
-                };
-                let sectname = hdr.sectname().to_string();
-                let mut chunk = Chunk::new(
-                    segname,
-                    &sectname,
-                    ChunkKind::Output {
-                        isecs: vec![],
-                        thunks: vec![],
+                let idx = match output_section_for(
+                    relocatable,
+                    ctx.args.data_const,
+                    objc_const_refs,
+                    hdr.segname(),
+                    hdr.sectname(),
+                ) {
+                    None => usize::MAX,
+                    Some(out) => match by_out.get(&out) {
+                        Some(&idx) => idx,
+                        None => {
+                            let mut chunk = Chunk::new(
+                                out.0,
+                                out.1,
+                                ChunkKind::Output {
+                                    isecs: vec![],
+                                    thunks: vec![],
+                                },
+                            );
+                            // A relocatable output keeps the input
+                            // flags (the debug attribute marks the
+                            // carried DWARF for the next link); a
+                            // final image gets ld64's normalized ones.
+                            chunk.hdr.flags = if relocatable {
+                                hdr.flags
+                            } else {
+                                output_section_flags(out.0, out.1, hdr.flags)
+                            };
+                            ctx.chunks.push(chunk);
+                            by_out.insert(out, ctx.chunks.len() - 1);
+                            ctx.chunks.len() - 1
+                        }
                     },
-                );
-                // A final image never contains debug sections, so the
-                // attribute is dropped; a relocatable output keeps it,
-                // marking the carried DWARF for the next link.
-                chunk.hdr.flags = hdr.flags & attr_mask;
-                ctx.chunks.push(chunk);
-                by_name.insert(key, ctx.chunks.len() - 1);
-                ctx.chunks.len() - 1
+                };
+                by_name.insert(key, idx);
+                idx
             }
         };
         last_hdr = hdr_ptr;
         last_chunk = idx;
         idx
         };
+        if chunk_idx == usize::MAX {
+            // Consumed by the link: no output section.
+            ctx.isecs[i].set_alive(false);
+            continue;
+        }
 
         let chunk = &mut ctx.chunks[chunk_idx];
         chunk.hdr.p2align = chunk.hdr.p2align.max(ctx.isecs[i].p2align as u32);
@@ -1981,7 +2157,12 @@ pub fn create_output_sections<E: Arch>(ctx: &mut Context<E>) {
         if chunk.hdr.flags & SECTION_TYPE == S_THREAD_LOCAL_VARIABLES {
             chunk.hdr.p2align = chunk.hdr.p2align.max(3);
         }
-        chunk.hdr.flags |= hdr.flags & !SECTION_TYPE & attr_mask;
+        if relocatable {
+            chunk.hdr.flags |= hdr.flags & !SECTION_TYPE;
+        } else {
+            chunk.hdr.flags |=
+                output_section_flags(chunk.hdr.segname, &chunk.hdr.sectname, hdr.flags) & !SECTION_TYPE;
+        }
         let ChunkKind::Output { isecs, .. } = &mut chunk.kind else {
             unreachable!()
         };
@@ -2114,7 +2295,7 @@ pub fn create_output_sections<E: Arch>(ctx: &mut Context<E>) {
     }
 
     if !ctx.got_syms.is_empty() {
-        let mut chunk = Chunk::new("__DATA_CONST", "__got", ChunkKind::Got);
+        let mut chunk = Chunk::new(data_seg(ctx), "__got", ChunkKind::Got);
         chunk.hdr.flags = S_NON_LAZY_SYMBOL_POINTERS;
         chunk.hdr.p2align = 3;
         // Indirect symbol table entries for stubs come first, then the
@@ -2264,7 +2445,7 @@ pub fn create_output_sections<E: Arch>(ctx: &mut Context<E>) {
         let flags = (lang << 16) | (swift_version << 8) | if cat { 0x40 } else { 0 };
 
         ctx.objc_image_info_flags = flags;
-        let mut chunk = Chunk::new("__DATA_CONST", "__objc_imageinfo", ChunkKind::ObjcImageInfo);
+        let mut chunk = Chunk::new(data_seg(ctx), "__objc_imageinfo", ChunkKind::ObjcImageInfo);
         chunk.hdr.p2align = 2;
         chunk.hdr.size = 8;
         ctx.chunks.push(chunk);
@@ -2325,6 +2506,7 @@ pub fn create_output_sections<E: Arch>(ctx: &mut Context<E>) {
         }
 
         let mut chunk = Chunk::new("__TEXT", "__eh_frame", ChunkKind::EhFrame);
+        chunk.hdr.flags = output_section_flags("__TEXT", "__eh_frame", 0);
         chunk.hdr.p2align = 3;
         chunk.hdr.size = off as u64;
         ctx.chunks.push(chunk);

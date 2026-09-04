@@ -120,6 +120,10 @@ pub struct Args {
     /// -init_offsets: emit initializers as 32-bit image offsets
     /// (__init_offsets) instead of absolute pointers (__mod_init_func).
     pub init_offsets: bool,
+    /// -data_const / -no_data_const: whether read-only-after-fixup data
+    /// sections (__const, __cfstring, the ObjC lists, __got ...) go in
+    /// a __DATA_CONST segment. ld64's default is on.
+    pub data_const: bool,
     /// Compute a content-hash LC_UUID (on by default; -no_uuid leaves
     /// it zeroed - dyld refuses executables without the load command).
     pub uuid: bool,
@@ -255,6 +259,7 @@ impl Default for Args {
             function_starts: true,
             data_in_code_info: true,
             init_offsets: false,
+            data_const: true,
             uuid: true,
             suppress_warnings: false,
             undefined_dynamic_lookup: false,
@@ -655,6 +660,8 @@ pub fn parse_args(diag: &Diagnostics, cmdline: &[String]) -> Args {
             "-no_deduplicate" => args.deduplicate = false,
             "-function_starts" => args.function_starts = true,
             "-init_offsets" => args.init_offsets = true,
+            "-data_const" => args.data_const = true,
+            "-no_data_const" => args.data_const = false,
             "-no_function_starts" => args.function_starts = false,
             "-data_in_code_info" => args.data_in_code_info = true,
             "-no_data_in_code_info" => args.data_in_code_info = false,
