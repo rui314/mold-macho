@@ -6244,8 +6244,19 @@ fn copy_chunk<E: Arch>(ctx: &Context<E>, chunk: &Chunk, buf: &mut [u8]) {
         ChunkKind::IndirectSymtab => {
             let mut off = 0;
             let lazy: &[crate::symbol::SymbolId] = if ctx.lazy_binding() { &ctx.stub_syms } else { &[] };
-            for &id in ctx.stub_syms.iter().chain(&ctx.got_syms).chain(lazy) {
+            // A GOT slot holding a definition of this image that dyld
+            // never rebinds is INDIRECT_SYMBOL_LOCAL, as ld64 writes it,
+            // whatever the symbol's scope; a stub's or an imported (or
+            // weak-coalesced) symbol's slot names the symbol.
+            let entries = ctx
+                .stub_syms
+                .iter()
+                .map(|&id| (id, false))
+                .chain(ctx.got_syms.iter().map(|&id| (id, !ctx.binds_at_runtime(id))))
+                .chain(lazy.iter().map(|&id| (id, false)));
+            for (id, local) in entries {
                 let val = match ctx.symtab_data.output_sym_indices[id as usize] {
+                    _ if local => INDIRECT_SYMBOL_LOCAL,
                     u32::MAX => INDIRECT_SYMBOL_LOCAL,
                     idx => idx,
                 };
