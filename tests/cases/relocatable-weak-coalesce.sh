@@ -25,3 +25,41 @@ grep -q 'weak external automatically hidden __ZNK3BoxIiE3getEv' $t/nm
 # One __LD,__compact_unwind record per surviving function.
 $CC --ld-path=$mold -o $t/exe $t/r.o
 $t/exe
+
+# Two copies of a weak definition may differ by trailing zero padding
+# only (Swift's __swift5_typeref strings come with or without a pad
+# byte from one object to the next); ld64 discards the loser
+# regardless, and so do we. A copy that differs in content is kept.
+cat <<EOF2 | $CC -o $t/w1.o -c -xassembler -
+.section __TEXT,__swift5_typeref
+.globl _sym
+.weak_definition _sym
+.private_extern _sym
+_sym: .asciz "same-content"
+.byte 0
+.globl _other
+.weak_definition _other
+.private_extern _other
+_other: .asciz "aaaa"
+.text
+.globl _w1
+.p2align 2
+_w1: ret
+EOF2
+cat <<EOF2 | $CC -o $t/w2.o -c -xassembler -
+.section __TEXT,__swift5_typeref
+.globl _sym
+.weak_definition _sym
+.private_extern _sym
+_sym: .asciz "same-content"
+.globl _other
+.weak_definition _other
+.private_extern _other
+_other: .asciz "bbbb"
+.text
+.globl _w2
+.p2align 2
+_w2: ret
+EOF2
+$mold -r -arch $ARCH -o $t/w.o $t/w1.o $t/w2.o
+otool -l $t/w.o | grep -A3 'sectname __swift5_typeref' | grep -q 'size 0x0000000000000013'

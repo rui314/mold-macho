@@ -1516,9 +1516,12 @@ pub fn auto_hide_weak_defs<E: Arch>(ctx: &mut Context<E>) {
 /// __text). Each losing subsection is redirected to the winner's, the
 /// same replacement mechanism literal merging and ICF use, so
 /// section-target relocations into a loser resolve into the winning
-/// copy. Only exact-shape losers are folded: the defining symbol must
+/// copy. Only same-shape losers are folded: the defining symbol must
 /// sit at the same offset in both, and the subsections must be the
-/// same size - C++ guarantees identical weak instantiations, but a
+/// same size, or differ only by trailing zero padding (Swift's
+/// __swift5_typeref strings come with or without a pad byte from
+/// one object to the next, and ld64 discards the losers regardless)
+/// - C++ guarantees identical weak instantiations, but any other
 /// mismatch means something odd, and keeping the copy is safe.
 pub fn coalesce_weak_defs<E: Arch>(ctx: &mut Context<E>) {
     // A C++ debug link has millions of weak-def nlists (every inline
@@ -1577,14 +1580,24 @@ pub fn coalesce_weak_defs<E: Arch>(ctx: &mut Context<E>) {
             let loser = ctx.resolve_isec(loser);
             if loser == winner
                 || off != sym_value
-                || ctx.isecs[loser].size != ctx.isecs[winner].size
                 || ctx.isecs[loser].replacement != crate::input_sections::NO_REPLACEMENT
+                || !same_shape(&ctx.isecs[loser], &ctx.isecs[winner])
             {
                 continue;
             }
             ctx.isecs[loser].replacement = winner as u32;
         }
     }
+}
+
+/// Whether two copies of a weak definition can stand for each other:
+/// the same size, or the longer's tail beyond the shorter is zero.
+fn same_shape(a: &crate::input_sections::InputSection, b: &crate::input_sections::InputSection) -> bool {
+    if a.size == b.size {
+        return true;
+    }
+    let (short, long) = if a.size < b.size { (a, b) } else { (b, a) };
+    long.data().get(short.size as usize..).is_some_and(|tail| tail.iter().all(|&x| x == 0))
 }
 
 pub fn check_undefined_symbols<E: Arch>(ctx: &mut Context<E>) {
