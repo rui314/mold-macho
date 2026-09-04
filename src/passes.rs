@@ -3980,10 +3980,11 @@ type ChainedFixups = (
 );
 
 fn build_chained_fixups<E: Arch>(ctx: &Context<E>) -> ChainedFixups {
+    // An image with nothing to fix up still gets the payload (a
+    // header and a starts table with no pages), as ld64 writes it:
+    // dyld reads the format from the load command, and its absence
+    // would mean classic dyld info.
     let fixups = collect_fixups(ctx);
-    if fixups.is_empty() {
-        return Default::default();
-    }
 
     // The import table: one entry per (symbol, table addend). Addends
     // up to 255 are carried inline in the fixup word and use the

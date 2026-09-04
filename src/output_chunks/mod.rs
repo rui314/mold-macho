@@ -517,10 +517,25 @@ fn create_linkedit_data_cmd<E: Arch>(ctx: &Context<E>, cmd: u32, kind_idx: usize
 }
 
 pub fn create_load_commands<E: Arch>(ctx: &Context<E>) -> Vec<Vec<u8>> {
+    // In ld64's order: the segments; a dylib's identity; the dyld
+    // tables; the symbol tables; the dynamic linker; identification
+    // (UUID, build and source versions); the entry point; the
+    // libraries; the run-path list; the code tables (function starts,
+    // data-in-code); the signature last.
     let mut vec = Vec::new();
 
     for seg in &ctx.segments {
         vec.push(create_segment_cmd(ctx, seg));
+    }
+
+    if ctx.args.output_type == MH_DYLIB {
+        vec.push(create_id_dylib_cmd(ctx));
+        if let Some(name) = &ctx.args.umbrella {
+            vec.push(create_string_cmd(LC_SUB_FRAMEWORK, name));
+        }
+        for client in &ctx.args.allowable_clients {
+            vec.push(create_string_cmd(LC_SUB_CLIENT, client));
+        }
     }
 
     // Chained fixups replace the classic dyld info; the export trie
@@ -539,9 +554,28 @@ pub fn create_load_commands<E: Arch>(ctx: &Context<E>) -> Vec<Vec<u8>> {
     }
     vec.push(create_symtab_cmd(ctx));
     vec.push(create_dysymtab_cmd(ctx));
+    if ctx.args.output_type == MH_EXECUTE {
+        vec.push(create_dylinker_cmd());
+    }
     vec.push(create_uuid_cmd(ctx));
     vec.push(create_build_version_cmd(ctx));
     vec.push(create_source_version_cmd(ctx));
+    if ctx.args.output_type == MH_EXECUTE {
+        vec.push(create_main_cmd(ctx));
+    }
+
+    // Libraries in ordinal order (command-line order, then the
+    // auto-linked ones).
+    let mut dylibs: Vec<&crate::input_files::DylibFile> =
+        ctx.dylibs.iter().filter(|d| !d.is_bundle_loader).collect();
+    dylibs.sort_by_key(|d| d.dylib_idx);
+    for dylib in dylibs {
+        vec.push(create_load_dylib_cmd(dylib));
+    }
+
+    for rpath in &ctx.args.rpaths {
+        vec.push(create_string_cmd(LC_RPATH, rpath));
+    }
 
     if let Some(idx) = find_chunk(ctx, |k| matches!(k, ChunkKind::FunctionStarts)) {
         if ctx.chunks[idx].hdr.size > 0 {
@@ -559,31 +593,6 @@ pub fn create_load_commands<E: Arch>(ctx: &Context<E>) -> Vec<Vec<u8>> {
             dataoff: chunk.hdr.fileoff as u32,
             datasize: chunk.hdr.size as u32,
         }));
-    }
-
-    for dylib in ctx.dylibs.iter().filter(|d| !d.is_bundle_loader) {
-        vec.push(create_load_dylib_cmd(dylib));
-    }
-
-    for rpath in &ctx.args.rpaths {
-        vec.push(create_string_cmd(LC_RPATH, rpath));
-    }
-
-    match ctx.args.output_type {
-        MH_EXECUTE => {
-            vec.push(create_dylinker_cmd());
-            vec.push(create_main_cmd(ctx));
-        }
-        MH_DYLIB => {
-            vec.push(create_id_dylib_cmd(ctx));
-            if let Some(name) = &ctx.args.umbrella {
-                vec.push(create_string_cmd(LC_SUB_FRAMEWORK, name));
-            }
-            for client in &ctx.args.allowable_clients {
-                vec.push(create_string_cmd(LC_SUB_CLIENT, client));
-            }
-        }
-        _ => {}
     }
 
     if let Some(idx) = find_chunk(ctx, |k| matches!(k, ChunkKind::CodeSignature)) {
