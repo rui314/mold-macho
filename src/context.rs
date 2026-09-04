@@ -253,9 +253,17 @@ impl<E: Arch> Context<E> {
     /// Returns true if the output uses chained fixups rather than
     /// classic dyld rebase/bind opcodes.
     pub fn use_chained_fixups(&self) -> bool {
+        // ld-prime's defaults: chained fixups from macOS 12 on arm64 and
+        // from macOS 13 on x86_64 (below that, classic dyld info with
+        // lazy binding), and never under -undefined dynamic_lookup or
+        // suppress - only an explicit -fixup_chains overrides that.
         self.args.fixup_chains.unwrap_or_else(|| {
+            if self.args.undefined_dynamic_lookup && !self.args.undefined_is_warning {
+                return false;
+            }
+            let min = if E::CPUTYPE == crate::macho::CPU_TYPE_ARM64 { 12 } else { 13 };
             self.args.platform == crate::macho::PLATFORM_MACOS
-                && self.args.platform_minos >= crate::macho::encode_version(13, 0, 0)
+                && self.args.platform_minos >= crate::macho::encode_version(min, 0, 0)
         })
     }
 
