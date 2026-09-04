@@ -582,6 +582,8 @@ pub fn stage_object<E: Arch>(
             &mut fdes,
         );
     }
+    // A DWARF-mode record whose FDE never turned up describes nothing.
+    unwind.retain(|rec| rec.encoding & UNWIND_MODE_MASK != E::UNWIND_MODE_DWARF || rec.fde().is_some());
 
     let objc_image_info = sect_hdrs
         .iter()
@@ -1245,12 +1247,12 @@ fn parse_compact_unwind<E: Arch>(
         }
     }
 
-    // Ignore records that point to DWARF unwind info; those are
-    // synthesized from __eh_frame instead. Object files usually don't
-    // contain such records, but `ld -r` output does.
-    records.retain(|rec| {
-        rec.isec != u32::MAX && (rec.encoding & UNWIND_MODE_MASK) != E::UNWIND_MODE_DWARF
-    });
+    // Records that point to DWARF unwind info keep their DWARF-mode
+    // encoding; parse_eh_frame attaches the FDE (a final link
+    // regenerates the encoding from it, a -r output copies the record
+    // as it came, like ld64). Object files usually don't contain such
+    // records, but `ld -r` output does.
+    records.retain(|rec| rec.isec != u32::MAX);
     out.extend(records);
 }
 
@@ -1486,11 +1488,17 @@ fn parse_eh_frame<E: Arch>(
     }
 
     // Functions that already have a compact unwind record don't need
-    // their FDE; the compact record wins.
-    let covered: std::collections::HashSet<(usize, u32)> = unwind
-        .iter()
-        .map(|rec| (rec.isec as usize, rec.input_offset))
-        .collect();
+    // their FDE; the compact record wins. A DWARF-mode record is the
+    // exception: it exists to point at the FDE.
+    let mut covered: std::collections::HashSet<(usize, u32)> = std::collections::HashSet::new();
+    let mut dwarf_recs: std::collections::HashMap<(usize, u32), usize> = std::collections::HashMap::new();
+    for (i, rec) in unwind.iter().enumerate() {
+        if rec.encoding & UNWIND_MODE_MASK == E::UNWIND_MODE_DWARF {
+            dwarf_recs.insert((rec.isec as usize, rec.input_offset), i);
+        } else {
+            covered.insert((rec.isec as usize, rec.input_offset));
+        }
+    }
 
     for (input_addr, rec) in fdes {
         let cie_off = u32::from_le_bytes(rec[4..8].try_into().unwrap());
@@ -1540,8 +1548,13 @@ fn parse_eh_frame<E: Arch>(
             output_offset: 0,
         });
 
-        // Synthesize a compact unwind record pointing at the FDE so that
-        // the unwinder can find it through __unwind_info.
+        // The object's own DWARF-mode record now points at the FDE;
+        // otherwise synthesize one so that the unwinder can find the
+        // FDE through __unwind_info.
+        if let Some(&i) = dwarf_recs.get(&(isec, func_offset)) {
+            unwind[i].fde_idx = fde_idx as u32;
+            continue;
+        }
         unwind.push(UnwindRecord {
             isec: isec as u32,
             input_offset: func_offset,

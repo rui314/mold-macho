@@ -41,6 +41,25 @@ otool -l $t/merged.o | grep -q 'sectname __eh_frame'
 otool -r $t/merged.o > $t/relocs
 sed -n '/__eh_frame/,+3p' $t/relocs | grep -q '1     2      1      4'
 
+# The assembler gave the frame a DWARF-mode compact unwind record;
+# ld64 -r copies it as it came (the next link regenerates its
+# encoding from the FDE), naming the function by an extern
+# relocation, as it names every function and LSDA that has a symbol.
+otool -l $t/merged.o | grep -A3 'sectname __compact_unwind' | grep -q 'size 0x0000000000000060'
+sed -n '/__compact_unwind/,/^Relocation information (__TEXT/p' $t/relocs > $t/cu_relocs
+grep -q '^00000000 .* _through_asm$\|^00000000 .*1 *_through_asm' $t/cu_relocs || otool -rv $t/merged.o | sed -n '/__compact_unwind/,/^Rel/p' | grep -q '^00000000 .*True   UNSIGND False     _through_asm'
+python3 - $t/merged.o <<'EOF2'
+import struct, subprocess, sys
+f = sys.argv[1]
+out = subprocess.run(['otool', '-l', f], capture_output=True, text=True).stdout.splitlines()
+for i, l in enumerate(out):
+    if l.strip() == 'sectname __compact_unwind':
+        size = int(out[i + 3].split()[1], 16); off = int(out[i + 4].split()[1])
+data = open(f, 'rb').read()[off:off + size]
+encs = [struct.unpack_from('<I', data, e + 12)[0] for e in range(0, size, 32)]
+assert 0x04000000 in encs, [hex(e) for e in encs]  # UNWIND_X86_64_MODE_DWARF
+EOF2
+
 # The exception unwinds through the assembly frame after a final link
 # by either linker.
 $CXX --ld-path=$mold -o $t/exe $t/merged.o
