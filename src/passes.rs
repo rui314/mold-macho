@@ -2980,11 +2980,23 @@ pub fn merge_objc_categories<E: Arch>(ctx: &mut Context<E>) {
         // New ro records with the merged lists, replacing the class's
         // (their symbols follow). class_ro_t: flags, instanceStart,
         // instanceSize, reserved, then ivarLayout, name, baseMethods,
-        // baseProtocols, ivars, weakIvarLayout, baseProperties.
+        // baseProtocols, ivars, weakIvarLayout, baseProperties - and,
+        // when the flags carry RO_HAS_SWIFT_INITIALIZER (1 << 6), a
+        // Swift class's metadata initializer pointer at 72, which the
+        // runtime calls while realizing the class (dropping it from
+        // the rewritten record sent NetNewsWire's AppDelegate into a
+        // garbage address in objc_copyClassList).
         let rewrite_ro = |ctx: &mut Context<E>, ro: (u32, u64), methods: Option<u32>, protocols: Option<u32>, props: Option<u32>, new_blob: &mut dyn FnMut(&mut Context<E>, &'static str, Vec<DataField>) -> u32| {
             let data = ctx.isecs[ro.0 as usize].data()[ro.1 as usize..ro.1 as usize + 16].to_vec();
+            let flags = u32::from_le_bytes(data[0..4].try_into().unwrap());
+            let has_swift_initializer = flags & (1 << 6) != 0;
             let mut fields = vec![DataField::Bytes(data)];
-            for (k, field) in [16u64, 24, 32, 40, 48, 56, 64].into_iter().enumerate() {
+            let mut ptr_fields: Vec<u64> = vec![16, 24, 32, 40, 48, 56, 64];
+            if has_swift_initializer {
+                ptr_fields.push(72);
+            }
+            let record_len = ptr_fields.last().unwrap() + 8;
+            for (k, field) in ptr_fields.into_iter().enumerate() {
                 let sub = match k {
                     2 => methods,
                     3 => protocols,
@@ -2999,7 +3011,7 @@ pub fn merge_objc_categories<E: Arch>(ctx: &mut Context<E>) {
             }
             let blob = new_blob(ctx, "__objc_const", fields);
             let isec = ro.0 as usize;
-            if ro.1 == 0 && ctx.isecs[isec].size as u64 == 72 {
+            if ro.1 == 0 && ctx.isecs[isec].size as u64 == record_len {
                 // The record was a subsection of its own: replace it, so
                 // its symbol names the new record too (ld64 keeps
                 // __OBJC_CLASS_RO_$_Foo).
