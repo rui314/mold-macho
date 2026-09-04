@@ -3349,21 +3349,30 @@ fn output_section_for(
     }
 }
 
-/// The flags an output section carries in a final image. ld64 keeps
-/// the section type (a coalesced input section becomes regular; a
-/// literal pool folded into __TEXT,__const is regular) and the
-/// instruction attributes, drops every other input attribute
-/// (no_dead_strip, live_support, strip_static_syms, no_toc: they
-/// direct the linker, not dyld), and marks just the ObjC list sections
-/// the runtime scans as no-dead-strip. __eh_frame gets the fixed
-/// flags the compiler gives it.
-fn output_section_flags(segname: &str, sectname: &str, input: u32) -> u32 {
+/// The flags an output section carries. ld64 keeps the section type
+/// (a coalesced input section becomes regular; a literal pool folded
+/// into __TEXT,__const is regular) and the instruction attributes,
+/// drops every other input attribute (no_dead_strip, live_support,
+/// strip_static_syms, no_toc: they direct the linker, not dyld), and
+/// marks just the ObjC list sections the runtime scans as
+/// no-dead-strip. A -r output gets the same treatment (ld-prime's
+/// prelinks show the coalesced Swift and protocol sections as plain
+/// regular), except that __eh_frame is bare there and carries the
+/// compiler's fixed flags in a final image.
+fn output_section_flags(segname: &str, sectname: &str, input: u32, relocatable: bool) -> u32 {
     if segname == "__TEXT" && sectname == "__eh_frame" {
-        return S_COALESCED | S_ATTR_NO_TOC | S_ATTR_STRIP_STATIC_SYMS | S_ATTR_LIVE_SUPPORT;
+        // Plain regular in a -r output (ld-prime), the compiler's
+        // fixed flags in a final image.
+        return if relocatable {
+            0
+        } else {
+            S_COALESCED | S_ATTR_NO_TOC | S_ATTR_STRIP_STATIC_SYMS | S_ATTR_LIVE_SUPPORT
+        };
     }
     // The two reference lists the runtime may still write keep the
-    // flags they came with (coalesced, no-dead-strip) while in __DATA.
-    if segname == "__DATA" && matches!(sectname, "__objc_protorefs" | "__objc_superrefs") {
+    // flags they came with (coalesced, no-dead-strip) while in __DATA
+    // of a final image; a -r output normalizes them like the rest.
+    if !relocatable && segname == "__DATA" && matches!(sectname, "__objc_protorefs" | "__objc_superrefs") {
         return input & (SECTION_TYPE | S_ATTR_NO_DEAD_STRIP);
     }
     let mut ty = input & SECTION_TYPE;
@@ -3445,15 +3454,7 @@ pub fn create_output_sections<E: Arch>(ctx: &mut Context<E>) {
                                     thunks: vec![],
                                 },
                             );
-                            // A relocatable output keeps the input
-                            // flags (the debug attribute marks the
-                            // carried DWARF for the next link); a
-                            // final image gets ld64's normalized ones.
-                            chunk.hdr.flags = if relocatable {
-                                hdr.flags
-                            } else {
-                                output_section_flags(out.0, out.1, hdr.flags)
-                            };
+                            chunk.hdr.flags = output_section_flags(out.0, out.1, hdr.flags, relocatable);
                             ctx.chunks.push(chunk);
                             by_out.insert(out, ctx.chunks.len() - 1);
                             ctx.chunks.len() - 1
@@ -3481,12 +3482,8 @@ pub fn create_output_sections<E: Arch>(ctx: &mut Context<E>) {
         if chunk.hdr.flags & SECTION_TYPE == S_THREAD_LOCAL_VARIABLES {
             chunk.hdr.p2align = chunk.hdr.p2align.max(3);
         }
-        if relocatable {
-            chunk.hdr.flags |= hdr.flags & !SECTION_TYPE;
-        } else {
-            chunk.hdr.flags |=
-                output_section_flags(chunk.hdr.segname, &chunk.hdr.sectname, hdr.flags) & !SECTION_TYPE;
-        }
+        chunk.hdr.flags |=
+            output_section_flags(chunk.hdr.segname, &chunk.hdr.sectname, hdr.flags, relocatable) & !SECTION_TYPE;
         let ChunkKind::Output { isecs, .. } = &mut chunk.kind else {
             unreachable!()
         };
@@ -3727,7 +3724,7 @@ pub fn create_output_sections<E: Arch>(ctx: &mut Context<E>) {
         sects.dedup();
         for sect in sects {
             let (seg, out) = output_section_for(false, ctx.args.data_const, objc_refs_are_const(ctx), "__DATA", sect).unwrap();
-            let flags = output_section_flags(seg, out, 0);
+            let flags = output_section_flags(seg, out, 0, false);
             let mut size = 0u64;
             let mut offs = Vec::new();
             for b in ctx.data_blobs.iter().filter(|b| b.sect == sect) {
@@ -3914,7 +3911,7 @@ pub fn create_output_sections<E: Arch>(ctx: &mut Context<E>) {
         }
 
         let mut chunk = Chunk::new("__TEXT", "__eh_frame", ChunkKind::EhFrame);
-        chunk.hdr.flags = output_section_flags("__TEXT", "__eh_frame", 0);
+        chunk.hdr.flags = output_section_flags("__TEXT", "__eh_frame", 0, false);
         chunk.hdr.p2align = 3;
         chunk.hdr.size = off as u64;
         ctx.chunks.push(chunk);

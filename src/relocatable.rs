@@ -175,7 +175,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
         eh_slot = Some(extras.len());
         // S_COALESCED plus the no-TOC/strip/live-support attributes,
         // the flags compilers give this section.
-        extras.push(new_extra("__TEXT", "__eh_frame", 0x6800_000b, 3, size));
+        extras.push(new_extra("__TEXT", "__eh_frame", 0, 3, size));
     }
 
     // Every output section, merged or synthetic, in ld64's order:
