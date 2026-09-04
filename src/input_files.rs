@@ -1382,9 +1382,15 @@ fn parse_eh_frame<E: Arch>(
     // need no per-record copy, and they carry the pre-applied pairs.
     let contents: &'static [u8] = Vec::leak(contents);
     while pos < contents.len() {
+        if pos + 4 > contents.len() {
+            fatal!(diag, "{file_name}: malformed __eh_frame section: truncated CFI length");
+        }
         let len = u32::from_le_bytes(contents[pos..pos + 4].try_into().unwrap()) as usize;
         if len == 0xffff_ffff {
             fatal!(diag, "{file_name}: __eh_frame: extended length is not supported");
+        }
+        if len < 4 || pos + 4 + len > contents.len() {
+            fatal!(diag, "{file_name}: malformed __eh_frame section: CFI length too long");
         }
         let rec: &'static [u8] = &contents[pos..pos + 4 + len];
         let id = u32::from_le_bytes(rec[4..8].try_into().unwrap());
