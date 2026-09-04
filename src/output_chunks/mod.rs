@@ -120,7 +120,7 @@ pub enum Tail {
     /// Objective-C data the linker synthesized (merged class data:
     /// class_ro_t records, protocol and property lists, classic method
     /// lists) in the section of that name.
-    ObjcBlobs,
+    DataBlobs,
 }
 
 #[derive(Debug)]

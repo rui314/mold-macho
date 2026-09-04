@@ -74,7 +74,7 @@ pub struct Context<E: Arch> {
     /// Objective-C data records the linker synthesized (see
     /// merge_objc_categories), each placed as the tail of the output
     /// section it names.
-    pub objc_blobs: Vec<crate::passes::ObjcBlob>,
+    pub data_blobs: Vec<crate::passes::DataBlob>,
     /// The _objc_msgSend symbol, once objc stubs exist.
     pub objc_msgsend_sym: Option<SymbolId>,
     /// -alias names for imported symbols: (alias, imported target).
@@ -181,7 +181,7 @@ impl<E: Arch> Context<E> {
             objc_classref_slots: Vec::new(),
             objc_extra_selrefs: Vec::new(),
             objc_methlists: Vec::new(),
-            objc_blobs: Vec::new(),
+            data_blobs: Vec::new(),
             dylib_load_seq: 0,
             thread_ptr_syms: Vec::new(),
             objc_stubs: Vec::new(),

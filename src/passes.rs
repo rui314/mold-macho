@@ -2256,7 +2256,7 @@ pub fn convert_objc_method_lists<E: Arch>(ctx: &mut Context<E>) {
 
 /// A field of a synthesized Objective-C data record.
 #[derive(Clone, Debug)]
-pub enum ObjcField {
+pub enum DataField {
     Bytes(Vec<u8>),
     /// An 8-byte pointer, rebased at load (or null).
     Ptr(ObjcRef),
@@ -2266,19 +2266,19 @@ pub enum ObjcField {
 /// output section `sect` (mapped to its segment like an input section
 /// of that name) as the synthetic subsection `isec`.
 #[derive(Debug)]
-pub struct ObjcBlob {
+pub struct DataBlob {
     pub sect: &'static str,
     pub isec: u32,
-    pub fields: Vec<ObjcField>,
+    pub fields: Vec<DataField>,
 }
 
-impl ObjcBlob {
+impl DataBlob {
     pub fn size(&self) -> u64 {
         self.fields
             .iter()
             .map(|f| match f {
-                ObjcField::Bytes(b) => b.len() as u64,
-                ObjcField::Ptr(_) => 8,
+                DataField::Bytes(b) => b.len() as u64,
+                DataField::Ptr(_) => 8,
             })
             .sum()
     }
@@ -2607,7 +2607,7 @@ pub fn merge_objc_categories<E: Arch>(ctx: &mut Context<E>) {
         }
 
         // Emit the merged lists.
-        let mut new_blob = |ctx: &mut Context<E>, sect: &'static str, fields: Vec<ObjcField>| -> u32 {
+        let mut new_blob = |ctx: &mut Context<E>, sect: &'static str, fields: Vec<DataField>| -> u32 {
             let hdr: &'static MachSection = Box::leak(Box::new(MachSection {
                 sectname: str_to_name(sect),
                 segname: str_to_name("__DATA"),
@@ -2617,7 +2617,7 @@ pub fn merge_objc_categories<E: Arch>(ctx: &mut Context<E>) {
             }));
             ctx.synthetic_hdrs.push(hdr);
             let shndx = (ctx.synthetic_hdrs.len() - 1) as u32;
-            let blob = ObjcBlob { sect, isec: 0, fields };
+            let blob = DataBlob { sect, isec: 0, fields };
             let size = blob.size();
             ctx.isecs.push(InputSection {
                 obj: u32::MAX,
@@ -2636,7 +2636,7 @@ pub fn merge_objc_categories<E: Arch>(ctx: &mut Context<E>) {
                 nunwind: 0,
             });
             let isec = (ctx.isecs.len() - 1) as u32;
-            ctx.objc_blobs.push(ObjcBlob { isec, ..blob });
+            ctx.data_blobs.push(DataBlob { isec, ..blob });
             isec
         };
         let mut new_methlist = |ctx: &mut Context<E>, methods: Vec<ObjcMethod>| -> u32 {
@@ -2675,11 +2675,11 @@ pub fn merge_objc_categories<E: Arch>(ctx: &mut Context<E>) {
                 ctx.objc_methlists.push(ObjcMethList { isec, methods });
                 isec
             } else {
-                let mut fields = vec![ObjcField::Bytes(24u32.to_le_bytes().to_vec()), ObjcField::Bytes((methods.len() as u32).to_le_bytes().to_vec())];
+                let mut fields = vec![DataField::Bytes(24u32.to_le_bytes().to_vec()), DataField::Bytes((methods.len() as u32).to_le_bytes().to_vec())];
                 for m in &methods {
-                    fields.push(ObjcField::Ptr(m.name));
-                    fields.push(ObjcField::Ptr(m.types));
-                    fields.push(ObjcField::Ptr(m.imp));
+                    fields.push(DataField::Ptr(m.name));
+                    fields.push(DataField::Ptr(m.types));
+                    fields.push(DataField::Ptr(m.imp));
                 }
                 new_blob(ctx, "__objc_const", fields)
             }
@@ -2707,17 +2707,17 @@ pub fn merge_objc_categories<E: Arch>(ctx: &mut Context<E>) {
         let imethods = if m.any_imethods { Some(new_methlist(ctx, std::mem::take(&mut m.imethods))) } else { None };
         let cmethods = if m.any_cmethods { Some(new_methlist(ctx, std::mem::take(&mut m.cmethods))) } else { None };
         let protocols = if m.any_protocols {
-            let mut fields = vec![ObjcField::Bytes((m.protocols.len() as u64).to_le_bytes().to_vec())];
-            fields.extend(m.protocols.iter().map(|&r| ObjcField::Ptr(r)));
+            let mut fields = vec![DataField::Bytes((m.protocols.len() as u64).to_le_bytes().to_vec())];
+            fields.extend(m.protocols.iter().map(|&r| DataField::Ptr(r)));
             Some(new_blob(ctx, "__objc_const", fields))
         } else {
             None
         };
         let props = |ctx: &mut Context<E>, list: &[(ObjcRef, ObjcRef)]| -> u32 {
-            let mut fields = vec![ObjcField::Bytes(16u32.to_le_bytes().to_vec()), ObjcField::Bytes((list.len() as u32).to_le_bytes().to_vec())];
+            let mut fields = vec![DataField::Bytes(16u32.to_le_bytes().to_vec()), DataField::Bytes((list.len() as u32).to_le_bytes().to_vec())];
             for &(n, a) in list {
-                fields.push(ObjcField::Ptr(n));
-                fields.push(ObjcField::Ptr(a));
+                fields.push(DataField::Ptr(n));
+                fields.push(DataField::Ptr(a));
             }
             new_blob(ctx, "__objc_const", fields)
         };
@@ -2761,9 +2761,9 @@ pub fn merge_objc_categories<E: Arch>(ctx: &mut Context<E>) {
         // (their symbols follow). class_ro_t: flags, instanceStart,
         // instanceSize, reserved, then ivarLayout, name, baseMethods,
         // baseProtocols, ivars, weakIvarLayout, baseProperties.
-        let rewrite_ro = |ctx: &mut Context<E>, ro: (u32, u64), methods: Option<u32>, protocols: Option<u32>, props: Option<u32>, new_blob: &mut dyn FnMut(&mut Context<E>, &'static str, Vec<ObjcField>) -> u32| {
+        let rewrite_ro = |ctx: &mut Context<E>, ro: (u32, u64), methods: Option<u32>, protocols: Option<u32>, props: Option<u32>, new_blob: &mut dyn FnMut(&mut Context<E>, &'static str, Vec<DataField>) -> u32| {
             let data = ctx.isecs[ro.0 as usize].data()[ro.1 as usize..ro.1 as usize + 16].to_vec();
-            let mut fields = vec![ObjcField::Bytes(data)];
+            let mut fields = vec![DataField::Bytes(data)];
             for (k, field) in [16u64, 24, 32, 40, 48, 56, 64].into_iter().enumerate() {
                 let sub = match k {
                     2 => methods,
@@ -2775,7 +2775,7 @@ pub fn merge_objc_categories<E: Arch>(ctx: &mut Context<E>) {
                     Some(isec) => ObjcRef::Isec(isec, 0),
                     None => objc_pointer_at(ctx, ro.0, ro.1 + field).unwrap_or(ObjcRef::Null),
                 };
-                fields.push(ObjcField::Ptr(r));
+                fields.push(DataField::Ptr(r));
             }
             let blob = new_blob(ctx, "__objc_const", fields);
             let isec = ro.0 as usize;
@@ -2806,12 +2806,12 @@ pub fn merge_objc_categories<E: Arch>(ctx: &mut Context<E>) {
             continue;
         }
         ctx.isecs[ls.isec as usize].set_alive(false);
-        let survivors: Vec<ObjcField> = ls
+        let survivors: Vec<DataField> = ls
             .refs
             .iter()
             .zip(&merged)
             .filter(|(_, &m)| !m)
-            .map(|(&r, _)| ObjcField::Ptr(r))
+            .map(|(&r, _)| DataField::Ptr(r))
             .collect();
         if survivors.is_empty() {
             continue;
@@ -2843,7 +2843,7 @@ pub fn merge_objc_categories<E: Arch>(ctx: &mut Context<E>) {
             nunwind: 0,
         });
         let isec = (ctx.isecs.len() - 1) as u32;
-        ctx.objc_blobs.push(ObjcBlob { sect, isec, fields: survivors });
+        ctx.data_blobs.push(DataBlob { sect, isec, fields: survivors });
     }
 
     // Classes that absorbed a +load category become non-lazy.
@@ -2876,10 +2876,10 @@ pub fn merge_objc_categories<E: Arch>(ctx: &mut Context<E>) {
                 nunwind: 0,
             });
             let isec = (ctx.isecs.len() - 1) as u32;
-            ctx.objc_blobs.push(ObjcBlob {
+            ctx.data_blobs.push(DataBlob {
                 sect: "__objc_nlclslist",
                 isec,
-                fields: vec![ObjcField::Ptr(ObjcRef::Isec(cls.0, cls.1))],
+                fields: vec![DataField::Ptr(ObjcRef::Isec(cls.0, cls.1))],
             });
         }
     }
@@ -3515,8 +3515,8 @@ pub fn create_output_sections<E: Arch>(ctx: &mut Context<E>) {
         }
     // Synthesized Objective-C records go in the tail of the section
     // they name; each blob's subsection is placed there.
-    if !ctx.objc_blobs.is_empty() {
-        let mut sects: Vec<&'static str> = ctx.objc_blobs.iter().map(|b| b.sect).collect();
+    if !ctx.data_blobs.is_empty() {
+        let mut sects: Vec<&'static str> = ctx.data_blobs.iter().map(|b| b.sect).collect();
         sects.sort();
         sects.dedup();
         for sect in sects {
@@ -3524,12 +3524,12 @@ pub fn create_output_sections<E: Arch>(ctx: &mut Context<E>) {
             let flags = output_section_flags(seg, out, 0);
             let mut size = 0u64;
             let mut offs = Vec::new();
-            for b in ctx.objc_blobs.iter().filter(|b| b.sect == sect) {
+            for b in ctx.data_blobs.iter().filter(|b| b.sect == sect) {
                 size = align_to(size, 8);
                 offs.push((b.isec, size));
                 size += b.size();
             }
-            let idx = tail_section(ctx, seg, out, flags, 3, Tail::ObjcBlobs, size);
+            let idx = tail_section(ctx, seg, out, flags, 3, Tail::DataBlobs, size);
             let tail_off = ctx.chunks[idx].tail_off;
             for (isec, off) in offs {
                 ctx.isecs[isec as usize].osec = idx as u32;
@@ -4515,7 +4515,7 @@ pub fn set_osec_offsets<E: Arch>(ctx: &mut Context<E>) {
         match chunk.tail {
             Tail::ObjcMethname => ctx.objc_methname_chunk = i,
             Tail::ObjcSelrefs => ctx.objc_selrefs_chunk = i,
-            Tail::ObjcBlobs | Tail::None => {}
+            Tail::DataBlobs | Tail::None => {}
         }
     }
 
@@ -4816,7 +4816,7 @@ fn build_rebase_info<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
         locs.push(ctx.objc_selref_addr(i));
     }
     // Pointer fields of the synthesized Objective-C records.
-    for (addr, _) in objc_blob_pointers(ctx) {
+    for (addr, _) in data_blob_pointers(ctx) {
         locs.push(addr);
     }
 
@@ -4994,14 +4994,14 @@ const MAX_INLINE_ADDEND: u64 = 255;
 /// imported symbol's address), with the bind addends.
 /// The (address, target) of every non-null pointer field of the
 /// synthesized Objective-C records: each is a rebase.
-fn objc_blob_pointers<E: Arch>(ctx: &Context<E>) -> Vec<(u64, u64)> {
+fn data_blob_pointers<E: Arch>(ctx: &Context<E>) -> Vec<(u64, u64)> {
     let mut out = Vec::new();
-    for b in &ctx.objc_blobs {
+    for b in &ctx.data_blobs {
         let mut at = ctx.isec_addr(b.isec as usize);
         for f in &b.fields {
             match f {
-                ObjcField::Bytes(bytes) => at += bytes.len() as u64,
-                ObjcField::Ptr(r) => {
+                DataField::Bytes(bytes) => at += bytes.len() as u64,
+                DataField::Ptr(r) => {
                     let target = objc_ref_addr(ctx, *r);
                     if target != 0 {
                         out.push((at, target));
@@ -5080,7 +5080,7 @@ fn collect_fixups<E: Arch>(ctx: &Context<E>) -> Vec<(u64, Option<crate::symbol::
     for i in 0..ctx.objc_stubs.len() + ctx.objc_extra_selrefs.len() {
         fixups.push((ctx.objc_selref_addr(i), None, 0));
     }
-    for (addr, _) in objc_blob_pointers(ctx) {
+    for (addr, _) in data_blob_pointers(ctx) {
         fixups.push((addr, None, 0));
     }
 
@@ -5551,20 +5551,20 @@ fn copy_chunk<E: Arch>(ctx: &Context<E>, chunk: &Chunk, buf: &mut [u8]) {
                 Tail::ObjcMethname => {
                     tail[..ctx.objc_methname_data.len()].copy_from_slice(&ctx.objc_methname_data);
                 }
-                Tail::ObjcBlobs => {
+                Tail::DataBlobs => {
                     for b in ctx
-                        .objc_blobs
+                        .data_blobs
                         .iter()
                         .filter(|b| std::ptr::eq(&ctx.chunks[ctx.isecs[b.isec as usize].osec as usize], chunk))
                     {
                         let mut at = ctx.isecs[b.isec as usize].output_offset as usize - chunk.tail_off as usize;
                         for f in &b.fields {
                             match f {
-                                ObjcField::Bytes(bytes) => {
+                                DataField::Bytes(bytes) => {
                                     tail[at..at + bytes.len()].copy_from_slice(bytes);
                                     at += bytes.len();
                                 }
-                                ObjcField::Ptr(r) => {
+                                DataField::Ptr(r) => {
                                     tail[at..at + 8].copy_from_slice(&objc_ref_addr(ctx, *r).to_le_bytes());
                                     at += 8;
                                 }
