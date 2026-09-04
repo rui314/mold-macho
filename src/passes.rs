@@ -1918,8 +1918,15 @@ pub fn scan_relocations<E: Arch>(ctx: &mut Context<E>) {
                     add_got(ctx, id);
                 }
             }
+            // A call to one of this image's own coalescable weak
+            // definitions goes through a stub and a GOT slot dyld
+            // binds by weak lookup (never lazily), as ld64 does.
+            RelocClass::Branch if ctx.is_weak_coalesced(id) => {
+                add_stub(ctx, id);
+                add_got(ctx, id);
+            }
             RelocClass::Got => add_got(ctx, id),
-            RelocClass::GotLoad if sym.is_imported() => add_got(ctx, id),
+            RelocClass::GotLoad if ctx.binds_at_runtime(id) => add_got(ctx, id),
             // A TLV load of a local thread-local relaxes to the
             // descriptor's address; only imported ones need a
             // __thread_ptrs slot for dyld to fill.
@@ -4027,6 +4034,7 @@ pub fn create_output_sections<E: Arch>(ctx: &mut Context<E>) {
     ctx.chunks.push(Chunk::new("__LINKEDIT", "", ChunkKind::ChainedFixups));
     ctx.chunks.push(Chunk::new("__LINKEDIT", "", ChunkKind::RebaseInfo));
     ctx.chunks.push(Chunk::new("__LINKEDIT", "", ChunkKind::BindInfo));
+    ctx.chunks.push(Chunk::new("__LINKEDIT", "", ChunkKind::WeakBindInfo));
     ctx.chunks.push(Chunk::new("__LINKEDIT", "", ChunkKind::LazyBindInfo));
     ctx.chunks.push(Chunk::new("__LINKEDIT", "", ChunkKind::ExportTrie));
     ctx.chunks.push(Chunk::new("__LINKEDIT", "", ChunkKind::FunctionStarts));
@@ -4868,7 +4876,7 @@ pub fn set_osec_offsets<E: Arch>(ctx: &mut Context<E>) {
             // parallel-for.
             enum Streams {
                 Chained(ChainedFixups),
-                Classic(Vec<u8>, Vec<u8>, Vec<u8>, Vec<u32>),
+                Classic(Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>, Vec<u32>),
             }
             let use_chained = ctx.use_chained_fixups();
             let shared = &*ctx;
@@ -4925,7 +4933,8 @@ pub fn set_osec_offsets<E: Arch>(ctx: &mut Context<E>) {
                                     || t!("bind_info", build_bind_info(shared)),
                                 );
                                 let (lazy, lazy_offsets) = build_lazy_bind_info(shared);
-                                Streams::Classic(rebase, bind, lazy, lazy_offsets)
+                                let weak = build_weak_bind_info(shared);
+                                Streams::Classic(rebase, bind, weak, lazy, lazy_offsets)
                             }
                         },
                         || {
@@ -4944,9 +4953,10 @@ pub fn set_osec_offsets<E: Arch>(ctx: &mut Context<E>) {
                     (ctx.chained_data, ctx.fixups, ctx.fixup_imports, ctx.fixup_ordinals) =
                         chained;
                 }
-                Streams::Classic(rebase, bind, lazy, lazy_offsets) => {
+                Streams::Classic(rebase, bind, weak, lazy, lazy_offsets) => {
                     ctx.rebase_data = rebase;
                     ctx.bind_data = bind;
+                    ctx.weak_bind_data = weak;
                     ctx.lazy_bind_data = lazy;
                     ctx.lazy_bind_offsets = lazy_offsets;
                 }
@@ -5001,6 +5011,7 @@ pub fn set_osec_offsets<E: Arch>(ctx: &mut Context<E>) {
                 ChunkKind::ChainedFixups => ctx.chained_data.len() as u64,
                 ChunkKind::RebaseInfo => ctx.rebase_data.len() as u64,
                 ChunkKind::BindInfo => ctx.bind_data.len() as u64,
+                ChunkKind::WeakBindInfo => ctx.weak_bind_data.len() as u64,
                 ChunkKind::LazyBindInfo => ctx.lazy_bind_data.len() as u64,
                 // Encoded with the other LINKEDIT tables when layout
                 // reached __LINKEDIT, and copied out verbatim later.
@@ -5020,7 +5031,7 @@ pub fn set_osec_offsets<E: Arch>(ctx: &mut Context<E>) {
             let chunk = &mut ctx.chunks[idx];
             let p2align = match chunk.kind {
                 ChunkKind::Symtab | ChunkKind::Strtab | ChunkKind::RebaseInfo
-                | ChunkKind::BindInfo | ChunkKind::LazyBindInfo | ChunkKind::ChainedFixups | ChunkKind::ExportTrie
+                | ChunkKind::BindInfo | ChunkKind::WeakBindInfo | ChunkKind::LazyBindInfo | ChunkKind::ChainedFixups | ChunkKind::ExportTrie
                 | ChunkKind::FunctionStarts | ChunkKind::DataInCode => 3,
                 ChunkKind::IndirectSymtab => 2,
                 ChunkKind::CodeSignature => 4,
@@ -5240,6 +5251,11 @@ fn build_lazy_bind_info<E: Arch>(ctx: &Context<E>) -> (Vec<u8>, Vec<u32>) {
     let mut offsets = Vec::with_capacity(ctx.stub_syms.len());
     for (i, &id) in ctx.stub_syms.iter().enumerate() {
         offsets.push(buf.len() as u32);
+        // A stub for one of this image's weak definitions jumps
+        // through its GOT slot (bound by weak lookup), not lazily.
+        if ctx.is_weak_coalesced(id) {
+            continue;
+        }
         let addr = ctx.stub_ptr_addr(i, id);
         let (seg, off) = segment_and_offset(ctx, addr);
         buf.push(BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB | seg as u8);
@@ -5433,7 +5449,7 @@ fn collect_fixups<E: Arch>(ctx: &Context<E>) -> Vec<(u64, Option<crate::symbol::
                     );
                 }
                 match ctx.reloc_target_sym(isec.obj as usize, rel) {
-                    Some(id) if ctx.symtab[id].is_imported() => {
+                    Some(id) if ctx.binds_at_runtime(id) => {
                         Some((addr, Some(id), rel.addend as u64))
                     }
                     _ => {
@@ -5451,7 +5467,7 @@ fn collect_fixups<E: Arch>(ctx: &Context<E>) -> Vec<(u64, Option<crate::symbol::
     if let Some(idx) = output_chunks::find_chunk(ctx, |k| matches!(k, ChunkKind::Got)) {
         let addr = ctx.chunks[idx].hdr.addr;
         for (i, &id) in ctx.got_syms.iter().enumerate() {
-            let sym = Some(id).filter(|&id| ctx.symtab[id].is_imported());
+            let sym = Some(id).filter(|&id| ctx.binds_at_runtime(id));
             fixups.push((addr + i as u64 * 8, sym, 0));
         }
     }
@@ -5471,6 +5487,70 @@ fn collect_fixups<E: Arch>(ctx: &Context<E>) -> Vec<(u64, Option<crate::symbol::
 
     fixups.par_sort_unstable_by_key(|&(addr, _, _)| addr);
     fixups
+}
+
+/// Builds the classic weak_bind stream: for every slot that holds the
+/// address of one of this image's coalescable weak definitions - GOT
+/// entries and data pointers - a bind by name, which dyld applies
+/// only if another image's copy of the symbol won coalescing (the
+/// slot's rebase already holds this image's copy). Sorted by symbol
+/// name, then address, as ld64 writes them.
+fn build_weak_bind_info<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
+    let mut binds: Vec<(crate::symbol::SymbolId, u64)> = Vec::new();
+    if let Some(idx) = output_chunks::find_chunk(ctx, |k| matches!(k, ChunkKind::Got)) {
+        let got_addr = ctx.chunks[idx].hdr.addr;
+        for (i, &id) in ctx.got_syms.iter().enumerate() {
+            if ctx.is_weak_coalesced(id) {
+                binds.push((id, got_addr + i as u64 * 8));
+            }
+        }
+    }
+    for isec in ctx.isecs.iter() {
+        if !isec.is_alive() || isec.replacement != crate::input_sections::NO_REPLACEMENT {
+            continue;
+        }
+        let base = ctx.chunks[isec.osec as usize].hdr.addr + isec.output_offset as u64;
+        for rel in crate::input_files::isec_relocs_of(&ctx.objs, isec) {
+            if E::classify_reloc(rel.r_type) != RelocClass::Plain
+                || rel.size != 8
+                || rel.is_pcrel
+                || rel.is_subtracted
+                || rel.r_type == E::RELOC_SUBTRACTOR
+            {
+                continue;
+            }
+            if let Some(id) = ctx.reloc_target_sym(isec.obj as usize, rel) {
+                if ctx.is_weak_coalesced(id) {
+                    binds.push((id, base + rel.offset as u64));
+                }
+            }
+        }
+    }
+    if binds.is_empty() {
+        return Vec::new();
+    }
+    binds.sort_by(|a, b| ctx.symtab[a.0].name().cmp(ctx.symtab[b.0].name()).then(a.1.cmp(&b.1)));
+
+    let mut buf = Vec::new();
+    let mut last: Option<crate::symbol::SymbolId> = None;
+    for (id, addr) in binds {
+        if last != Some(id) {
+            buf.push(BIND_OPCODE_SET_SYMBOL_TRAILING_FLAGS_IMM);
+            buf.extend_from_slice(ctx.symtab[id].name().as_bytes());
+            buf.push(0);
+            buf.push(BIND_OPCODE_SET_TYPE_IMM | BIND_TYPE_POINTER);
+            last = Some(id);
+        }
+        let (seg, off) = segment_and_offset(ctx, addr);
+        buf.push(BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB | seg as u8);
+        write_uleb(&mut buf, off);
+        buf.push(BIND_OPCODE_DO_BIND);
+    }
+    buf.push(BIND_OPCODE_DONE);
+    while buf.len() % 8 != 0 {
+        buf.push(0);
+    }
+    buf
 }
 
 /// Builds the LC_DYLD_CHAINED_FIXUPS payload. Instead of opcode
@@ -5606,22 +5686,29 @@ fn build_chained_fixups<E: Arch>(ctx: &Context<E>) -> ChainedFixups {
     }
     for (i, &(sym, addend)) in dynsyms.iter().enumerate() {
         let s = &ctx.symtab[sym];
-        let Origin::Dylib(dylib) = s.origin() else {
-            unreachable!()
+        // An import names its dylib; one of this image's own weak
+        // definitions is bound by weak lookup (ordinal -3), which
+        // makes dyld search every loaded image for the coalesced
+        // winner.
+        let ordinal_bits = |bits: u32| -> u64 {
+            match s.origin() {
+                Origin::Dylib(dylib) => ctx.chained_import_ordinal(dylib, bits),
+                _ => (BIND_SPECIAL_DYLIB_WEAK_LOOKUP as i64 as u64) & ((1u64 << bits) - 1),
+            }
         };
         let weak = s.is_weak_ref() as u32;
         match import_format {
             DYLD_CHAINED_IMPORT => {
-                let ordinal = ctx.chained_import_ordinal(dylib, 8) as u32;
+                let ordinal = ordinal_bits(8) as u32;
                 push32(&mut buf, ordinal | (weak << 8) | (name_offs[i] << 9));
             }
             DYLD_CHAINED_IMPORT_ADDEND => {
-                let ordinal = ctx.chained_import_ordinal(dylib, 8) as u32;
+                let ordinal = ordinal_bits(8) as u32;
                 push32(&mut buf, ordinal | (weak << 8) | (name_offs[i] << 9));
                 push32(&mut buf, addend as u32);
             }
             _ => {
-                let ordinal = ctx.chained_import_ordinal(dylib, 16);
+                let ordinal = ordinal_bits(16);
                 push64(
                     &mut buf,
                     ordinal | ((weak as u64) << 16) | ((name_offs[i] as u64) << 32),
@@ -6106,6 +6193,7 @@ fn copy_chunk<E: Arch>(ctx: &Context<E>, chunk: &Chunk, buf: &mut [u8]) {
         }
         ChunkKind::RebaseInfo => buf[..ctx.rebase_data.len()].copy_from_slice(&ctx.rebase_data),
         ChunkKind::BindInfo => buf[..ctx.bind_data.len()].copy_from_slice(&ctx.bind_data),
+        ChunkKind::WeakBindInfo => buf[..ctx.weak_bind_data.len()].copy_from_slice(&ctx.weak_bind_data),
         ChunkKind::LazyBindInfo => buf[..ctx.lazy_bind_data.len()].copy_from_slice(&ctx.lazy_bind_data),
         ChunkKind::StubHelper => E::write_stub_helper(ctx, chunk.hdr.addr, buf),
         ChunkKind::LazyPtrs => {

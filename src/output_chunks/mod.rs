@@ -57,6 +57,10 @@ pub enum ChunkKind {
     /// __DATA,__la_symbol_ptr: the lazy pointers the stubs jump
     /// through, bound by dyld on first call.
     LazyPtrs,
+    /// The weak-bind opcode stream for LC_DYLD_INFO, in __LINKEDIT:
+    /// the slots dyld redirects when another image's copy of one of
+    /// this image's weak definitions wins coalescing.
+    WeakBindInfo,
     /// The lazy-bind opcode stream for LC_DYLD_INFO, in __LINKEDIT.
     LazyBindInfo,
     /// The global offset table: pointers to symbols, bound by dyld for
@@ -331,6 +335,12 @@ fn create_dyld_info_cmd<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
         if ctx.chunks[idx].hdr.size > 0 {
             cmd.bind_off = ctx.chunks[idx].hdr.fileoff as u32;
             cmd.bind_size = ctx.chunks[idx].hdr.size as u32;
+        }
+    }
+    if let Some(idx) = find_chunk(ctx, |k| matches!(k, ChunkKind::WeakBindInfo)) {
+        if ctx.chunks[idx].hdr.size > 0 {
+            cmd.weak_bind_off = ctx.chunks[idx].hdr.fileoff as u32;
+            cmd.weak_bind_size = ctx.chunks[idx].hdr.size as u32;
         }
     }
     if let Some(idx) = find_chunk(ctx, |k| matches!(k, ChunkKind::LazyBindInfo)) {
@@ -665,15 +675,18 @@ pub fn copy_mach_header<E: Arch>(ctx: &Context<E>, buf: &mut [u8]) {
         _ => {}
     }
     // MH_BINDS_TO_WEAK: the image binds to a symbol some dylib
-    // defines weakly (dyld must then consider weak coalescing when it
+    // defines weakly, or to one of its own coalescable weak
+    // definitions (dyld must then consider weak coalescing when it
     // binds). ld-prime sets it on an executable calling a dylib's
-    // weak definition.
+    // weak definition, and on any image with weak-lookup binds.
     if ctx.symtab.syms.iter().any(|sym| match sym.origin() {
         Origin::Dylib(idx) => {
             idx != u32::MAX && sym.is_used() && ctx.dylibs[idx as usize].weak_exports.contains(sym.name())
         }
         _ => false,
-    }) {
+    }) || ctx.fixup_imports.iter().any(|&(id, _)| ctx.is_weak_coalesced(id))
+        || !ctx.weak_bind_data.is_empty()
+    {
         hdr.flags |= MH_BINDS_TO_WEAK;
     }
     // MH_WEAK_DEFINES advertises exported weak symbols; auto-hidden

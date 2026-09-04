@@ -123,6 +123,10 @@ pub struct Context<E: Arch> {
     /// it (what its stub helper entry pushes for dyld_stub_binder).
     pub lazy_bind_data: Vec<u8>,
     pub lazy_bind_offsets: Vec<u32>,
+    /// The classic weak_bind stream: the slots that refer to this
+    /// image's own exported weak definitions, for dyld to redirect to
+    /// whichever image's copy wins coalescing.
+    pub weak_bind_data: Vec<u8>,
     /// dyld_stub_binder, resolved from the loaded dylibs when lazy
     /// binding is in use, and the __dyld_private word the stub helper
     /// hands it (a synthesized record in __DATA,__data).
@@ -222,6 +226,7 @@ impl<E: Arch> Context<E> {
             bind_data: Vec::new(),
             lazy_bind_data: Vec::new(),
             lazy_bind_offsets: Vec::new(),
+            weak_bind_data: Vec::new(),
             dyld_stub_binder: None,
             dyld_private_isec: u32::MAX,
             function_starts_data: Vec::new(),
@@ -436,12 +441,49 @@ impl<E: Arch> Context<E> {
     }
 
     /// The address of the pointer slot stub `i` (for symbol `id`)
-    /// jumps through: its lazy pointer, or its GOT slot.
+    /// jumps through: its lazy pointer, or its GOT slot. A weak
+    /// definition of this image always goes through its GOT slot (the
+    /// lazy binder cannot do weak lookup), as in ld64.
     pub fn stub_ptr_addr(&self, i: usize, id: SymbolId) -> u64 {
-        if self.lazy_binding() {
+        if self.lazy_binding() && !self.is_weak_coalesced(id) {
             self.chunks[self.lazy_ptrs_chunk].hdr.addr + i as u64 * 8
         } else {
             self.sym_got_addr(id)
+        }
+    }
+
+    /// True for a weak definition of this image that dyld may replace
+    /// with another image's copy at load time: an exported (neither
+    /// private nor auto-hidden) weak definition from an object. ld64
+    /// routes every reference to such a symbol through a slot dyld
+    /// binds by weak lookup - a GOT entry, a stub, a data pointer -
+    /// so that C++'s one-definition rule holds across images (an
+    /// inline function's static local is one variable, not one per
+    /// dylib). In a relocatable output the references stay relocations.
+    pub fn is_weak_coalesced(&self, id: SymbolId) -> bool {
+        if self.args.relocatable {
+            return false;
+        }
+        let sym = &self.symtab[id];
+        matches!(sym.origin(), Origin::Obj(_))
+            && sym.is_weak_def()
+            && sym.is_extern()
+            && !sym.is_private_extern()
+    }
+
+    /// True if dyld fills the references to this symbol: an import, or
+    /// a weak definition subject to coalescing.
+    pub fn binds_at_runtime(&self, id: SymbolId) -> bool {
+        self.symtab[id].is_imported() || self.is_weak_coalesced(id)
+    }
+
+    /// The address a branch to `id` targets: the symbol's stub when it
+    /// has one and dyld may redirect it, else the symbol itself.
+    pub fn branch_target_addr(&self, id: SymbolId) -> u64 {
+        if self.is_weak_coalesced(id) && self.sym_aux(id).stub_idx != crate::symbol::NO_IDX {
+            self.sym_stub_addr(id)
+        } else {
+            self.sym_addr(id)
         }
     }
 

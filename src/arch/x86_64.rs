@@ -226,7 +226,7 @@ impl Arch for X86_64 {
                 && buf[r.offset as usize - 2] == 0x8b
                 && ctx
                     .reloc_target_sym(obj, r)
-                    .is_some_and(|id| !ctx.symtab[id].is_imported())
+                    .is_some_and(|id| !ctx.binds_at_runtime(id))
             {
                 buf[r.offset as usize - 2] = 0x8d;
                 relaxed_got_load = true;
@@ -276,6 +276,10 @@ impl Arch for X86_64 {
                 }
                 X86_64_RELOC_BRANCH => {
                     debug_assert!(r.size == 4);
+                    let s = match ctx.reloc_target_sym(obj, r) {
+                        Some(id) => ctx.branch_target_addr(id),
+                        None => s,
+                    };
                     let val = s.wrapping_add_signed(a).wrapping_sub(p + 4);
                     write32(loc, val as u32);
                 }

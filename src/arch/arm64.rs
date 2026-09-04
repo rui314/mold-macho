@@ -497,6 +497,10 @@ impl Arch for Arm64 {
                     }
                 }
                 ARM64_RELOC_BRANCH26 => {
+                    let s = match ctx.reloc_target_sym(obj, r) {
+                        Some(id) => ctx.branch_target_addr(id),
+                        None => s,
+                    };
                     let mut val = s.wrapping_add_signed(a).wrapping_sub(p) as i64;
                     if !(-(1 << 27)..1 << 27).contains(&val) {
                         // Out of reach: branch through one of the
@@ -553,7 +557,7 @@ impl Arch for Arm64 {
                 // "add Xn, Xm, #pageoff".
                 ARM64_RELOC_GOT_LOAD_PAGE21 => {
                     let id = ctx.reloc_target_sym(obj, r).unwrap();
-                    let target = if ctx.symtab[id].is_imported() {
+                    let target = if ctx.binds_at_runtime(id) {
                         ctx.sym_got_addr(id)
                     } else {
                         s
@@ -563,7 +567,7 @@ impl Arch for Arm64 {
                 }
                 ARM64_RELOC_GOT_LOAD_PAGEOFF12 => {
                     let id = ctx.reloc_target_sym(obj, r).unwrap();
-                    if ctx.symtab[id].is_imported() {
+                    if ctx.binds_at_runtime(id) {
                         let g = ctx.sym_got_addr(id);
                         write_add_ldst(loc, g.wrapping_add_signed(a));
                     } else {
