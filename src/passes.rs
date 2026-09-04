@@ -6267,10 +6267,13 @@ fn copy_chunk<E: Arch>(ctx: &Context<E>, chunk: &Chunk, buf: &mut [u8]) {
             let data = &ctx.unwind_info_data;
             debug_assert_eq!(data.len() as u64, chunk.hdr.size);
             buf[..data.len()].copy_from_slice(data);
-            // Patch the personality cells now the GOT has addresses.
+            // Patch the personality cells now the GOT has addresses;
+            // the header says where the array is (after the common
+            // encodings).
             let base = ctx.args.pagezero_size;
+            let personality_off = u32::from_le_bytes(data[12..16].try_into().unwrap()) as usize;
             for (i, &sym) in ctx.unwind_personalities.iter().enumerate() {
-                let off = 28 + i * 4;
+                let off = personality_off + i * 4;
                 let val = ctx.sym_got_addr(sym).wrapping_sub(base) as u32;
                 buf[off..off + 4].copy_from_slice(&val.to_le_bytes());
             }

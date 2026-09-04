@@ -1185,25 +1185,83 @@ pub fn encode_unwind_info<E: Arch>(ctx: &Context<E>) -> (Vec<u8>, Vec<SymbolId>)
     }
     let records = merged;
 
-    // Split records into pages: each second-level page covers at most
-    // 2^24 bytes of code and holds a bounded number of records.
-    const MAX_PAGE_RECORDS: usize = 200;
-    let mut pages: Vec<&[crate::input_files::UnwindRecord]> = Vec::new();
-    let mut rest = &records[..];
-    while !rest.is_empty() {
-        let end_addr = func_addr(&rest[0]) + (1 << 24);
-        let mut i = 1;
-        while i < rest.len() && i < MAX_PAGE_RECORDS && func_addr(&rest[i]) < end_addr {
-            i += 1;
+    // The common encodings table: the encodings the image uses more
+    // than once, most frequent first, up to 127 of them (a compressed
+    // entry's 8-bit index names a common encoding below the table's
+    // count and a page-local one above it). ld64 fills it the same
+    // way; a one-off encoding - every DWARF-mode one, with its FDE
+    // offset - stays page-local.
+    let common: Vec<(u32, usize)> = {
+        let mut freq: std::collections::HashMap<u32, (usize, usize)> = std::collections::HashMap::new();
+        for (i, rec) in records.iter().enumerate() {
+            let e = freq.entry(rec.encoding).or_insert((0, i));
+            e.0 += 1;
         }
-        pages.push(&rest[..i]);
-        rest = &rest[i..];
+        let mut all: Vec<(u32, usize, usize)> = freq.into_iter().map(|(e, (n, first))| (e, n, first)).collect();
+        all.sort_by(|a, b| b.1.cmp(&a.1).then(a.2.cmp(&b.2)));
+        all.into_iter().filter(|&(_, n, _)| n > 1).take(127).map(|(e, n, _)| (e, n)).collect()
+    };
+    let common_idx: std::collections::HashMap<u32, u32> =
+        common.iter().enumerate().map(|(i, &(e, _))| (e, i as u32)).collect();
+
+    // Second-level pages, 4096 bytes each, filled from the end of the
+    // record list as ld64 does (so the first page is the partial one).
+    // A compressed page holds 32-bit entries (a 24-bit offset from the
+    // page's first function and an 8-bit encoding index) plus its
+    // page-local encodings; a regular page 8-byte entries. Each page
+    // takes the format that holds more of the remaining records.
+    const PAGE_SIZE: usize = 4096;
+    const COMPRESSED_HDR: usize = 12;
+    const REGULAR_HDR: usize = 8;
+    struct Page {
+        start: usize,
+        end: usize,
+        compressed: bool,
+        encodings: Vec<u32>,
     }
+    let mut pages: Vec<Page> = Vec::new();
+    let mut end = records.len();
+    while end > 0 {
+        let last_addr = func_addr(&records[end - 1]);
+        let mut encs: Vec<u32> = Vec::new();
+        let mut n = 0;
+        let mut i = end;
+        while i > 0 {
+            let rec = &records[i - 1];
+            let is_common = common_idx.contains_key(&rec.encoding);
+            let new_enc = !is_common && !encs.contains(&rec.encoding);
+            if new_enc && common.len() + encs.len() + 1 > 256 {
+                break;
+            }
+            let encs_len = encs.len() + new_enc as usize;
+            if COMPRESSED_HDR + (n + 1) * 4 + encs_len * 4 > PAGE_SIZE {
+                break;
+            }
+            if last_addr - func_addr(rec) >= (1 << 24) {
+                break;
+            }
+            if new_enc {
+                encs.push(rec.encoding);
+            }
+            n += 1;
+            i -= 1;
+        }
+        let regular = end.min((PAGE_SIZE - REGULAR_HDR) / 8);
+        if n >= regular {
+            pages.push(Page { start: end - n, end, compressed: true, encodings: encs });
+            end -= n;
+        } else {
+            pages.push(Page { start: end - regular, end, compressed: false, encodings: Vec::new() });
+            end -= regular;
+        }
+    }
+    pages.reverse();
 
     let num_lsda = records.iter().filter(|r| r.lsda().is_some()).count();
 
     // Compute the layout of the section.
-    let personality_off = 28;
+    let common_off = 28;
+    let personality_off = common_off + common.len() * 4;
     let page1_off = personality_off + personalities.len() * 4;
     let lsda_off = page1_off + (pages.len() + 1) * 12;
     let page2_off = lsda_off + num_lsda * 8;
@@ -1213,12 +1271,15 @@ pub fn encode_unwind_info<E: Arch>(ctx: &Context<E>) -> (Vec<u8>, Vec<SymbolId>)
 
     let mut buf = Vec::new();
     push32(&mut buf, UNWIND_SECTION_VERSION);
-    push32(&mut buf, personality_off as u32); // common encodings (none)
-    push32(&mut buf, 0);
+    push32(&mut buf, common_off as u32);
+    push32(&mut buf, common.len() as u32);
     push32(&mut buf, personality_off as u32);
     push32(&mut buf, personalities.len() as u32);
     push32(&mut buf, page1_off as u32);
     push32(&mut buf, pages.len() as u32 + 1);
+    for &(enc, _) in &common {
+        push32(&mut buf, enc);
+    }
 
     // Personalities are image-relative pointers to the functions' GOT
     // slots, patched in by the copy phase (see above).
@@ -1236,38 +1297,46 @@ pub fn encode_unwind_info<E: Arch>(ctx: &Context<E>) -> (Vec<u8>, Vec<SymbolId>)
     }
     let outs: Vec<PageOut> = pages
         .par_iter()
-        .map(|span| {
+        .map(|page| {
+            let span = &records[page.start..page.end];
             let mut page2 = Vec::new();
             let mut lsda = Vec::new();
-            for rec in *span {
+            for rec in span {
                 if let Some((isec, off)) = rec.lsda() {
                     push32(&mut lsda, (func_addr(rec) - base) as u32);
                     push32(&mut lsda, (ctx.isec_addr(isec) + off as u64 - base) as u32);
                 }
             }
 
-            // The page's encoding table, indexed by the entries.
-            let mut encodings: Vec<u32> = Vec::new();
-            for rec in *span {
-                if !encodings.contains(&rec.encoding) {
-                    encodings.push(rec.encoding);
+            if page.compressed {
+                push32(&mut page2, UNWIND_SECOND_LEVEL_COMPRESSED);
+                push16(&mut page2, COMPRESSED_HDR as u16); // entries offset
+                push16(&mut page2, span.len() as u16);
+                push16(&mut page2, (COMPRESSED_HDR + span.len() * 4) as u16); // encodings offset
+                push16(&mut page2, page.encodings.len() as u16);
+                let page_base = func_addr(&span[0]);
+                for rec in span {
+                    let enc_idx = match common_idx.get(&rec.encoding) {
+                        Some(&i) => i,
+                        None => {
+                            common.len() as u32
+                                + page.encodings.iter().position(|&e| e == rec.encoding).unwrap() as u32
+                        }
+                    };
+                    let entry = (func_addr(rec) - page_base) as u32 | enc_idx << 24;
+                    push32(&mut page2, entry);
                 }
-            }
-
-            push32(&mut page2, UNWIND_SECOND_LEVEL_COMPRESSED);
-            push16(&mut page2, 12); // entries offset within the page
-            push16(&mut page2, span.len() as u16);
-            push16(&mut page2, (12 + span.len() * 4) as u16); // encodings offset
-            push16(&mut page2, encodings.len() as u16);
-
-            let page_base = func_addr(&span[0]);
-            for rec in *span {
-                let enc_idx = encodings.iter().position(|&e| e == rec.encoding).unwrap();
-                let entry = (func_addr(rec) - page_base) as u32 | (enc_idx as u32) << 24;
-                push32(&mut page2, entry);
-            }
-            for enc in &encodings {
-                push32(&mut page2, *enc);
+                for enc in &page.encodings {
+                    push32(&mut page2, *enc);
+                }
+            } else {
+                push32(&mut page2, UNWIND_SECOND_LEVEL_REGULAR);
+                push16(&mut page2, REGULAR_HDR as u16);
+                push16(&mut page2, span.len() as u16);
+                for rec in span {
+                    push32(&mut page2, (func_addr(rec) - base) as u32);
+                    push32(&mut page2, rec.encoding);
+                }
             }
             PageOut {
                 page2,
