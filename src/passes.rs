@@ -3771,6 +3771,41 @@ fn keep_local_symbol(name: &str) -> bool {
     !name.is_empty() && !name.starts_with('l') && !name.starts_with('L')
 }
 
+/// Returns true if a non-external local symbol defined in `isec`
+/// appears in a final image's symbol table: its name must not be a
+/// label, and it must not live in one of the Objective-C list
+/// sections, whose entries ld64 never names in an output (Swift's
+/// _objc_classes_* in __objc_classlist: ld-prime's NetNewsWire has
+/// none of the 127 ours carried). A demoted private external in those
+/// sections stays (clang's __OBJC_LABEL_PROTOCOL_$_X does).
+fn keep_local_symbol_in<E: Arch>(ctx: &Context<E>, name: &str, isec: Option<u32>) -> bool {
+    if !keep_local_symbol(name) {
+        return false;
+    }
+    match isec {
+        Some(isec) => {
+            let isec = &ctx.isecs[ctx.resolve_isec(isec as usize)];
+            if isec.obj == u32::MAX {
+                return true;
+            }
+            !matches!(
+                ctx.hdr_of(isec).sectname(),
+                "__objc_classlist"
+                    | "__objc_nlclslist"
+                    | "__objc_catlist"
+                    | "__objc_nlcatlist"
+                    | "__objc_protolist"
+                    | "__objc_selrefs"
+                    | "__objc_classrefs"
+                    | "__objc_superrefs"
+                    | "__objc_protorefs"
+                    | "__objc_imageinfo"
+            )
+        }
+        None => true,
+    }
+}
+
 /// Plans one object's debug-note stabs, in output symbol-table form
 /// (name, entry, and the symbol whose address the entry takes, if
 /// any). An object with DWARF gets the run ld64 writes: N_SO, N_OSO
@@ -3908,7 +3943,7 @@ pub fn plan_object_stabs<E: Arch>(
         let sym = &ctx.symtab[sym_id];
         if nlist.is_stab()
             || !matches!(sym.origin(), Origin::Obj(o) if o as usize == obj_idx)
-            || (!nlist.is_extern() && !keep_local_symbol(sym.name()))
+            || (!nlist.is_extern() && !keep_local_symbol_in(ctx, sym.name(), sym.isec()))
         {
             continue;
         }
@@ -4116,7 +4151,7 @@ pub fn create_output_symtab<E: Arch>(
                 let r = obj.local_range();
                 for (nlist, &sym_id) in obj.nlists[r.clone()].iter().zip(&obj.syms[r]) {
                     let sym = &ctx_ref.symtab[sym_id];
-                    if nlist.is_stab() || nlist.is_extern() || !keep_local_symbol(sym.name()) {
+                    if nlist.is_stab() || nlist.is_extern() || !keep_local_symbol_in(ctx_ref, sym.name(), sym.isec()) {
                         continue;
                     }
                     // -non_global_symbols_keep_list / _strip_list
@@ -4188,6 +4223,13 @@ pub fn create_output_symtab<E: Arch>(
                         .isec()
                         .is_some_and(|isec| ctx.isecs[ctx.resolve_isec(isec as usize)].is_alive())
                 {
+                    // A private external becomes a local, and a label
+                    // is not emitted (ld-prime keeps clang's
+                    // __OBJC_LABEL_PROTOCOL_$_X, demoted, but not an
+                    // l_OBJC_LABEL_PROTOCOL_$_X).
+                    if !keep_local_symbol(sym.name()) {
+                        return Class::No;
+                    }
                     return Class::Pext;
                 }
                 Class::No

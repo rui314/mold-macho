@@ -227,8 +227,12 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
             ),
             None => (N_ABS | N_EXT, 0),
         };
+        // N_WEAK_REF on a definition is .weak_def_can_be_hidden: with
+        // N_WEAK_DEF it lets a final link auto-hide the symbol (ld-prime
+        // makes PLCrashReporter's template instantiations local; ours
+        // stayed exported after the -r prelink lost the marker).
         let mut n_desc = desc_of.get(&(i as u32)).copied().unwrap_or(0)
-            & (N_WEAK_DEF | N_ALT_ENTRY | N_NO_DEAD_STRIP | N_SYMBOL_RESOLVER | REFERENCED_DYNAMICALLY);
+            & (N_WEAK_DEF | N_WEAK_REF | N_ALT_ENTRY | N_NO_DEAD_STRIP | N_SYMBOL_RESOLVER | REFERENCED_DYNAMICALLY);
         if sym.is_weak_def() {
             n_desc |= N_WEAK_DEF;
         }
