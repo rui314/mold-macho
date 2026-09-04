@@ -1460,18 +1460,20 @@ pub fn create_objc_msgsend_stubs<E: Arch>(ctx: &mut Context<E>) {
 /// Reports references to symbols that are still unresolved; with
 /// `-undefined dynamic_lookup` they become flat-namespace imports that
 /// dyld resolves against any loaded image at run time.
-/// Auto-hides eligible weak definitions in a main executable.
-/// Compilers mark a weak definition whose address is never observed
-/// with .weak_def_can_be_hidden (nlist n_desc carries N_WEAK_DEF and
-/// N_WEAK_REF together); since dyld's runtime weak coalescing only
-/// considers images that export the symbol and the executable is
-/// first in load order anyway, ld64 demotes such symbols to
-/// non-external - gone from the export trie and the external symbol
-/// table. The scopes of coalesced copies merge: one plain
-/// .weak_definition among them pins the symbol exported, and an
-/// -exported_symbols_list naming it does too.
+/// Auto-hides eligible weak definitions. Compilers mark a weak
+/// definition whose address is never observed with
+/// .weak_def_can_be_hidden (nlist n_desc carries N_WEAK_DEF and
+/// N_WEAK_REF together): no one can tell which image's copy they use,
+/// so ld64 demotes such symbols to non-external in every kind of
+/// output - executables, dylibs and bundles alike - gone from the
+/// export trie and the external symbol table, and referenced directly
+/// rather than through weak-lookup binds (ld-prime's NetNewsWire
+/// dylib hides PLCrashReporter's template constructors this way).
+/// The scopes of coalesced copies merge: one plain .weak_definition
+/// among them pins the symbol exported, and an -exported_symbols_list
+/// naming it does too.
 pub fn auto_hide_weak_defs<E: Arch>(ctx: &mut Context<E>) {
-    if ctx.args.output_type != MH_EXECUTE {
+    if ctx.args.relocatable {
         return;
     }
 
