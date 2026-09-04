@@ -1301,7 +1301,7 @@ fn redirect_symbols_to_replacements<E: Arch>(ctx: &mut Context<E>) {
 /// Coalesces the Objective-C reference records the compiler emits
 /// once per object: __objc_selrefs entries naming the same selector,
 /// __objc_classrefs entries naming the same class, and identical
-/// __cfstring constants. ld64 keeps one of each in a -r output as in
+/// __cfstring constants. ld64 keeps one of each, in a -r output as in
 /// a final link (NetNewsWire's RSCore prelink had 56 class references
 /// where ld-prime's has 30, its debug dylib 592 selector references
 /// too many); the first copy wins and the rest redirect to it, like
@@ -3012,7 +3012,14 @@ pub fn merge_objc_categories<E: Arch>(ctx: &mut Context<E>) {
                 };
                 fields.push(DataField::Ptr(r));
             }
-            let blob = new_blob(ctx, "__objc_const", fields);
+            // The new record goes where the old one was: Swift puts a
+            // class's ro data in __objc_data (ld64's output keeps
+            // __DATA__TtC... there), clang's in __objc_const.
+            let sect: &'static str = match ctx.hdr_of(&ctx.isecs[ro.0 as usize]).sectname() {
+                "__objc_data" => "__objc_data",
+                _ => "__objc_const",
+            };
+            let blob = new_blob(ctx, sect, fields);
             let isec = ro.0 as usize;
             if ro.1 == 0 && ctx.isecs[isec].size as u64 == record_len {
                 // The record was a subsection of its own: replace it, so
