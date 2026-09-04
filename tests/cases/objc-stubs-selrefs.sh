@@ -28,6 +28,10 @@ EOF
 
 $CC --ld-path=$mold -mmacosx-version-min=13.0 -o $t/exe $t/a.o -framework Foundation
 $t/exe | grep -q '^42 responds$'
+# One slot per selector, as ld64 keeps it: the stub for
+# componentsToRegister loads the compiler's selector reference rather
+# than a synthesized slot of its own.
+otool -l $t/exe | grep -A3 'sectname __objc_selrefs' | grep -q 'size 0x0000000000000008'
 
 otool -l $t/exe > $t/lc
 [ "$(grep -c 'sectname __objc_selrefs' $t/lc)" = 1 ]

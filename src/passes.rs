@@ -1959,6 +1959,48 @@ pub fn scan_objc_stubs<E: Arch>(ctx: &mut Context<E>) {
     if let Some(id) = ctx.objc_msgsend_sym {
         add_got(ctx, id);
     }
+
+    // A stub loads an input's selector reference when one names its
+    // selector, as ld64's does; only selectors no input refers to get
+    // a slot in the __objc_selrefs tail (NetNewsWire's debug dylib
+    // had 155 such duplicate slots).
+    let mut slot_of: hashbrown::HashMap<&'static [u8], u32> = hashbrown::HashMap::new();
+    for i in 0..ctx.isecs.len() {
+        let isec = &ctx.isecs[i];
+        if !isec.is_alive()
+            || isec.obj == u32::MAX
+            || isec.replacement != crate::input_sections::NO_REPLACEMENT
+            || isec.size != 8
+        {
+            continue;
+        }
+        let h = ctx.hdr_of(isec);
+        if h.sectname() != "__objc_selrefs" || h.section_type() != S_LITERAL_POINTERS {
+            continue;
+        }
+        let Some(target) = objc_pointer_at(ctx, i as u32, 0) else { continue };
+        let Some((name, 0)) = objc_ref_location(ctx, target) else { continue };
+        let data = ctx.isecs[name as usize].data();
+        let end = data.iter().position(|&b| b == 0).unwrap_or(data.len());
+        slot_of.entry(&data[..end]).or_insert(i as u32);
+    }
+    let mut tail = 0u32;
+    ctx.objc_stub_selref = Vec::with_capacity(ctx.objc_stubs.len());
+    ctx.objc_stub_tail = Vec::with_capacity(ctx.objc_stubs.len());
+    for i in 0..ctx.objc_stubs.len() {
+        match slot_of.get(ctx.objc_stubs[i].1.as_bytes()) {
+            Some(&slot) => {
+                ctx.objc_stub_selref.push(slot);
+                ctx.objc_stub_tail.push(u32::MAX);
+            }
+            None => {
+                ctx.objc_stub_selref.push(u32::MAX);
+                ctx.objc_stub_tail.push(tail);
+                tail += 1;
+            }
+        }
+    }
+    ctx.objc_tail_slots = tail as usize;
 }
 
 /// Personality functions are referenced from __unwind_info through the
@@ -2371,6 +2413,12 @@ pub fn convert_objc_method_lists<E: Arch>(ctx: &mut Context<E>) {
     ctx.synthetic_hdrs.push(hdr);
     let shndx = (ctx.synthetic_hdrs.len() - 1) as u32;
     let mut extra_of: hashbrown::HashMap<u32, usize> = hashbrown::HashMap::new();
+    let stub_of: hashbrown::HashMap<Vec<u8>, usize> = ctx
+        .objc_stubs
+        .iter()
+        .enumerate()
+        .map(|(i, (_, sel))| (sel.as_bytes().to_vec(), i))
+        .collect();
     let mut repoint: hashbrown::HashMap<u32, u32> = hashbrown::HashMap::new();
     let mut offset: u64 = 0;
     for list in lists {
@@ -2398,11 +2446,21 @@ pub fn convert_objc_method_lists<E: Arch>(ctx: &mut Context<E>) {
             let name = match selref_of.get(&sel) {
                 Some(&slot) => ObjcRef::Isec(slot, 0),
                 None => {
-                    let n = *extra_of.entry(sel).or_insert_with(|| {
-                        ctx.objc_extra_selrefs.push(sel);
-                        ctx.objc_extra_selrefs.len() - 1
-                    });
-                    ObjcRef::TailSelref(ctx.objc_stubs.len() + n)
+                    // A selector stub's slot serves the same selector
+                    // (ld64 keeps one slot per selector); else a new
+                    // one in the tail.
+                    let data = ctx.isecs[sel as usize].data();
+                    let end = data.iter().position(|&b| b == 0).unwrap_or(data.len());
+                    match stub_of.get(&data[..end]) {
+                        Some(&i) => ObjcRef::TailSelref(i),
+                        None => {
+                            let n = *extra_of.entry(sel).or_insert_with(|| {
+                                ctx.objc_extra_selrefs.push(sel);
+                                ctx.objc_extra_selrefs.len() - 1
+                            });
+                            ObjcRef::TailSelref(ctx.objc_stubs.len() + n)
+                        }
+                    }
                 }
             };
             methods.push(ObjcMethod { name, types, imp });
@@ -3825,7 +3883,7 @@ pub fn create_output_sections<E: Arch>(ctx: &mut Context<E>) {
             idx
         };
         let methname_size = ctx.objc_methname_data.len() as u64;
-        let selrefs_size = (ctx.objc_stubs.len() + ctx.objc_extra_selrefs.len()) as u64 * 8;
+        let selrefs_size = (ctx.objc_tail_slots + ctx.objc_extra_selrefs.len()) as u64 * 8;
         if methname_size > 0 {
             tail_section(ctx, "__TEXT", "__objc_methname", S_CSTRING_LITERALS, 0, Tail::ObjcMethname, methname_size);
         }
@@ -5180,9 +5238,12 @@ fn build_rebase_info<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
         }
     }
 
-    // Selector reference slots hold pointers into __objc_methname.
+    // Synthesized selector reference slots hold pointers into
+    // __objc_methname (a reused input slot has its own relocation).
     for i in 0..ctx.objc_stubs.len() + ctx.objc_extra_selrefs.len() {
-        locs.push(ctx.objc_selref_addr(i));
+        if !ctx.objc_stub_reuses_selref(i) {
+            locs.push(ctx.objc_selref_addr(i));
+        }
     }
     // Pointer fields of the synthesized Objective-C records.
     for (addr, _) in data_blob_pointers(ctx) {
@@ -5500,7 +5561,9 @@ fn collect_fixups<E: Arch>(ctx: &Context<E>) -> Vec<(u64, Option<crate::symbol::
         }
     }
     for i in 0..ctx.objc_stubs.len() + ctx.objc_extra_selrefs.len() {
-        fixups.push((ctx.objc_selref_addr(i), None, 0));
+        if !ctx.objc_stub_reuses_selref(i) {
+            fixups.push((ctx.objc_selref_addr(i), None, 0));
+        }
     }
     for (addr, _) in data_blob_pointers(ctx) {
         fixups.push((addr, None, 0));
@@ -6126,10 +6189,14 @@ fn copy_chunk<E: Arch>(ctx: &Context<E>, chunk: &Chunk, buf: &mut [u8]) {
                 }
                 Tail::ObjcSelrefs => {
                     for i in 0..ctx.objc_stubs.len() {
+                        if ctx.objc_stub_reuses_selref(i) {
+                            continue;
+                        }
+                        let slot = ctx.objc_stub_tail[i] as usize;
                         let val = ctx.objc_methname_addr(i);
-                        tail[i * 8..i * 8 + 8].copy_from_slice(&val.to_le_bytes());
+                        tail[slot * 8..slot * 8 + 8].copy_from_slice(&val.to_le_bytes());
                     }
-                    let n = ctx.objc_stubs.len();
+                    let n = ctx.objc_tail_slots;
                     for (j, &name) in ctx.objc_extra_selrefs.iter().enumerate() {
                         let val = ctx.isec_addr(name as usize);
                         tail[(n + j) * 8..(n + j) * 8 + 8].copy_from_slice(&val.to_le_bytes());

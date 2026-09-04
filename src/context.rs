@@ -68,6 +68,14 @@ pub struct Context<E: Arch> {
     /// no input references: the __objc_methname subsection each points
     /// at. They follow the stubs' slots in the __objc_selrefs tail.
     pub objc_extra_selrefs: Vec<u32>,
+    /// Per selector stub: an input __objc_selrefs slot for its selector
+    /// that the stub loads instead of a synthesized one (u32::MAX for
+    /// none), and its slot's index in the tail when it has one.
+    pub objc_stub_selref: Vec<u32>,
+    pub objc_stub_tail: Vec<u32>,
+    /// The number of stub slots in the __objc_selrefs tail; the extra
+    /// selector references follow them.
+    pub objc_tail_slots: usize,
     /// The method lists rewritten in relative form, with their synthetic
     /// subsections in the __objc_methlist chunk.
     pub objc_methlists: Vec<crate::passes::ObjcMethList>,
@@ -199,6 +207,9 @@ impl<E: Arch> Context<E> {
             got_syms: Vec::new(),
             objc_classref_slots: Vec::new(),
             objc_extra_selrefs: Vec::new(),
+            objc_stub_selref: Vec::new(),
+            objc_stub_tail: Vec::new(),
+            objc_tail_slots: 0,
             objc_methlists: Vec::new(),
             data_blobs: Vec::new(),
             extra_local_syms: Vec::new(),
@@ -246,11 +257,32 @@ impl<E: Arch> Context<E> {
         }
     }
 
-    /// Address of the synthesized selector reference slot for objc stub
-    /// `i`: the tail of the __objc_selrefs output section.
+    /// Address of the selector reference slot for objc stub `i` (or,
+    /// past the stubs, extra selector reference `i - stubs`): an
+    /// input's slot the stub reuses, else its slot in the tail of the
+    /// __objc_selrefs output section.
     pub fn objc_selref_addr(&self, i: usize) -> u64 {
-        let chunk = &self.chunks[self.objc_selrefs_chunk];
-        chunk.hdr.addr + chunk.tail_off + i as u64 * 8
+        // (There is no tail chunk when every stub reuses a slot and no
+        // extra reference exists.)
+        let tail = |slot: usize| {
+            let chunk = &self.chunks[self.objc_selrefs_chunk];
+            chunk.hdr.addr + chunk.tail_off + slot as u64 * 8
+        };
+        if i < self.objc_stubs.len() {
+            let reused = self.objc_stub_selref[i];
+            if reused != u32::MAX {
+                return self.isec_addr(reused as usize);
+            }
+            tail(self.objc_stub_tail[i] as usize)
+        } else {
+            tail(self.objc_tail_slots + (i - self.objc_stubs.len()))
+        }
+    }
+
+    /// True if selector stub `i` loads an input's selector reference
+    /// rather than a synthesized slot.
+    pub fn objc_stub_reuses_selref(&self, i: usize) -> bool {
+        self.objc_stub_selref.get(i).is_some_and(|&s| s != u32::MAX)
     }
 
     /// Address of the synthesized selector name string for objc stub
