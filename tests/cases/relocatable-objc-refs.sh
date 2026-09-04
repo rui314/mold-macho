@@ -34,3 +34,16 @@ int main() {
 EOF2
 $CC --ld-path=$mold -o $t/exe $t/main.o $t/r.o -framework Foundation
 $t/exe
+
+# A final link coalesces the selector references and CFString
+# constants the same way (NetNewsWire's debug dylib had 592 selector
+# references more than ld-prime's); class references become GOT
+# slots there instead.
+$CC --ld-path=$mold -o $t/exe2 $t/main.o $t/1.o $t/2.o -framework Foundation
+$t/exe2
+# Every selector reference slot names a different selector string.
+dyld_info -fixups $t/exe2 | grep '__objc_selrefs' | awk '{print $NF}' > $t/seltargets
+[ "$(wc -l < $t/seltargets)" = "$(sort -u $t/seltargets | wc -l)" ]
+# "shared", "only1" and "only2" once each (main.o's copies of the
+# latter two fold as well): three constants.
+otool -l $t/exe2 | grep -A3 'sectname __cfstring' | grep -q 'size 0x0000000000000060'

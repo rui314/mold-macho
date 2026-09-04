@@ -153,6 +153,7 @@ pub fn link<E: Arch>(cmdline: &[String], diag: &Diagnostics) -> Result<i32, Stri
     {
         let tt = std::time::Instant::now();
         passes::merge_literals(&mut ctx);
+        passes::coalesce_objc_refs(&mut ctx);
         if std::env::var_os("MOLD_TIMING").is_some() {
             eprintln!("    merge_literals {:?}", tt.elapsed());
         }

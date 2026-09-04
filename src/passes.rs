@@ -1303,8 +1303,10 @@ fn redirect_symbols_to_replacements<E: Arch>(ctx: &mut Context<E>) {
 /// __objc_classrefs entries naming the same class, and identical
 /// __cfstring constants. ld64 keeps one of each in a -r output as in
 /// a final link (NetNewsWire's RSCore prelink had 56 class references
-/// where ld-prime's has 30); the first copy wins and the rest redirect
-/// to it, like merged literals.
+/// where ld-prime's has 30, its debug dylib 592 selector references
+/// too many); the first copy wins and the rest redirect to it, like
+/// merged literals. A final link leaves class references to
+/// fold_objc_classrefs, which turns them into GOT slots.
 pub fn coalesce_objc_refs<E: Arch>(ctx: &mut Context<E>) {
     // What a pointer relocation refers to: a place in a subsection
     // (where identical content has already been merged), or a symbol
@@ -1350,6 +1352,7 @@ pub fn coalesce_objc_refs<E: Arch>(ctx: &mut Context<E>) {
             E::classify_reloc(rel.r_type) == RelocClass::Plain && rel.size == 8 && !rel.is_pcrel && !rel.is_subtracted
         };
         let key = match h.sectname() {
+            "__objc_classrefs" if !ctx.args.relocatable => continue,
             "__objc_selrefs" | "__objc_classrefs" => {
                 if isec.size != 8 || rels.len() != 1 || !plain_ptr(&rels[0]) {
                     continue;
