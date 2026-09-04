@@ -117,6 +117,17 @@ pub struct DylibFile {
     /// command line: a hint, so ld64 gives it a load command only if
     /// something binds to it.
     pub is_autolinked: bool,
+    /// Loaded because a dylib on the command line (or auto-linked)
+    /// re-exports it and it lives in a public location: symbols found
+    /// through the re-export bind to it directly, and it gets a load
+    /// command after the explicitly named libraries if anything binds
+    /// to it. Private re-exported libraries are not loaded this way;
+    /// their symbols bind to the re-exporting dylib.
+    pub is_implicit: bool,
+    /// Load-command order: the sequence in which command-line and
+    /// auto-linked libraries were named (u32::MAX for implicit ones,
+    /// which follow, sorted by install name).
+    pub load_order: u32,
     /// MH_DEAD_STRIPPABLE_DYLIB: drop the load command whenever no
     /// symbol binds to this dylib, even without -dead_strip_dylibs.
     pub is_dead_strippable: bool,
@@ -1625,6 +1636,114 @@ pub fn get_fat_slice<E: Arch>(
 /// exported symbols. The defined-external range of the symbol table
 /// serves as the export list; the authoritative source is the export
 /// trie, but the symbol table matches it for the dylibs we link against.
+/// Whether a re-exported dylib at this install path may be bound to
+/// directly: ld64's "public location" rule. /usr/lib/lib*.dylib (not
+/// /usr/lib/system/) and a top-level /System/Library/Frameworks
+/// framework are public; a private framework, a sub-framework or a
+/// libSystem component is not, and its symbols bind to the dylib that
+/// re-exports it (AppKit re-exports Foundation, public, and
+/// UIFoundation, private: ld-prime binds NSHomeDirectory to Foundation
+/// and NSAttachmentAttributeName to AppKit).
+fn is_public_location(install_name: &str) -> bool {
+    if let Some(rest) = install_name.strip_prefix("/usr/lib/") {
+        return !rest.contains('/');
+    }
+    if let Some(rest) = install_name.strip_prefix("/System/Library/Frameworks/") {
+        // Only a top-level framework: X.framework/... with no further
+        // Frameworks directory in the path.
+        if let Some(dot) = rest.find(".framework/") {
+            return !rest[dot + ".framework/".len()..].contains(".framework/");
+        }
+    }
+    false
+}
+
+/// Loads the libraries a dylib re-exports. A public one becomes an
+/// implicit dylib of its own (its symbols bind to it), recursively
+/// loading what it re-exports in turn; a private one's exports are
+/// merged into `exports`/`tlv_exports` as the re-exporting dylib's,
+/// and its own re-exports are walked the same way.
+fn load_reexports<E: Arch>(
+    ctx: &mut Context<E>,
+    reexports: Vec<(String, String, Vec<String>)>,
+    parent: &str,
+    exports: &mut hashbrown::HashSet<&'static str>,
+    tlv_exports: &mut hashbrown::HashSet<&'static str>,
+) {
+    let mut queue = reexports;
+    let mut visited = std::collections::HashSet::new();
+    while let Some((name, loader_dir, loader_rpaths)) = queue.pop() {
+        if !visited.insert(name.clone()) {
+            continue;
+        }
+        let public = !ctx.args.no_implicit_dylibs && is_public_location(&name);
+        // A library already in the link, matched by install name
+        // (libXCTestSwiftSupport re-exports @rpath/XCTest.framework/...,
+        // which its own rpaths cannot reach but -framework XCTest has
+        // loaded): its symbols bind to it if it is public, else count
+        // as this dylib's.
+        if let Some(loaded) = ctx.dylibs.iter().find(|d| d.install_name == name) {
+            if !public {
+                exports.extend(loaded.exports.iter().copied());
+                tlv_exports.extend(loaded.tlv_exports.iter().copied());
+            }
+            continue;
+        }
+        let Some(dep) = resolve_dylib_ref(ctx, &name, &loader_dir, &loader_rpaths) else {
+            crate::warn!(ctx, "{}: reexported library not found: {}", parent, name);
+            continue;
+        };
+        match crate::filetype::get_file_type(dep) {
+            crate::filetype::FileType::Tapi => {
+                if public {
+                    let idx = parse_dylib(ctx, dep);
+                    ctx.dylibs[idx].is_implicit = true;
+                    continue;
+                }
+                let mut dep_tbd = tapi::parse_cached(&ctx.diag, dep);
+                interpret_ld_symbols(ctx, &mut dep_tbd);
+                tlv_exports.extend(dep_tbd.tlv_exports.iter().copied());
+                exports.extend(dep_tbd.tlv_exports);
+                exports.extend(dep_tbd.exports);
+                exports.extend(dep_tbd.weak_exports);
+                for dep_name in dep_tbd.external_reexports {
+                    queue.push((dep_name.to_string(), dir_of(&dep.name), Vec::new()));
+                }
+            }
+            crate::filetype::FileType::Dylib => {
+                if public {
+                    let idx = parse_dylib_binary(ctx, dep);
+                    ctx.dylibs[idx].is_implicit = true;
+                    continue;
+                }
+                let (dep_exports, dep_tlvs, dep_reexports, dep_rpaths) =
+                    dylib_binary_exports(&ctx.diag, dep);
+                exports.extend(dep_exports);
+                tlv_exports.extend(dep_tlvs);
+                for dep_name in dep_reexports {
+                    queue.push((dep_name, dir_of(&dep.name), dep_rpaths.clone()));
+                }
+            }
+            crate::filetype::FileType::Fat => {
+                let slice = get_fat_slice(ctx, dep);
+                if public {
+                    let idx = parse_dylib_binary(ctx, slice);
+                    ctx.dylibs[idx].is_implicit = true;
+                    continue;
+                }
+                let (dep_exports, dep_tlvs, dep_reexports, dep_rpaths) =
+                    dylib_binary_exports(&ctx.diag, slice);
+                exports.extend(dep_exports);
+                tlv_exports.extend(dep_tlvs);
+                for dep_name in dep_reexports {
+                    queue.push((dep_name, dir_of(&dep.name), dep_rpaths.clone()));
+                }
+            }
+            _ => crate::warn!(ctx, "{}: unsupported reexported library: {}", parent, name),
+        }
+    }
+}
+
 pub fn parse_dylib_binary<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile) -> usize {
     let data = mf.data;
     let hdr = MachHeader::read_from(data);
@@ -1719,56 +1838,14 @@ pub fn parse_dylib_binary<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile
         }
     }
 
-    // A dylib's clients see its reexported libraries' exports through
-    // it; merge them in, following the chain. Each queue entry keeps
-    // the referencing dylib's directory and rpaths, since @loader_path
-    // and @rpath in an install name are relative to the referrer.
-    let mut queue: Vec<(String, String, Vec<String>)> = reexports
+    // Each re-exported library keeps the referencing dylib's directory
+    // and rpaths, since @loader_path and @rpath in an install name are
+    // relative to the referrer.
+    let reexports: Vec<(String, String, Vec<String>)> = reexports
         .into_iter()
         .map(|name| (name, dir_of(&mf.name), rpaths.clone()))
         .collect();
-    let mut visited = std::collections::HashSet::new();
-    while let Some((name, loader_dir, loader_rpaths)) = queue.pop() {
-        if !visited.insert(name.clone()) {
-            continue;
-        }
-        // A library already in the link, matched by install name
-        // (libXCTestSwiftSupport re-exports @rpath/XCTest.framework/...,
-        // which its own rpaths cannot reach but -framework XCTest has
-        // loaded): its exports count, no file search needed.
-        if let Some(loaded) = ctx.dylibs.iter().find(|d| d.install_name == name) {
-            exports.extend(loaded.exports.iter().copied());
-            tlv_exports.extend(loaded.tlv_exports.iter().copied());
-            continue;
-        }
-        let Some(dep) = resolve_dylib_ref(ctx, &name, &loader_dir, &loader_rpaths) else {
-            crate::warn!(ctx, "{}: reexported library not found: {}", mf.name, name);
-            continue;
-        };
-        match crate::filetype::get_file_type(dep) {
-            crate::filetype::FileType::Tapi => {
-                let mut dep_tbd = tapi::parse_cached(&ctx.diag, dep);
-                interpret_ld_symbols(ctx, &mut dep_tbd);
-                tlv_exports.extend(dep_tbd.tlv_exports.iter().copied());
-                exports.extend(dep_tbd.tlv_exports);
-                exports.extend(dep_tbd.exports);
-                exports.extend(dep_tbd.weak_exports);
-                for dep_name in dep_tbd.external_reexports {
-                    queue.push((dep_name.to_string(), dir_of(&dep.name), Vec::new()));
-                }
-            }
-            crate::filetype::FileType::Dylib => {
-                let (dep_exports, dep_tlvs, dep_reexports, dep_rpaths) =
-                    dylib_binary_exports(&ctx.diag, dep);
-                exports.extend(dep_exports);
-                tlv_exports.extend(dep_tlvs);
-                for dep_name in dep_reexports {
-                    queue.push((dep_name, dir_of(&dep.name), dep_rpaths.clone()));
-                }
-            }
-            _ => crate::warn!(ctx, "{}: unsupported reexported library: {}", mf.name, name),
-        }
-    }
+    load_reexports(ctx, reexports, &mf.name, &mut exports, &mut tlv_exports);
 
     let priority = ctx.next_priority();
     add_dylib(
@@ -1785,6 +1862,8 @@ pub fn parse_dylib_binary<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile
             is_reexported: false,
             is_needed: false,
             is_autolinked: false,
+            is_implicit: false,
+            load_order: u32::MAX,
             is_dead_strippable: hdr.flags & MH_DEAD_STRIPPABLE_DYLIB != 0,
             is_app_extension_safe: hdr.flags & MH_APP_EXTENSION_SAFE != 0,
             sub_framework,
@@ -1979,6 +2058,8 @@ pub fn parse_bundle_loader<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFil
             is_reexported: false,
             is_needed: false,
             is_autolinked: false,
+            is_implicit: false,
+            load_order: u32::MAX,
             is_dead_strippable: false,
             is_app_extension_safe: true,
             sub_framework: None,
@@ -2213,39 +2294,12 @@ pub fn parse_dylib<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile) -> us
         tbd.tlv_exports.into_iter().collect();
     exports.extend(tlv_exports.iter().copied());
 
-    // A dylib's reexported libraries resolve through it in the two-level
-    // namespace, so their exports count as this dylib's. Reexports not
-    // inlined in this .tbd are separate files, possibly reexporting
-    // further.
-    let mut queue: Vec<(String, String)> = tbd
+    let reexports: Vec<(String, String, Vec<String>)> = tbd
         .external_reexports
         .into_iter()
-        .map(|name| (name.to_string(), dir_of(&mf.name)))
+        .map(|name| (name.to_string(), dir_of(&mf.name), Vec::new()))
         .collect();
-    let mut visited = std::collections::HashSet::new();
-    while let Some((name, loader_dir)) = queue.pop() {
-        if !visited.insert(name.clone()) {
-            continue;
-        }
-        if let Some(loaded) = ctx.dylibs.iter().find(|d| d.install_name == name) {
-            exports.extend(loaded.exports.iter().copied());
-            tlv_exports.extend(loaded.tlv_exports.iter().copied());
-            continue;
-        }
-        let Some(dep) = resolve_dylib_ref(ctx, &name, &loader_dir, &[]) else {
-            crate::warn!(ctx, "{}: reexported library not found: {}", mf.name, name);
-            continue;
-        };
-        let mut dep_tbd = tapi::parse_cached(&ctx.diag, dep);
-        interpret_ld_symbols(ctx, &mut dep_tbd);
-        exports.extend(dep_tbd.exports);
-        exports.extend(dep_tbd.weak_exports);
-        tlv_exports.extend(dep_tbd.tlv_exports.iter().copied());
-        exports.extend(dep_tbd.tlv_exports);
-        for dep_name in dep_tbd.external_reexports {
-            queue.push((dep_name.to_string(), dir_of(&dep.name)));
-        }
-    }
+    load_reexports(ctx, reexports, &mf.name, &mut exports, &mut tlv_exports);
 
     let priority = ctx.next_priority();
     add_dylib(
@@ -2262,6 +2316,8 @@ pub fn parse_dylib<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile) -> us
             is_reexported: false,
             is_needed: false,
             is_autolinked: false,
+            is_implicit: false,
+            load_order: u32::MAX,
             is_dead_strippable: false,
             is_app_extension_safe: !tbd.not_app_extension_safe,
             sub_framework: None,

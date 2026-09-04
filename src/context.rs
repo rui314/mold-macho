@@ -56,6 +56,9 @@ pub struct Context<E: Arch> {
     /// __objc_classrefs entries (see fold_objc_classrefs); their osec
     /// is set once the __got chunk exists.
     pub objc_classref_slots: Vec<u32>,
+    /// Sequence number of the next dylib named on the command line or
+    /// by an auto-link option; orders their load commands.
+    pub dylib_load_seq: u32,
     /// Thread-local symbols with a __thread_ptrs slot, in slot order.
     pub thread_ptr_syms: Vec<SymbolId>,
     /// _objc_msgSend$<selector> symbols, in __objc_stubs entry order,
@@ -165,6 +168,7 @@ impl<E: Arch> Context<E> {
             stub_syms: Vec::new(),
             got_syms: Vec::new(),
             objc_classref_slots: Vec::new(),
+            dylib_load_seq: 0,
             thread_ptr_syms: Vec::new(),
             objc_stubs: Vec::new(),
             objc_msgsend_sym: None,

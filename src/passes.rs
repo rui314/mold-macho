@@ -183,15 +183,28 @@ fn collect_file<E: Arch>(
         FileType::Dylib if ctx.args.relocatable => {
             crate::warn!(ctx, "{}, ignoring unexpected dylib file", mf.name);
         }
-        FileType::Tapi => {
-            let idx = t!("parse_dylib(tbd)", input_files::parse_dylib(ctx, mf));
-            ctx.dylibs[idx].is_weak |= weak;
-            ctx.dylibs[idx].is_reexported |= reexport;
-        }
-        FileType::Dylib => {
-            let idx = input_files::parse_dylib_binary(ctx, mf);
-            ctx.dylibs[idx].is_weak |= weak;
-            ctx.dylibs[idx].is_reexported |= reexport;
+        FileType::Tapi | FileType::Dylib => {
+            let first = ctx.dylibs.len();
+            let idx = if get_file_type(mf) == FileType::Tapi {
+                t!("parse_dylib(tbd)", input_files::parse_dylib(ctx, mf))
+            } else {
+                input_files::parse_dylib_binary(ctx, mf)
+            };
+            // The dylibs loaded during the parse beyond this one are the
+            // public libraries it re-exports; a weak parent's are weak.
+            for d in &mut ctx.dylibs[first..] {
+                d.is_weak |= weak;
+            }
+            let dylib = &mut ctx.dylibs[idx];
+            dylib.is_weak |= weak;
+            dylib.is_reexported |= reexport;
+            // Named here (or auto-linked): no longer merely implicit,
+            // and ordered by naming sequence.
+            dylib.is_implicit = false;
+            if dylib.load_order == u32::MAX {
+                dylib.load_order = ctx.dylib_load_seq;
+                ctx.dylib_load_seq += 1;
+            }
         }
         FileType::Archive => {
             // Every member is parsed eagerly; whether it is *live* -
@@ -1597,11 +1610,11 @@ pub fn dead_strip_dylibs<E: Arch>(ctx: &mut Context<E>) {
     // frameworks and Swift overlays nothing in it binds to, and
     // ld-prime lists none of them.
     let strippable = |dylib: &crate::input_files::DylibFile| {
-        ctx.args.dead_strip_dylibs || dylib.is_dead_strippable || dylib.is_autolinked
+        ctx.args.dead_strip_dylibs
+            || dylib.is_dead_strippable
+            || dylib.is_autolinked
+            || dylib.is_implicit
     };
-    if !ctx.dylibs.iter().any(|d| strippable(d)) {
-        return;
-    }
 
     let mut used = vec![false; ctx.dylibs.len()];
     for (i, dylib) in ctx.dylibs.iter().enumerate() {
@@ -1617,12 +1630,9 @@ pub fn dead_strip_dylibs<E: Arch>(ctx: &mut Context<E>) {
 
     let mut remap = vec![usize::MAX; ctx.dylibs.len()];
     let old = std::mem::take(&mut ctx.dylibs);
-    for (i, mut dylib) in old.into_iter().enumerate() {
+    for (i, dylib) in old.into_iter().enumerate() {
         if used[i] {
             remap[i] = ctx.dylibs.len();
-            if !dylib.is_bundle_loader {
-                dylib.dylib_idx = crate::input_files::next_dylib_ordinal(ctx);
-            }
             ctx.dylibs.push(dylib);
         }
     }
@@ -1633,6 +1643,20 @@ pub fn dead_strip_dylibs<E: Arch>(ctx: &mut Context<E>) {
                 sym.set_origin(Origin::Dylib(remap[idx as usize] as u32));
             }
         }
+    }
+
+    // Ordinals (and so the load commands) in ld64's order: the
+    // libraries named on the command line or by auto-link options in
+    // naming order, then the implicitly loaded ones by install name.
+    let mut order: Vec<usize> = (0..ctx.dylibs.len()).filter(|&i| !ctx.dylibs[i].is_bundle_loader).collect();
+    order.sort_by(|&a, &b| {
+        let (da, db) = (&ctx.dylibs[a], &ctx.dylibs[b]);
+        da.load_order
+            .cmp(&db.load_order)
+            .then_with(|| da.install_name.cmp(&db.install_name))
+    });
+    for (ordinal, &i) in order.iter().enumerate() {
+        ctx.dylibs[i].dylib_idx = ordinal as i32 + 1;
     }
 }
 

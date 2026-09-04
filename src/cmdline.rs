@@ -124,6 +124,10 @@ pub struct Args {
     /// sections (__const, __cfstring, the ObjC lists, __got ...) go in
     /// a __DATA_CONST segment. ld64's default is on.
     pub data_const: bool,
+    /// -no_implicit_dylibs: do not bind through a re-export to the
+    /// defining dylib (and add a load command for it); bind to the
+    /// re-exporting dylib named on the command line instead.
+    pub no_implicit_dylibs: bool,
     /// Compute a content-hash LC_UUID (on by default; -no_uuid leaves
     /// it zeroed - dyld refuses executables without the load command).
     pub uuid: bool,
@@ -264,6 +268,7 @@ impl Default for Args {
             data_in_code_info: true,
             init_offsets: false,
             data_const: true,
+            no_implicit_dylibs: false,
             uuid: true,
             suppress_warnings: false,
             undefined_dynamic_lookup: false,
@@ -668,6 +673,7 @@ pub fn parse_args(diag: &Diagnostics, cmdline: &[String]) -> Args {
             "-init_offsets" => args.init_offsets = true,
             "-data_const" => args.data_const = true,
             "-no_data_const" => args.data_const = false,
+            "-no_implicit_dylibs" => args.no_implicit_dylibs = true,
             "-no_function_starts" => args.function_starts = false,
             "-data_in_code_info" => args.data_in_code_info = true,
             "-no_data_in_code_info" => args.data_in_code_info = false,
