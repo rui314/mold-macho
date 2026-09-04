@@ -1257,27 +1257,133 @@ pub fn merge_literals<E: Arch>(ctx: &mut Context<E>) {
         }
     }
 
-    // Point every symbol defined in a merged-away copy at the surviving
-    // one - mold-rust makes the merged section's fragment the symbol's
-    // origin - so a symbol's address never follows a replacement chain.
-    // The copies are identical, so the symbol's offset is unchanged.
-    // (Section-relative relocations still resolve through the chain in
-    // isec_addr.)
-    {
-        use rayon::prelude::*;
-        let isecs = &ctx.isecs;
-        ctx.symtab.syms.par_iter_mut().for_each(|sym| {
-            if let Some(i) = sym.isec() {
-                let mut r = i as usize;
-                while isecs[r].replacement != crate::input_sections::NO_REPLACEMENT {
-                    r = isecs[r].replacement as usize;
-                }
-                if r != i as usize {
-                    sym.set_isec(Some(r as u32));
+    redirect_symbols_to_replacements(ctx);
+}
+
+/// Points every symbol defined in a merged-away subsection at the
+/// surviving one - mold-rust makes the merged section's fragment the
+/// symbol's origin - so a symbol's address never follows a replacement
+/// chain. The copies are identical, so the symbol's offset is
+/// unchanged. (Section-relative relocations still resolve through the
+/// chain in isec_addr.)
+fn redirect_symbols_to_replacements<E: Arch>(ctx: &mut Context<E>) {
+    use rayon::prelude::*;
+    let isecs = &ctx.isecs;
+    ctx.symtab.syms.par_iter_mut().for_each(|sym| {
+        if let Some(i) = sym.isec() {
+            let mut r = i as usize;
+            while isecs[r].replacement != crate::input_sections::NO_REPLACEMENT {
+                r = isecs[r].replacement as usize;
+            }
+            if r != i as usize {
+                sym.set_isec(Some(r as u32));
+            }
+        }
+    });
+}
+
+/// Coalesces the Objective-C reference records the compiler emits
+/// once per object: __objc_selrefs entries naming the same selector,
+/// __objc_classrefs entries naming the same class, and identical
+/// __cfstring constants. ld64 keeps one of each in a -r output as in
+/// a final link (NetNewsWire's RSCore prelink had 56 class references
+/// where ld-prime's has 30); the first copy wins and the rest redirect
+/// to it, like merged literals.
+pub fn coalesce_objc_refs<E: Arch>(ctx: &mut Context<E>) {
+    // What a pointer relocation refers to: a place in a subsection
+    // (where identical content has already been merged), or a symbol
+    // defined elsewhere.
+    #[derive(Hash, PartialEq, Eq)]
+    enum Target {
+        At(usize, i64),
+        Sym(crate::symbol::SymbolId, i64),
+    }
+    #[derive(Hash, PartialEq, Eq)]
+    enum Key {
+        Sel(Target),
+        Class(crate::symbol::SymbolId),
+        CfString(Vec<u8>, Vec<(u32, Target)>),
+    }
+    let place = |ctx: &Context<E>, obj: usize, rel: &crate::input_sections::Reloc| -> Target {
+        match rel.target() {
+            RelocTarget::Section(t) => Target::At(ctx.resolve_isec(t as usize), rel.addend),
+            RelocTarget::Sym(idx) => {
+                let sym_id = ctx.objs[obj].syms[idx as usize];
+                let sym = &ctx.symtab[sym_id];
+                match sym.isec() {
+                    Some(isec) => Target::At(ctx.resolve_isec(isec as usize), sym.value as i64 + rel.addend),
+                    None => Target::Sym(sym_id, rel.addend),
                 }
             }
-        });
+        }
+    };
+    let mut first: hashbrown::HashMap<Key, u32> = hashbrown::HashMap::new();
+    let mut folds: Vec<(usize, u32)> = Vec::new();
+    for i in 0..ctx.isecs.len() {
+        let isec = &ctx.isecs[i];
+        if !isec.is_alive() || isec.replacement != crate::input_sections::NO_REPLACEMENT || isec.obj == u32::MAX {
+            continue;
+        }
+        let h = ctx.hdr_of(isec);
+        if h.segname() != "__DATA" {
+            continue;
+        }
+        let obj = isec.obj as usize;
+        let rels = ctx.isec_relocs(i);
+        let plain_ptr = |rel: &crate::input_sections::Reloc| {
+            E::classify_reloc(rel.r_type) == RelocClass::Plain && rel.size == 8 && !rel.is_pcrel && !rel.is_subtracted
+        };
+        let key = match h.sectname() {
+            "__objc_selrefs" | "__objc_classrefs" => {
+                if isec.size != 8 || rels.len() != 1 || !plain_ptr(&rels[0]) {
+                    continue;
+                }
+                if h.sectname() == "__objc_classrefs" {
+                    let RelocTarget::Sym(idx) = rels[0].target() else { continue };
+                    if rels[0].addend != 0 {
+                        continue;
+                    }
+                    Key::Class(ctx.objs[obj].syms[idx as usize])
+                } else {
+                    Key::Sel(place(ctx, obj, &rels[0]))
+                }
+            }
+            "__cfstring" => {
+                if isec.size != 32 || !rels.iter().all(plain_ptr) {
+                    continue;
+                }
+                let mut targets: Vec<(u32, Target)> =
+                    rels.iter().map(|rel| (rel.offset, place(ctx, obj, rel))).collect();
+                targets.sort_by_key(|t| t.0);
+                // The relocated fields hold per-object addends (x86-64
+                // embeds the target's address); the targets stand for
+                // them.
+                let mut bytes = isec.data().to_vec();
+                for rel in rels {
+                    let (a, b) = (rel.offset as usize, rel.offset as usize + rel.size as usize);
+                    bytes[a..b].fill(0);
+                }
+                Key::CfString(bytes, targets)
+            }
+            _ => continue,
+        };
+        match first.entry(key) {
+            hashbrown::hash_map::Entry::Occupied(e) => folds.push((i, *e.get())),
+            hashbrown::hash_map::Entry::Vacant(e) => {
+                e.insert(i as u32);
+            }
+        }
     }
+    if folds.is_empty() {
+        return;
+    }
+    for (loser, winner) in folds {
+        let p2align = ctx.isecs[loser].p2align;
+        ctx.isecs[loser].replacement = winner;
+        let w = &mut ctx.isecs[winner as usize];
+        w.p2align = w.p2align.max(p2align);
+    }
+    redirect_symbols_to_replacements(ctx);
 }
 
 /// Synthesizes _objc_msgSend$<selector> stubs. With selector stubs

@@ -134,6 +134,7 @@ pub fn link<E: Arch>(cmdline: &[String], diag: &Diagnostics) -> Result<i32, Stri
     passes::remove_unreachable_files(&mut ctx);
     if ctx.args.relocatable {
         passes::merge_literals(&mut ctx);
+        passes::coalesce_objc_refs(&mut ctx);
         // ld64 -r keeps one copy of each weak definition (the marker
         // stays on it for the final link to auto-hide); Swift's
         // per-object conformance and metadata records doubled

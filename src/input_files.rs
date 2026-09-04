@@ -391,6 +391,10 @@ pub fn stage_object<E: Arch>(
         }
     }
 
+    // Sections whose contents are fixed-shape records the linker
+    // coalesces by content, as ld64 does: literal pools, literal
+    // pointers, and __cfstring, whose 32-byte CFString constants
+    // x86-64 compilers emit without labels.
     let is_literal = |sect: &MachSection| {
         matches!(
             sect.section_type(),
@@ -399,7 +403,7 @@ pub fn stage_object<E: Arch>(
                 | S_8BYTE_LITERALS
                 | S_16BYTE_LITERALS
                 | S_LITERAL_POINTERS
-        )
+        ) || (sect.segname() == "__DATA" && sect.sectname() == "__cfstring")
     };
 
     // Subsections of each section, by section ordinal.
@@ -445,7 +449,12 @@ pub fn stage_object<E: Arch>(
                 S_16BYTE_LITERALS => {
                     points.extend((0..sect.size).step_by(16).map(|o| sect.addr + o))
                 }
-                _ => {}
+                // A literal-pointer section (__objc_selrefs) is one
+                // atom per pointer, as in ld64, so references to the
+                // same selector can be coalesced across objects.
+                S_LITERAL_POINTERS => points.extend((0..sect.size).step_by(8).map(|o| sect.addr + o)),
+                // __cfstring: one 32-byte constant per record.
+                _ => points.extend((0..sect.size).step_by(32).map(|o| sect.addr + o)),
             }
         }
         points.push(sect.addr);
