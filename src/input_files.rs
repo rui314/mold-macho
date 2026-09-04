@@ -113,6 +113,10 @@ pub struct DylibFile {
     pub is_reexported: bool,
     /// -needed-l: keep the load command even under -dead_strip_dylibs.
     pub is_needed: bool,
+    /// Loaded through an object's LC_LINKER_OPTION rather than the
+    /// command line: a hint, so ld64 gives it a load command only if
+    /// something binds to it.
+    pub is_autolinked: bool,
     /// MH_DEAD_STRIPPABLE_DYLIB: drop the load command whenever no
     /// symbol binds to this dylib, even without -dead_strip_dylibs.
     pub is_dead_strippable: bool,
@@ -1780,6 +1784,7 @@ pub fn parse_dylib_binary<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile
             is_weak: false,
             is_reexported: false,
             is_needed: false,
+            is_autolinked: false,
             is_dead_strippable: hdr.flags & MH_DEAD_STRIPPABLE_DYLIB != 0,
             is_app_extension_safe: hdr.flags & MH_APP_EXTENSION_SAFE != 0,
             sub_framework,
@@ -1973,6 +1978,7 @@ pub fn parse_bundle_loader<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFil
             is_weak: false,
             is_reexported: false,
             is_needed: false,
+            is_autolinked: false,
             is_dead_strippable: false,
             is_app_extension_safe: true,
             sub_framework: None,
@@ -2255,6 +2261,7 @@ pub fn parse_dylib<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile) -> us
             is_weak: false,
             is_reexported: false,
             is_needed: false,
+            is_autolinked: false,
             is_dead_strippable: false,
             is_app_extension_safe: !tbd.not_app_extension_safe,
             sub_framework: None,

@@ -454,6 +454,11 @@ pub fn load_autolink_deps<E: Arch>(ctx: &mut Context<E>) -> Autolinked {
     if ctx.args.relocatable {
         return Autolinked::Nothing;
     }
+    // ld64 acts on the auto-link options as a sorted set, not in the
+    // order the objects mention them: its load commands list the
+    // auto-linked libraries alphabetically ("-framework AppKit" ...
+    // "-lswiftCore", "-lswiftCoreFoundation" ...), which fixes their
+    // ordinals too.
     let mut pending: Vec<Vec<String>> = Vec::new();
     for obj in &ctx.objs {
         if !obj.is_alive {
@@ -465,6 +470,9 @@ pub fn load_autolink_deps<E: Arch>(ctx: &mut Context<E>) -> Autolinked {
             }
         }
     }
+    pending.sort();
+    pending.dedup();
+    let dylibs_before = ctx.dylibs.len();
 
     // An auto-link option is a hint, and ld64 says nothing when it
     // finds no library or framework for one. Header-only SDK
@@ -490,6 +498,9 @@ pub fn load_autolink_deps<E: Arch>(ctx: &mut Context<E>) -> Autolinked {
                 collect_file(ctx, mf, false, false, false, false, &mut queue);
             }
         }
+    }
+    for dylib in &mut ctx.dylibs[dylibs_before..] {
+        dylib.is_autolinked = true;
     }
     load_pending(ctx, queue);
     if ctx.objs.len() != before.0 {
@@ -1581,9 +1592,12 @@ pub(crate) fn file_display(obj: &crate::input_files::ObjectFile) -> String {
 pub fn dead_strip_dylibs<E: Arch>(ctx: &mut Context<E>) {
     // A dylib built with -mark_dead_strippable_dylib asks every
     // linker to drop it when unused, so those are stripped even
-    // without -dead_strip_dylibs.
+    // without -dead_strip_dylibs; so is an auto-linked one, which
+    // ld64 treats as a hint: NetNewsWire's auto-link options name 43
+    // frameworks and Swift overlays nothing in it binds to, and
+    // ld-prime lists none of them.
     let strippable = |dylib: &crate::input_files::DylibFile| {
-        ctx.args.dead_strip_dylibs || dylib.is_dead_strippable
+        ctx.args.dead_strip_dylibs || dylib.is_dead_strippable || dylib.is_autolinked
     };
     if !ctx.dylibs.iter().any(|d| strippable(d)) {
         return;
