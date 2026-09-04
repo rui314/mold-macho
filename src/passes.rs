@@ -1542,6 +1542,13 @@ pub fn coalesce_weak_defs<E: Arch>(ctx: &mut Context<E>) {
             if !obj.is_alive {
                 return out;
             }
+            // The addresses of the object's other symbols, to recognize
+            // a losing subsection that holds more than the weak
+            // definition: an object without subsections-via-symbols
+            // has one subsection per section, and folding it away
+            // would take every other symbol's bytes with it. ld64
+            // splits at symbols regardless; we keep such a copy.
+            let mut values: Option<Vec<u64>> = None;
             let r = obj.global_range();
             for (nlist, &sym_id) in obj.nlists[r.clone()].iter().zip(&obj.syms[r]) {
                 if nlist.is_stab()
@@ -1564,6 +1571,24 @@ pub fn coalesce_weak_defs<E: Arch>(ctx: &mut Context<E>) {
                 ) else {
                     continue;
                 };
+                let values = values.get_or_insert_with(|| {
+                    let mut v: Vec<u64> = obj
+                        .nlists
+                        .iter()
+                        .filter(|n| !n.is_stab() && n.n_type() == N_SECT)
+                        .map(|n| n.n_value)
+                        .collect();
+                    v.sort_unstable();
+                    v.dedup();
+                    v
+                });
+                let l = &shared.isecs[loser];
+                let (start, end) = (l.input_addr as u64, l.input_addr as u64 + l.size as u64);
+                let lo = values.partition_point(|&v| v < start);
+                let hi = values.partition_point(|&v| v < end);
+                if values[lo..hi].iter().any(|&v| v != nlist.n_value) {
+                    continue;
+                }
                 out.push((loser, winner, off, sym.value));
             }
             out
