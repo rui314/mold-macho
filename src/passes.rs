@@ -1746,9 +1746,14 @@ pub fn scan_relocations<E: Arch>(ctx: &mut Context<E>) {
 
         match class {
             RelocClass::Branch if sym.is_imported() => {
-                // A stub jumps through the symbol's GOT slot.
+                // A stub jumps through the symbol's lazy pointer, or,
+                // without lazy binding, its GOT slot.
                 add_stub(ctx, id);
-                add_got(ctx, id);
+                if ctx.lazy_binding() {
+                    ensure_stub_binder(ctx);
+                } else {
+                    add_got(ctx, id);
+                }
             }
             RelocClass::Got => add_got(ctx, id),
             RelocClass::GotLoad if sym.is_imported() => add_got(ctx, id),
@@ -3426,6 +3431,21 @@ pub fn create_output_sections<E: Arch>(ctx: &mut Context<E>) {
         chunk.hdr.size = ctx.stub_syms.len() as u64 * E::STUB_SIZE;
         ctx.chunks.push(chunk);
     }
+    if ctx.lazy_binding() && !ctx.stub_syms.is_empty() {
+        let mut chunk = Chunk::new("__TEXT", "__stub_helper", ChunkKind::StubHelper);
+        chunk.hdr.flags = S_ATTR_PURE_INSTRUCTIONS | S_ATTR_SOME_INSTRUCTIONS;
+        chunk.hdr.p2align = 2;
+        chunk.hdr.size =
+            E::STUB_HELPER_HEADER_SIZE + ctx.stub_syms.len() as u64 * E::STUB_HELPER_ENTRY_SIZE;
+        ctx.chunks.push(chunk);
+        let mut chunk = Chunk::new("__DATA", "__la_symbol_ptr", ChunkKind::LazyPtrs);
+        chunk.hdr.flags = S_LAZY_SYMBOL_POINTERS;
+        chunk.hdr.p2align = 3;
+        // Indirect symbol table entries: stubs, the GOT's, then these.
+        chunk.hdr.reserved1 = (ctx.stub_syms.len() + ctx.got_syms.len()) as u32;
+        chunk.hdr.size = ctx.stub_syms.len() as u64 * 8;
+        ctx.chunks.push(chunk);
+    }
 
     if !ctx.got_syms.is_empty() {
         let mut chunk = Chunk::new(data_seg(ctx), "__got", ChunkKind::Got);
@@ -3717,6 +3737,7 @@ pub fn create_output_sections<E: Arch>(ctx: &mut Context<E>) {
     ctx.chunks.push(Chunk::new("__LINKEDIT", "", ChunkKind::ChainedFixups));
     ctx.chunks.push(Chunk::new("__LINKEDIT", "", ChunkKind::RebaseInfo));
     ctx.chunks.push(Chunk::new("__LINKEDIT", "", ChunkKind::BindInfo));
+    ctx.chunks.push(Chunk::new("__LINKEDIT", "", ChunkKind::LazyBindInfo));
     ctx.chunks.push(Chunk::new("__LINKEDIT", "", ChunkKind::ExportTrie));
     ctx.chunks.push(Chunk::new("__LINKEDIT", "", ChunkKind::FunctionStarts));
     if ctx.args.data_in_code_info {
@@ -3725,7 +3746,8 @@ pub fn create_output_sections<E: Arch>(ctx: &mut Context<E>) {
     ctx.chunks.push(Chunk::new("__LINKEDIT", "", ChunkKind::Symtab));
     if !ctx.stub_syms.is_empty() || !ctx.got_syms.is_empty() {
         let mut chunk = Chunk::new("__LINKEDIT", "", ChunkKind::IndirectSymtab);
-        chunk.hdr.size = (ctx.stub_syms.len() + ctx.got_syms.len()) as u64 * 4;
+        let lazy = if ctx.lazy_binding() { ctx.stub_syms.len() } else { 0 };
+        chunk.hdr.size = (ctx.stub_syms.len() + ctx.got_syms.len() + lazy) as u64 * 4;
         ctx.chunks.push(chunk);
     }
     ctx.chunks.push(Chunk::new("__LINKEDIT", "", ChunkKind::Strtab));
@@ -4507,6 +4529,8 @@ pub fn set_osec_offsets<E: Arch>(ctx: &mut Context<E>) {
     for (i, chunk) in ctx.chunks.iter().enumerate() {
         match chunk.kind {
             ChunkKind::Stubs => ctx.stubs_chunk = i,
+            ChunkKind::StubHelper => ctx.stub_helper_chunk = i,
+            ChunkKind::LazyPtrs => ctx.lazy_ptrs_chunk = i,
             ChunkKind::Got => ctx.got_chunk = i,
             ChunkKind::ThreadPtrs => ctx.thread_ptrs_chunk = i,
             ChunkKind::ObjcStubs => ctx.objc_stubs_chunk = i,
@@ -4535,7 +4559,7 @@ pub fn set_osec_offsets<E: Arch>(ctx: &mut Context<E>) {
             // parallel-for.
             enum Streams {
                 Chained(ChainedFixups),
-                Classic(Vec<u8>, Vec<u8>),
+                Classic(Vec<u8>, Vec<u8>, Vec<u8>, Vec<u32>),
             }
             let use_chained = ctx.use_chained_fixups();
             let shared = &*ctx;
@@ -4591,7 +4615,8 @@ pub fn set_osec_offsets<E: Arch>(ctx: &mut Context<E>) {
                                     || t!("rebase_info", build_rebase_info(shared)),
                                     || t!("bind_info", build_bind_info(shared)),
                                 );
-                                Streams::Classic(rebase, bind)
+                                let (lazy, lazy_offsets) = build_lazy_bind_info(shared);
+                                Streams::Classic(rebase, bind, lazy, lazy_offsets)
                             }
                         },
                         || {
@@ -4610,9 +4635,11 @@ pub fn set_osec_offsets<E: Arch>(ctx: &mut Context<E>) {
                     (ctx.chained_data, ctx.fixups, ctx.fixup_imports, ctx.fixup_ordinals) =
                         chained;
                 }
-                Streams::Classic(rebase, bind) => {
+                Streams::Classic(rebase, bind, lazy, lazy_offsets) => {
                     ctx.rebase_data = rebase;
                     ctx.bind_data = bind;
+                    ctx.lazy_bind_data = lazy;
+                    ctx.lazy_bind_offsets = lazy_offsets;
                 }
             }
             ctx.function_starts_data = starts;
@@ -4665,6 +4692,7 @@ pub fn set_osec_offsets<E: Arch>(ctx: &mut Context<E>) {
                 ChunkKind::ChainedFixups => ctx.chained_data.len() as u64,
                 ChunkKind::RebaseInfo => ctx.rebase_data.len() as u64,
                 ChunkKind::BindInfo => ctx.bind_data.len() as u64,
+                ChunkKind::LazyBindInfo => ctx.lazy_bind_data.len() as u64,
                 // Encoded with the other LINKEDIT tables when layout
                 // reached __LINKEDIT, and copied out verbatim later.
                 // (__unwind_info above cannot get the same treatment:
@@ -4683,7 +4711,7 @@ pub fn set_osec_offsets<E: Arch>(ctx: &mut Context<E>) {
             let chunk = &mut ctx.chunks[idx];
             let p2align = match chunk.kind {
                 ChunkKind::Symtab | ChunkKind::Strtab | ChunkKind::RebaseInfo
-                | ChunkKind::BindInfo | ChunkKind::ChainedFixups | ChunkKind::ExportTrie
+                | ChunkKind::BindInfo | ChunkKind::LazyBindInfo | ChunkKind::ChainedFixups | ChunkKind::ExportTrie
                 | ChunkKind::FunctionStarts | ChunkKind::DataInCode => 3,
                 ChunkKind::IndirectSymtab => 2,
                 ChunkKind::CodeSignature => 4,
@@ -4819,6 +4847,12 @@ fn build_rebase_info<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
     for (addr, _) in data_blob_pointers(ctx) {
         locs.push(addr);
     }
+    // Lazy pointers start out pointing at their stub helper entries.
+    if ctx.lazy_binding() {
+        for i in 0..ctx.stub_syms.len() {
+            locs.push(ctx.stub_ptr_addr(i, ctx.stub_syms[i]));
+        }
+    }
 
     // GOT slots that hold local addresses.
     if let Some(idx) = output_chunks::find_chunk(ctx, |k| matches!(k, ChunkKind::Got)) {
@@ -4885,6 +4919,48 @@ fn build_rebase_info<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
 /// Builds the bind opcode stream: it tells dyld which imported symbol to
 /// write into each GOT slot. Runs during layout, once every segment
 /// before __LINKEDIT has an address.
+/// The lazy-bind opcode stream: one self-contained record per stub
+/// (segment/offset of its lazy pointer, dylib ordinal, symbol, bind,
+/// done), and each record's offset, which the stub helper entry pushes
+/// for dyld_stub_binder. ld64's layout, byte for byte.
+fn build_lazy_bind_info<E: Arch>(ctx: &Context<E>) -> (Vec<u8>, Vec<u32>) {
+    if !ctx.lazy_binding() || ctx.stub_syms.is_empty() {
+        return (Vec::new(), Vec::new());
+    }
+    let mut buf = Vec::new();
+    let mut offsets = Vec::with_capacity(ctx.stub_syms.len());
+    for (i, &id) in ctx.stub_syms.iter().enumerate() {
+        offsets.push(buf.len() as u32);
+        let addr = ctx.stub_ptr_addr(i, id);
+        let (seg, off) = segment_and_offset(ctx, addr);
+        buf.push(BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB | seg as u8);
+        write_uleb(&mut buf, off);
+        let sym = &ctx.symtab[id];
+        let Origin::Dylib(dylib) = sym.origin() else {
+            unreachable!()
+        };
+        let ordinal = ctx.bind_ordinal(dylib);
+        if ordinal <= 0 {
+            buf.push(BIND_OPCODE_SET_DYLIB_SPECIAL_IMM | (ordinal & 0xf) as u8);
+        } else if ordinal < 16 {
+            buf.push(BIND_OPCODE_SET_DYLIB_ORDINAL_IMM | ordinal as u8);
+        } else {
+            buf.push(BIND_OPCODE_SET_DYLIB_ORDINAL_ULEB);
+            write_uleb(&mut buf, ordinal as u64);
+        }
+        let flags = if sym.is_weak_ref() { BIND_SYMBOL_FLAGS_WEAK_IMPORT } else { 0 };
+        buf.push(BIND_OPCODE_SET_SYMBOL_TRAILING_FLAGS_IMM | flags);
+        buf.extend_from_slice(sym.name().as_bytes());
+        buf.push(0);
+        buf.push(BIND_OPCODE_DO_BIND);
+        buf.push(BIND_OPCODE_DONE);
+    }
+    while buf.len() % 8 != 0 {
+        buf.push(0);
+    }
+    (buf, offsets)
+}
+
 fn build_bind_info<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
     let mut binds: Vec<(u64, crate::symbol::SymbolId, i64)> = Vec::new();
 
@@ -5500,9 +5576,68 @@ pub fn add_entry_stub<E: Arch>(ctx: &mut Context<E>) {
     if let Some(id) = ctx.symtab.get(&ctx.args.entry) {
         if ctx.symtab[id].is_imported() {
             add_stub(ctx, id);
-            add_got(ctx, id);
+            if ctx.lazy_binding() {
+                ensure_stub_binder(ctx);
+            } else {
+                add_got(ctx, id);
+            }
         }
     }
+}
+
+/// With lazy binding, the stub helper enters dyld through
+/// dyld_stub_binder (libSystem's): the symbol is bound from whichever
+/// loaded dylib exports it, given a GOT slot, and __dyld_private (the
+/// word dyld_stub_binder is handed, ld64 puts it in __DATA,__data) is
+/// synthesized. Once, on the first stub.
+fn ensure_stub_binder<E: Arch>(ctx: &mut Context<E>) {
+    if ctx.dyld_stub_binder.is_some() {
+        return;
+    }
+    let name = "dyld_stub_binder";
+    let Some(dylib) = ctx.dylibs.iter().position(|d| d.exports.contains(name)) else {
+        fatal!(ctx, "lazy binding needs dyld_stub_binder, which no loaded dylib exports");
+    };
+    let id = ctx.symtab.intern(name);
+    let sym = &mut ctx.symtab[id];
+    if !sym.is_defined() {
+        sym.set_origin(Origin::Dylib(dylib as u32));
+        sym.set_is_imported(true);
+        sym.set_is_extern(true);
+        sym.set_isec(None);
+    }
+    sym.set_is_used(true);
+    add_got(ctx, id);
+    ctx.dyld_stub_binder = Some(id);
+
+    let hdr: &'static MachSection = Box::leak(Box::new(MachSection {
+        sectname: str_to_name("__data"),
+        segname: str_to_name("__DATA"),
+        p2align: 3,
+        flags: 0,
+        ..Default::default()
+    }));
+    ctx.synthetic_hdrs.push(hdr);
+    let shndx = (ctx.synthetic_hdrs.len() - 1) as u32;
+    ctx.isecs.push(InputSection {
+        obj: u32::MAX,
+        shndx,
+        p2align: 3,
+        input_addr: 0,
+        size: 8,
+        data_ptr: 0,
+        rel_offset: 0,
+        nrels: 0,
+        osec: u32::MAX,
+        output_offset: 0,
+        flags: InputSection::flags_placed(),
+        replacement: crate::input_sections::NO_REPLACEMENT,
+        unwind_offset: 0,
+        nunwind: 0,
+    });
+    let isec = (ctx.isecs.len() - 1) as u32;
+    ctx.data_blobs.push(DataBlob { sect: "__data", isec, fields: vec![DataField::Bytes(vec![0; 8])] });
+    ctx.dyld_private_isec = isec;
 }
 
 /// Copies all chunks to the output buffer and applies relocations. The
@@ -5662,6 +5797,16 @@ fn copy_chunk<E: Arch>(ctx: &Context<E>, chunk: &Chunk, buf: &mut [u8]) {
         }
         ChunkKind::RebaseInfo => buf[..ctx.rebase_data.len()].copy_from_slice(&ctx.rebase_data),
         ChunkKind::BindInfo => buf[..ctx.bind_data.len()].copy_from_slice(&ctx.bind_data),
+        ChunkKind::LazyBindInfo => buf[..ctx.lazy_bind_data.len()].copy_from_slice(&ctx.lazy_bind_data),
+        ChunkKind::StubHelper => E::write_stub_helper(ctx, chunk.hdr.addr, buf),
+        ChunkKind::LazyPtrs => {
+            // Each lazy pointer starts at its stub helper entry.
+            let helper = ctx.chunks[ctx.stub_helper_chunk].hdr.addr + E::STUB_HELPER_HEADER_SIZE;
+            for i in 0..ctx.stub_syms.len() {
+                let val = helper + i as u64 * E::STUB_HELPER_ENTRY_SIZE;
+                buf[i * 8..i * 8 + 8].copy_from_slice(&val.to_le_bytes());
+            }
+        }
         ChunkKind::ExportTrie => {
             let data = &ctx.export_trie_data;
             buf[..data.len()].copy_from_slice(data);
@@ -5680,7 +5825,8 @@ fn copy_chunk<E: Arch>(ctx: &Context<E>, chunk: &Chunk, buf: &mut [u8]) {
         }
         ChunkKind::IndirectSymtab => {
             let mut off = 0;
-            for &id in ctx.stub_syms.iter().chain(&ctx.got_syms) {
+            let lazy: &[crate::symbol::SymbolId] = if ctx.lazy_binding() { &ctx.stub_syms } else { &[] };
+            for &id in ctx.stub_syms.iter().chain(&ctx.got_syms).chain(lazy) {
                 let val = match ctx.symtab_data.output_sym_indices[id as usize] {
                     u32::MAX => INDIRECT_SYMBOL_LOCAL,
                     idx => idx,

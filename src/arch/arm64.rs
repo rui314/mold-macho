@@ -64,6 +64,8 @@ impl Arch for Arm64 {
     const CPUSUBTYPE: u32 = CPU_SUBTYPE_ARM64_ALL;
     const PAGE_SIZE: u64 = 16384;
     const STUB_SIZE: u64 = 12;
+    const STUB_HELPER_HEADER_SIZE: u64 = 24;
+    const STUB_HELPER_ENTRY_SIZE: u64 = 12;
     const UNWIND_MODE_DWARF: u32 = UNWIND_ARM64_MODE_DWARF;
     const OBJC_STUB_SIZE: u64 = 32;
     const BRANCH_RANGE: u64 = 1 << 28;
@@ -281,12 +283,40 @@ impl Arch for Arm64 {
         for (i, &sym) in ctx.stub_syms.iter().enumerate() {
             let ent = &mut buf[i * 12..];
             let ent_addr = addr + i as u64 * 12;
-            let ptr_addr = ctx.sym_got_addr(sym);
+            let ptr_addr = ctx.stub_ptr_addr(i, sym);
 
             // adrp x16, $ptr@PAGE; ldr x16, [x16, $ptr@PAGEOFF]; br x16
             write32(&mut ent[0..], 0x9000_0010 | page_offset(ptr_addr, ent_addr));
             write32(&mut ent[4..], 0xf940_0210 | (bits(ptr_addr, 11, 3) as u32) << 10);
             write32(&mut ent[8..], 0xd61f_0200);
+        }
+    }
+
+    fn write_stub_helper(ctx: &Context<Self>, addr: u64, buf: &mut [u8]) {
+        // The header, as ld64 emits it:
+        //   adrp x17, __dyld_private@PAGE
+        //   add  x17, x17, __dyld_private@PAGEOFF
+        //   stp  x16, x17, [sp, #-16]!
+        //   adrp x16, dyld_stub_binder@GOTPAGE
+        //   ldr  x16, [x16, dyld_stub_binder@GOTPAGEOFF]
+        //   br   x16
+        let private = ctx.isec_addr(ctx.dyld_private_isec as usize);
+        let binder = ctx.sym_got_addr(ctx.dyld_stub_binder.unwrap());
+        write32(&mut buf[0..], 0x9000_0011 | page_offset(private, addr));
+        write32(&mut buf[4..], 0x9100_0231 | ((private as u32 & 0xfff) << 10));
+        write32(&mut buf[8..], 0xa9bf_47f0);
+        write32(&mut buf[12..], 0x9000_0010 | page_offset(binder, addr + 12));
+        write32(&mut buf[16..], 0xf940_0210 | (bits(binder, 11, 3) as u32) << 10);
+        write32(&mut buf[20..], 0xd61f_0200);
+        // Each entry: ldr w16, #8 (the lazy-bind offset that follows);
+        // b header; .long offset.
+        for i in 0..ctx.stub_syms.len() {
+            let off = 24 + i * 12;
+            let ent_addr = addr + off as u64;
+            write32(&mut buf[off..], 0x1800_0050);
+            let rel = addr.wrapping_sub(ent_addr + 4) as i64 >> 2;
+            write32(&mut buf[off + 4..], 0x1400_0000 | (rel as u32 & 0x03ff_ffff));
+            write32(&mut buf[off + 8..], ctx.lazy_bind_offsets[i]);
         }
     }
 

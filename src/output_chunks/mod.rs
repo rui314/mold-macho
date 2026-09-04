@@ -50,6 +50,15 @@ pub enum ChunkKind {
     },
     /// Jump stubs for calls to imported functions.
     Stubs,
+    /// __TEXT,__stub_helper: with classic dyld info, the code a lazy
+    /// pointer initially points at, which enters dyld_stub_binder with
+    /// the pointer's lazy-bind record.
+    StubHelper,
+    /// __DATA,__la_symbol_ptr: the lazy pointers the stubs jump
+    /// through, bound by dyld on first call.
+    LazyPtrs,
+    /// The lazy-bind opcode stream for LC_DYLD_INFO, in __LINKEDIT.
+    LazyBindInfo,
     /// The global offset table: pointers to symbols, bound by dyld for
     /// imported ones.
     Got,
@@ -151,6 +160,8 @@ impl Chunk {
                     kind,
                     ChunkKind::Output { .. }
                         | ChunkKind::Stubs
+                        | ChunkKind::StubHelper
+                        | ChunkKind::LazyPtrs
                         | ChunkKind::Got
                         | ChunkKind::ThreadPtrs
                         | ChunkKind::ObjcStubs
@@ -320,6 +331,12 @@ fn create_dyld_info_cmd<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
         if ctx.chunks[idx].hdr.size > 0 {
             cmd.bind_off = ctx.chunks[idx].hdr.fileoff as u32;
             cmd.bind_size = ctx.chunks[idx].hdr.size as u32;
+        }
+    }
+    if let Some(idx) = find_chunk(ctx, |k| matches!(k, ChunkKind::LazyBindInfo)) {
+        if ctx.chunks[idx].hdr.size > 0 {
+            cmd.lazy_bind_off = ctx.chunks[idx].hdr.fileoff as u32;
+            cmd.lazy_bind_size = ctx.chunks[idx].hdr.size as u32;
         }
     }
     if let Some(idx) = find_chunk(ctx, |k| matches!(k, ChunkKind::ExportTrie)) {
@@ -670,9 +687,9 @@ pub fn copy_mach_header<E: Arch>(ctx: &Context<E>, buf: &mut [u8]) {
     }) {
         hdr.flags |= MH_WEAK_DEFINES;
     }
-    if ctx.args.bind_at_load {
-        hdr.flags |= MH_BINDATLOAD;
-    }
+    // -bind_at_load makes the stubs bind through the GOT instead of
+    // lazily; ld-prime does not set MH_BINDATLOAD for it (dyld binds
+    // everything at load anyway).
     if ctx.args.application_extension {
         hdr.flags |= MH_APP_EXTENSION_SAFE;
     }

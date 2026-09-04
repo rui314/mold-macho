@@ -38,6 +38,10 @@ pub trait Arch: Copy + Default + Send + Sync + 'static {
     const PAGE_SIZE: u64;
     /// The size of one __stubs entry.
     const STUB_SIZE: u64;
+    /// The sizes of the __stub_helper header (the common code that
+    /// enters dyld_stub_binder) and of each stub's entry in it.
+    const STUB_HELPER_HEADER_SIZE: u64;
+    const STUB_HELPER_ENTRY_SIZE: u64;
     /// The compact unwind encoding mode meaning "use DWARF instead".
     const UNWIND_MODE_DWARF: u32;
     /// The size of one __objc_stubs entry.
@@ -78,6 +82,13 @@ pub trait Arch: Copy + Default + Send + Sync + 'static {
     /// jump through the symbol's __got slot. `addr` is the section's
     /// address and `buf` its bytes in the output.
     fn write_stubs(ctx: &Context<Self>, addr: u64, buf: &mut [u8]);
+
+    /// Writes the __TEXT,__stub_helper section: the header that pushes
+    /// __dyld_private and jumps to dyld_stub_binder through the GOT,
+    /// then one entry per stub that loads the stub's lazy-bind record
+    /// offset and branches to the header. `addr` is the section's
+    /// address and `buf` its bytes.
+    fn write_stub_helper(ctx: &Context<Self>, addr: u64, buf: &mut [u8]);
 
     /// Writes the __objc_stubs section: for each _objc_msgSend$<sel>
     /// symbol, code that loads the selector from its __objc_selrefs

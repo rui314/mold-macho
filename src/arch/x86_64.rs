@@ -36,6 +36,8 @@ impl Arch for X86_64 {
     const CPUSUBTYPE: u32 = CPU_SUBTYPE_X86_64_ALL;
     const PAGE_SIZE: u64 = 4096;
     const STUB_SIZE: u64 = 6;
+    const STUB_HELPER_HEADER_SIZE: u64 = 16;
+    const STUB_HELPER_ENTRY_SIZE: u64 = 10;
     const UNWIND_MODE_DWARF: u32 = UNWIND_X86_64_MODE_DWARF;
     const OBJC_STUB_SIZE: u64 = 16;
     // A 32-bit pcrel branch covers 4 GiB; x86-64 outputs never need
@@ -82,12 +84,37 @@ impl Arch for X86_64 {
         for (i, &sym) in ctx.stub_syms.iter().enumerate() {
             let ent = &mut buf[i * 6..];
             let ent_addr = addr + i as u64 * 6;
-            let ptr_addr = ctx.sym_got_addr(sym);
+            let ptr_addr = ctx.stub_ptr_addr(i, sym);
 
             // jmp *ptr(%rip)
             ent[0] = 0xff;
             ent[1] = 0x25;
             write32(&mut ent[2..], ptr_addr.wrapping_sub(ent_addr + 6) as u32);
+        }
+    }
+
+    fn write_stub_helper(ctx: &Context<Self>, addr: u64, buf: &mut [u8]) {
+        // The header, as ld64 emits it:
+        //   lea  __dyld_private(%rip), %r11
+        //   push %r11
+        //   jmp  *dyld_stub_binder@GOTPCREL(%rip)
+        //   nop
+        let private = ctx.isec_addr(ctx.dyld_private_isec as usize);
+        let binder = ctx.sym_got_addr(ctx.dyld_stub_binder.unwrap());
+        buf[0..3].copy_from_slice(&[0x4c, 0x8d, 0x1d]);
+        write32(&mut buf[3..], private.wrapping_sub(addr + 7) as u32);
+        buf[7..9].copy_from_slice(&[0x41, 0x53]);
+        buf[9..11].copy_from_slice(&[0xff, 0x25]);
+        write32(&mut buf[11..], binder.wrapping_sub(addr + 15) as u32);
+        buf[15] = 0x90;
+        // Each entry: push $offset; jmp header.
+        for i in 0..ctx.stub_syms.len() {
+            let off = 16 + i * 10;
+            let ent_addr = addr + off as u64;
+            buf[off] = 0x68;
+            write32(&mut buf[off + 1..], ctx.lazy_bind_offsets[i]);
+            buf[off + 5] = 0xe9;
+            write32(&mut buf[off + 6..], addr.wrapping_sub(ent_addr + 10) as u32);
         }
     }
 

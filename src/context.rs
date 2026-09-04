@@ -98,6 +98,8 @@ pub struct Context<E: Arch> {
     /// the start of layout so per-slot address lookups don't search
     /// the chunk list (mold keeps direct references on Context too).
     pub stubs_chunk: usize,
+    pub stub_helper_chunk: usize,
+    pub lazy_ptrs_chunk: usize,
     pub got_chunk: usize,
     pub thread_ptrs_chunk: usize,
     pub objc_stubs_chunk: usize,
@@ -113,6 +115,15 @@ pub struct Context<E: Arch> {
     pub rebase_data: Vec<u8>,
     /// The bind opcode stream for LC_DYLD_INFO, built during layout.
     pub bind_data: Vec<u8>,
+    /// The lazy-bind opcode stream, and each stub's record offset in
+    /// it (what its stub helper entry pushes for dyld_stub_binder).
+    pub lazy_bind_data: Vec<u8>,
+    pub lazy_bind_offsets: Vec<u32>,
+    /// dyld_stub_binder, resolved from the loaded dylibs when lazy
+    /// binding is in use, and the __dyld_private word the stub helper
+    /// hands it (a synthesized record in __DATA,__data).
+    pub dyld_stub_binder: Option<SymbolId>,
+    pub dyld_private_isec: u32,
     /// The LC_FUNCTION_STARTS contents, built during layout.
     pub function_starts_data: Vec<u8>,
     /// Every dynamic fixup location, sorted by address, when emitting
@@ -193,6 +204,8 @@ impl<E: Arch> Context<E> {
             unwind_info_data: Vec::new(),
             unwind_personalities: Vec::new(),
             stubs_chunk: usize::MAX,
+            stub_helper_chunk: usize::MAX,
+            lazy_ptrs_chunk: usize::MAX,
             got_chunk: usize::MAX,
             thread_ptrs_chunk: usize::MAX,
             objc_stubs_chunk: usize::MAX,
@@ -202,6 +215,10 @@ impl<E: Arch> Context<E> {
             objc_methname_offs: Vec::new(),
             rebase_data: Vec::new(),
             bind_data: Vec::new(),
+            lazy_bind_data: Vec::new(),
+            lazy_bind_offsets: Vec::new(),
+            dyld_stub_binder: None,
+            dyld_private_isec: u32::MAX,
             function_starts_data: Vec::new(),
             fixups: Vec::new(),
             fixup_imports: Vec::new(),
@@ -403,6 +420,24 @@ impl<E: Arch> Context<E> {
     pub fn sym_stub_addr(&self, id: SymbolId) -> u64 {
         self.chunks[self.stubs_chunk].hdr.addr
             + self.sym_aux(id).stub_idx as u64 * E::STUB_SIZE
+    }
+
+    /// Whether imported functions are called through lazy pointers
+    /// bound on first use (classic dyld info's __la_symbol_ptr and
+    /// __stub_helper), as ld64 does below the chained-fixups
+    /// deployment targets unless -bind_at_load.
+    pub fn lazy_binding(&self) -> bool {
+        !self.args.relocatable && !self.use_chained_fixups() && !self.args.bind_at_load
+    }
+
+    /// The address of the pointer slot stub `i` (for symbol `id`)
+    /// jumps through: its lazy pointer, or its GOT slot.
+    pub fn stub_ptr_addr(&self, i: usize, id: SymbolId) -> u64 {
+        if self.lazy_binding() {
+            self.chunks[self.lazy_ptrs_chunk].hdr.addr + i as u64 * 8
+        } else {
+            self.sym_got_addr(id)
+        }
     }
 
     /// Returns the address of a symbol's __got slot.

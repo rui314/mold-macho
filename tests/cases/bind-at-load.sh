@@ -6,6 +6,14 @@ cat <<EOF2 | $CC -o $t/a.o -c -xc -
 int main() { printf("hi\n"); }
 EOF2
 
-$CC --ld-path=$mold -o $t/exe $t/a.o -Wl,-bind_at_load
-otool -h $t/exe | grep -iq bindatload || otool -hv $t/exe | grep -q BINDATLOAD
+# ld-prime honors -bind_at_load by calling imported functions through
+# GOT slots bound at load instead of lazy pointers; it does not set
+# MH_BINDATLOAD (dyld binds everything at load regardless).
+if [ $ARCH = arm64 ]; then classic=11.0; else classic=12.0; fi
+$CC --ld-path=$mold -o $t/exe $t/a.o -Wl,-bind_at_load -mmacosx-version-min=$classic
+otool -hv $t/exe > $t/hdr
+! grep -q BINDATLOAD $t/hdr
+otool -l $t/exe > $t/lc
+! grep -q '__la_symbol_ptr' $t/lc
+dyld_info -fixups $t/exe | grep -q '__got .* bind .*_printf'
 $t/exe | grep hi
