@@ -2015,6 +2015,20 @@ fn objc_class_ro<E: Arch>(ctx: &Context<E>, cls: (u32, u64)) -> Option<(u32, u64
     Some((isec, off & !3))
 }
 
+/// The relocation of the pointer field at `off` in a subsection, as
+/// (object, index into its relocation arena), for rewriting it.
+fn objc_pointer_reloc<E: Arch>(ctx: &Context<E>, isec: u32, off: u64) -> Option<(usize, usize)> {
+    let sec = &ctx.isecs[isec as usize];
+    if sec.obj == u32::MAX {
+        return None;
+    }
+    let k = ctx
+        .isec_relocs(isec as usize)
+        .iter()
+        .position(|r| r.offset as u64 == off && r.size == 8 && !r.is_pcrel && !r.is_subtracted)?;
+    Some((sec.obj as usize, sec.rel_offset as usize + k))
+}
+
 /// The pointer stored at `off` in a subsection: the target of the
 /// 8-byte relocation there, if any.
 fn objc_pointer_at<E: Arch>(ctx: &Context<E>, isec: u32, off: u64) -> Option<ObjcRef> {
@@ -2321,6 +2335,7 @@ pub fn merge_objc_categories<E: Arch>(ctx: &mut Context<E>) {
 
     // Classes defined here: class_t location -> (metaclass, ro, meta ro).
     struct Class {
+        meta: (u32, u64),
         ro: (u32, u64),
         meta_ro: (u32, u64),
         nonlazy: bool,
@@ -2347,11 +2362,11 @@ pub fn merge_objc_categories<E: Arch>(ctx: &mut Context<E>) {
             let ro = objc_class_ro(ctx, cls);
             let meta = objc_pointer_at(ctx, cls.0, cls.1).and_then(|r| objc_ref_location(ctx, r));
             let meta_ro = meta.and_then(|m| objc_class_ro(ctx, m));
-            let (Some(ro), Some(_meta), Some(meta_ro)) = (ro, meta, meta_ro) else { continue };
+            let (Some(ro), Some(meta), Some(meta_ro)) = (ro, meta, meta_ro) else { continue };
             if !classes.contains_key(&cls) {
                 class_order.push(cls);
             }
-            let entry = classes.entry(cls).or_insert(Class { ro, meta_ro, nonlazy: false });
+            let entry = classes.entry(cls).or_insert(Class { meta, ro, meta_ro, nonlazy: false });
             entry.nonlazy |= nonlazy;
         }
     }
@@ -2602,12 +2617,22 @@ pub fn merge_objc_categories<E: Arch>(ctx: &mut Context<E>) {
             ok = m.protocols.iter().all(|&r| local(ctx, r))
                 && m.iprops.iter().chain(&m.cprops).all(|&(a, b)| local(ctx, a) && local(ctx, b));
         }
-        // The ro records must be subsections of their own to be
-        // replaced. Nothing is changed until everything checks out.
-        if ro.1 != 0 || ctx.isecs[ro.0 as usize].size != 72 || meta_ro.1 != 0 || ctx.isecs[meta_ro.0 as usize].size != 72 {
-            ok = false;
-        }
-        if !ok {
+        // The class's and metaclass's data pointers must be rewritable
+        // to point at new ro records. Nothing is changed until
+        // everything checks out.
+        let ro_ok = objc_pointer_reloc(ctx, cls.0, cls.1 + 32).is_some()
+            && info.meta.1 == 0 || objc_pointer_reloc(ctx, info.meta.0, info.meta.1 + 32).is_some();
+        let ro_ok = ro_ok
+            && ctx.isecs[ro.0 as usize].size as u64 >= ro.1 + 72
+            && ctx.isecs[meta_ro.0 as usize].size as u64 >= meta_ro.1 + 72
+            && objc_pointer_reloc(ctx, info.meta.0, info.meta.1 + 32).is_some();
+        if !ok || !ro_ok {
+            if std::env::var_os("MOLD_OBJC_DEBUG").is_some() {
+                eprintln!(
+                    "category merging: class at {:?} with {} categories skipped (lists in shape: {}, ro reachable: {})",
+                    cls, cat_ids.len(), ok, ro_ok
+                );
+            }
             continue;
         }
 
@@ -2785,13 +2810,34 @@ pub fn merge_objc_categories<E: Arch>(ctx: &mut Context<E>) {
             let blob = new_blob(ctx, "__objc_const", fields);
             let isec = ro.0 as usize;
             if ro.1 == 0 && ctx.isecs[isec].size as u64 == 72 {
+                // The record was a subsection of its own: replace it, so
+                // its symbol names the new record too (ld64 keeps
+                // __OBJC_CLASS_RO_$_Foo).
                 ctx.isecs[isec].set_alive(false);
                 ctx.isecs[isec].replacement = blob;
             }
             blob
         };
-        rewrite_ro(ctx, ro, imethods, protocols, iprops, &mut new_blob);
-        rewrite_ro(ctx, meta_ro, cmethods, protocols, cprops, &mut new_blob);
+        // Point a class's data field at its new ro record (keeping the
+        // flag bits a Swift class stores in the pointer's low bits).
+        let retarget = |ctx: &mut Context<E>, cls: (u32, u64), blob: u32| {
+            let (obj, k) = objc_pointer_reloc(ctx, cls.0, cls.1 + 32).unwrap();
+            let rel = ctx.objs[obj].relocs[k];
+            let flags = match rel.target() {
+                RelocTarget::Sym(idx) => {
+                    let id = ctx.objs[obj].syms[idx as usize];
+                    (ctx.symtab[id].value as i64 + rel.addend) & 3
+                }
+                RelocTarget::Section(_) => rel.addend & 3,
+            };
+            let rel = &mut ctx.objs[obj].relocs[k];
+            rel.set_target(RelocTarget::Section(blob));
+            rel.addend = flags;
+        };
+        let ro_blob = rewrite_ro(ctx, ro, imethods, protocols, iprops, &mut new_blob);
+        let meta_blob = rewrite_ro(ctx, meta_ro, cmethods, protocols, cprops, &mut new_blob);
+        retarget(ctx, cls, ro_blob);
+        retarget(ctx, info.meta, meta_blob);
         let mut any_nonlazy = false;
         for &ci in cat_ids.iter() {
             ctx.isecs[cats[ci].cat.0 as usize].set_alive(false);
