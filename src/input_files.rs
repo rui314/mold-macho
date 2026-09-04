@@ -264,6 +264,7 @@ pub fn stage_object<E: Arch>(
     alive: bool,
     hidden: bool,
     priority: u32,
+    keep_all_fdes: bool,
 ) -> StagedObject {
     let data = mf.data;
     let hdr = MachHeader::read_from(data);
@@ -579,7 +580,7 @@ pub fn stage_object<E: Arch>(
     {
         parse_eh_frame::<E>(
             diag, hdr, &isecs, &subsecs, &nlists, data, &mf.name, &mut unwind, &mut cies,
-            &mut fdes,
+            &mut fdes, keep_all_fdes,
         );
     }
     // A DWARF-mode record whose FDE never turned up describes nothing.
@@ -975,7 +976,7 @@ pub fn integrate_object_with<E: Arch>(
 pub fn parse_object<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile, alive: bool) -> usize {
     let priority = ctx.next_priority();
     let diag = ctx.diag.clone();
-    let staged = stage_object::<E>(&diag, mf, alive, false, priority);
+    let staged = stage_object::<E>(&diag, mf, alive, false, priority, ctx.args.relocatable);
     integrate_object(ctx, staged)
 }
 
@@ -1328,6 +1329,10 @@ fn parse_eh_frame<E: Arch>(
     unwind: &mut Vec<UnwindRecord>,
     out_cies: &mut Vec<Cie>,
     out_fdes: &mut Vec<Fde>,
+    // Keep the FDEs of functions a compact record already covers: a
+    // -r output carries every input CIE and FDE through, as ld64's
+    // does; a final image has no use for them.
+    keep_all_fdes: bool,
 ) {
     let geo: Vec<(u64, u64, usize)> = subsecs
         .iter()
@@ -1517,7 +1522,8 @@ fn parse_eh_frame<E: Arch>(
             fatal!(diag, "{file_name}: __eh_frame: FDE with an invalid function");
         };
 
-        if covered.contains(&(isec, func_offset)) {
+        let is_covered = covered.contains(&(isec, func_offset));
+        if is_covered && !keep_all_fdes {
             continue;
         }
 
@@ -1548,9 +1554,13 @@ fn parse_eh_frame<E: Arch>(
             output_offset: 0,
         });
 
-        // The object's own DWARF-mode record now points at the FDE;
-        // otherwise synthesize one so that the unwinder can find the
-        // FDE through __unwind_info.
+        // A covered function's compact record wins; its FDE is only
+        // carried. Otherwise the object's own DWARF-mode record now
+        // points at the FDE, or one is synthesized so that the unwinder
+        // can find the FDE through __unwind_info.
+        if is_covered {
+            continue;
+        }
         if let Some(&i) = dwarf_recs.get(&(isec, func_offset)) {
             unwind[i].fde_idx = fde_idx as u32;
             continue;

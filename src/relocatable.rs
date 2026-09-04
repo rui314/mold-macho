@@ -154,29 +154,55 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
         extras.push(new_extra("__LD", "__compact_unwind", S_ATTR_DEBUG, 3, 32 * cu_kept.len() as u64));
     }
 
-    // __TEXT,__eh_frame for functions whose unwind info exists only as
-    // DWARF FDEs: the CIEs they use (in first-use order), then the
-    // FDEs.
-    let eh_kept: Vec<usize> = (0..ctx.fdes.len())
-        .filter(|&i| ctx.isecs[ctx.resolve_isec(ctx.fdes[i].isec as usize)].is_alive())
-        .collect();
-    let mut eh_cies: Vec<usize> = Vec::new();
+    // __TEXT,__eh_frame: every input CIE and FDE whose function
+    // survives (a coalesced-away weak copy's goes with it), laid out
+    // per object in input order, as ld64 carries them. The loader kept
+    // the FDEs of compactly-encoded functions for this.
+    #[derive(Clone, Copy)]
+    enum EhRec {
+        Cie(usize),
+        Fde(usize),
+    }
+    let mut eh_records: Vec<(EhRec, u32)> = Vec::new();
     {
-        let mut seen: HashSet<usize> = HashSet::new();
-        for &f in &eh_kept {
-            let c = ctx.fdes[f].cie as usize;
-            if seen.insert(c) {
-                eh_cies.push(c);
+        let mut per_obj: HashMap<u32, Vec<(u32, EhRec)>> = HashMap::new();
+        let mut cies_used: HashSet<usize> = HashSet::new();
+        for (f, fde) in ctx.fdes.iter().enumerate() {
+            let isec = &ctx.isecs[fde.isec as usize];
+            if !isec.is_alive() || isec.replacement != crate::input_sections::NO_REPLACEMENT {
+                continue;
+            }
+            per_obj.entry(fde.obj).or_default().push((fde.input_addr, EhRec::Fde(f)));
+            if cies_used.insert(fde.cie as usize) {
+                let cie = &ctx.cies[fde.cie as usize];
+                per_obj.entry(cie.obj).or_default().push((cie.input_addr, EhRec::Cie(fde.cie as usize)));
+            }
+        }
+        let mut objs: Vec<u32> = per_obj.keys().copied().collect();
+        objs.sort_unstable();
+        let mut off = 0u32;
+        for obj in objs {
+            let mut recs = per_obj.remove(&obj).unwrap();
+            recs.sort_by_key(|r| r.0);
+            for (_, r) in recs {
+                eh_records.push((r, off));
+                off += match r {
+                    EhRec::Cie(c) => ctx.cies[c].data.len() as u32,
+                    EhRec::Fde(f) => ctx.fdes[f].data.len() as u32,
+                };
             }
         }
     }
     let mut eh_slot = None;
-    if !eh_kept.is_empty() {
-        let size: u64 = eh_cies.iter().map(|&c| ctx.cies[c].data.len() as u64).sum::<u64>()
-            + eh_kept.iter().map(|&f| ctx.fdes[f].data.len() as u64).sum::<u64>();
+    if !eh_records.is_empty() {
+        let size: u64 = eh_records
+            .iter()
+            .map(|&(r, _)| match r {
+                EhRec::Cie(c) => ctx.cies[c].data.len() as u64,
+                EhRec::Fde(f) => ctx.fdes[f].data.len() as u64,
+            })
+            .sum();
         eh_slot = Some(extras.len());
-        // S_COALESCED plus the no-TOC/strip/live-support attributes,
-        // the flags compilers give this section.
         extras.push(new_extra("__TEXT", "__eh_frame", 0, 3, size));
     }
 
@@ -241,9 +267,11 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
     // Section ordinals are 1-based positions among the emitted
     // sections, synthetic ones included.
     let mut ordinals = vec![0u8; ctx.chunks.len()];
+    let mut extra_ordinals = vec![0u8; extras.len()];
     for (i, &s) in sects.iter().enumerate() {
-        if let Sect::Chunk(idx) = s {
-            ordinals[idx] = i as u8 + 1;
+        match s {
+            Sect::Chunk(idx) => ordinals[idx] = i as u8 + 1,
+            Sect::Extra(e) => extra_ordinals[e] = i as u8 + 1,
         }
     }
     let mut nlists_out: Vec<NList> = Vec::new();
@@ -306,7 +334,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
         name: String,
         n_type: u8,
         n_desc: u16,
-        osec: usize,
+        n_sect: u8,
         addr: u64,
         rename: Rename,
         syms: Vec<crate::symbol::SymbolId>,
@@ -362,7 +390,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
                     name: String::new(),
                     n_type: if pext { N_PEXT | N_SECT } else { N_SECT },
                     n_desc: 0,
-                    osec: chunk_idx,
+                    n_sect: ordinals[chunk_idx],
                     addr: chunk.hdr.addr + isec.output_offset as u64 + k * entsize,
                     rename: if entsize == 0 { Rename::Cstring } else { Rename::Anon },
                     syms: Vec::new(),
@@ -441,7 +469,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
                 name: sym.name().to_string(),
                 n_type: nlist.n_type,
                 n_desc: nlist.n_desc,
-                osec: ctx.isecs[isec].osec as usize,
+                n_sect: ordinals[ctx.isecs[isec].osec as usize],
                 addr: sym_addr(ctx, sym_id),
                 rename: Rename::None,
                 syms: vec![sym_id],
@@ -479,7 +507,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
                     name: sym.name().to_string(),
                     n_type: N_PEXT | N_SECT,
                     n_desc: nlist.n_desc & (N_ALT_ENTRY | N_NO_DEAD_STRIP),
-                    osec: ctx.isecs[isec].osec as usize,
+                    n_sect: ordinals[ctx.isecs[isec].osec as usize],
                     addr: sym_addr(ctx, sym_id),
                     rename: Rename::None,
                     syms: vec![sym_id],
@@ -487,6 +515,28 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
             }
         }
     }
+    // ld64 names the __eh_frame atoms too: every CIE is EH_Frame1 and
+    // every FDE func.eh, plain local symbols the FDEs' relocations
+    // (below) are expressed against.
+    let mut eh_local: Vec<usize> = Vec::with_capacity(eh_records.len());
+    if let Some(slot) = eh_slot {
+        for &(r, off) in &eh_records {
+            eh_local.push(locals.len());
+            locals.push(Local {
+                name: match r {
+                    EhRec::Cie(_) => "EH_Frame1".to_string(),
+                    EhRec::Fde(_) => "func.eh".to_string(),
+                },
+                n_type: N_SECT,
+                n_desc: 0,
+                n_sect: extra_ordinals[slot],
+                addr: extras[slot].addr + off as u64,
+                rename: Rename::None,
+                syms: Vec::new(),
+            });
+        }
+    }
+
     // Atom order, the linker-named atoms numbered in it.
     let mut order: Vec<usize> = (0..locals.len()).collect();
     order.sort_by_key(|&i| locals[i].addr);
@@ -513,7 +563,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
         nlists_out.push(NList {
             n_strx: add_string(&mut strtab, &l.name),
             n_type: l.n_type,
-            n_sect: ordinals[l.osec],
+            n_sect: l.n_sect,
             n_desc: l.n_desc,
             n_value: l.addr,
         });
@@ -701,63 +751,109 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
         extras[slot].relocs = cu_relocs;
     }
 
-    // Re-synthesize __TEXT,__eh_frame for functions whose unwind info
-    // exists only as DWARF FDEs. The section uses the same implicit
-    // self-relative addressing compilers emit - pc_begin and the LSDA
-    // pointer are distances valid in the merged object's own address
-    // space, needing no relocations - except the CIE's personality
-    // cell, which names an external symbol and so carries the one
-    // relocation objects conventionally have here: a 4-byte pc-rel
-    // GOT reference (clang emits exactly this shape).
+    // __TEXT,__eh_frame, in ld64's form. A CIE's personality cell is a
+    // 4-byte pcrel GOT reference (the shape compilers emit). An FDE's
+    // self-relative fields become SUBTRACTOR pairs against the atoms'
+    // symbols, the field holding the addend: the CIE pointer is
+    // func.eh + 4 - EH_Frame1, pc_begin is the function's symbol - 8 -
+    // func.eh, and the LSDA pointer its symbol - offset - func.eh. A
+    // function or LSDA without a symbol keeps a self-relative value.
     let mut eh_data: Vec<u8> = Vec::new();
     let mut eh_relocs: Vec<MachRel> = Vec::new();
     let mut eh_patches: Vec<(u32, u64, u8)> = Vec::new();
     {
-        let mut cie_off: HashMap<usize, u32> = HashMap::new();
-        for &c in &eh_cies {
-            let cie = &ctx.cies[c];
-            let off = eh_data.len() as u32;
-            cie_off.insert(c, off);
-            eh_data.extend_from_slice(&cie.data);
-            if let Some(p) = cie.personality {
-                let Some(&symnum) = index_of_sym.get(&p) else {
-                    fatal!(ctx, "-r: unwind personality lost: {}", ctx.symtab[p].name());
-                };
-                let cell = (off + cie.personality_offset) as usize;
-                eh_data[cell..cell + 4].copy_from_slice(&0u32.to_le_bytes());
-                eh_relocs.push(MachRel {
-                    r_address: off + cie.personality_offset,
-                    bits: symnum
-                        | (1 << 24)
-                        | (2 << 25)
-                        | (1 << 27)
-                        | ((E::RELOC_GOTPC as u32) << 28),
-                });
+        let mut cie_local: HashMap<usize, usize> = HashMap::new();
+        for (i, &(r, _)) in eh_records.iter().enumerate() {
+            if let EhRec::Cie(c) = r {
+                cie_local.insert(c, eh_local[i]);
             }
         }
-        for &f in &eh_kept {
-            let fde = &ctx.fdes[f];
-            let off = eh_data.len() as u32;
-            eh_data.extend_from_slice(&fde.data);
-            let cie_ptr = off + 4 - cie_off[&(fde.cie as usize)];
-            eh_data[off as usize + 4..off as usize + 8]
-                .copy_from_slice(&cie_ptr.to_le_bytes());
-
-            let isec = &ctx.isecs[ctx.resolve_isec(fde.isec as usize)];
-            let func_addr =
-                ctx.chunks[isec.osec as usize].hdr.addr + isec.output_offset as u64 + fde.func_offset as u64;
-            eh_patches.push((off + 8, func_addr, 8));
-
-            if let Some((lsda, lsda_off)) = fde.lsda {
-                let mut pos = 24;
-                while eh_data[(off + pos) as usize] & 0x80 != 0 {
-                    pos += 1;
+        let pair = |rels: &mut Vec<MachRel>, at: u32, length: u32, from: u32, to: u32| {
+            rels.push(MachRel {
+                r_address: at,
+                bits: from | (length << 25) | (1 << 27) | ((E::RELOC_SUBTRACTOR as u32) << 28),
+            });
+            rels.push(MachRel {
+                r_address: at,
+                bits: to | (length << 25) | (1 << 27) | ((E::RELOC_UNSIGNED as u32) << 28),
+            });
+        };
+        for (i, &(r, off)) in eh_records.iter().enumerate() {
+            debug_assert_eq!(off as usize, eh_data.len());
+            match r {
+                EhRec::Cie(c) => {
+                    let cie = &ctx.cies[c];
+                    eh_data.extend_from_slice(&cie.data);
+                    if let Some(p) = cie.personality {
+                        let Some(&symnum) = index_of_sym.get(&p) else {
+                            fatal!(ctx, "-r: unwind personality lost: {}", ctx.symtab[p].name());
+                        };
+                        // The cell keeps the object's addend (4 on
+                        // x86-64, where a pcrel field is relative to
+                        // its own end).
+                        eh_relocs.push(MachRel {
+                            r_address: off + cie.personality_offset,
+                            bits: symnum
+                                | (1 << 24)
+                                | (2 << 25)
+                                | (1 << 27)
+                                | ((E::RELOC_GOTPC as u32) << 28),
+                        });
+                    }
                 }
-                pos += 1;
-                let l = &ctx.isecs[ctx.resolve_isec(lsda as usize)];
-                let lsda_addr =
-                    ctx.chunks[l.osec as usize].hdr.addr + l.output_offset as u64 + lsda_off as u64;
-                eh_patches.push((off + pos, lsda_addr, ctx.cies[fde.cie as usize].lsda_size));
+                EhRec::Fde(f) => {
+                    let fde = &ctx.fdes[f];
+                    let me = entry_symnum[eh_local[i]];
+                    eh_data.extend_from_slice(&fde.data);
+                    let o = off as usize;
+                    // CIE pointer.
+                    let cie_sym = entry_symnum[cie_local[&(fde.cie as usize)]];
+                    eh_data[o + 4..o + 8].copy_from_slice(&4u32.to_le_bytes());
+                    pair(&mut eh_relocs, off + 4, 2, cie_sym, me);
+                    // pc_begin.
+                    let func_isec = ctx.resolve_isec(fde.isec as usize);
+                    match sym_at.get(&(func_isec, fde.func_offset as u64)) {
+                        Some(&func_sym) => {
+                            eh_data[o + 8..o + 16].copy_from_slice(&(-8i64).to_le_bytes());
+                            pair(&mut eh_relocs, off + 8, 3, me, func_sym);
+                        }
+                        None => {
+                            let isec = &ctx.isecs[func_isec];
+                            let func_addr = ctx.chunks[isec.osec as usize].hdr.addr
+                                + isec.output_offset as u64
+                                + fde.func_offset as u64;
+                            eh_patches.push((off + 8, func_addr, 8));
+                        }
+                    }
+                    // LSDA.
+                    if let Some((lsda, lsda_off)) = fde.lsda {
+                        let mut pos = 24;
+                        while eh_data[o + pos] & 0x80 != 0 {
+                            pos += 1;
+                        }
+                        pos += 1;
+                        let size = ctx.cies[fde.cie as usize].lsda_size;
+                        let lsda = ctx.resolve_isec(lsda as usize);
+                        match sym_at.get(&(lsda, lsda_off as u64)) {
+                            Some(&lsda_sym) => {
+                                let a = -(pos as i64);
+                                match size {
+                                    8 => eh_data[o + pos..o + pos + 8].copy_from_slice(&a.to_le_bytes()),
+                                    _ => eh_data[o + pos..o + pos + 4]
+                                        .copy_from_slice(&(a as i32).to_le_bytes()),
+                                }
+                                pair(&mut eh_relocs, off + pos as u32, if size == 8 { 3 } else { 2 }, me, lsda_sym);
+                            }
+                            None => {
+                                let l = &ctx.isecs[lsda];
+                                let lsda_addr = ctx.chunks[l.osec as usize].hdr.addr
+                                    + l.output_offset as u64
+                                    + lsda_off as u64;
+                                eh_patches.push((off + pos as u32, lsda_addr, size));
+                            }
+                        }
+                    }
+                }
             }
         }
     }

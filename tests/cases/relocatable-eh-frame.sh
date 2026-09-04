@@ -60,6 +60,19 @@ encs = [struct.unpack_from('<I', data, e + 12)[0] for e in range(0, size, 32)]
 assert 0x04000000 in encs, [hex(e) for e in encs]  # UNWIND_X86_64_MODE_DWARF
 EOF2
 
+# ld64 -r carries every input CIE and FDE (the compactly-encoded
+# functions' too), names each CIE EH_Frame1 and each FDE func.eh, and
+# writes the FDE's CIE pointer, pc_begin and LSDA fields as SUBTRACTOR
+# pairs against those symbols: a.o and b.o bring three FDEs (and a
+# CIE each, plus one for b.o's frame without a personality).
+nm -xp $t/merged.o | awk '{print $NF}' > $t/names
+[ "$(grep -c '^EH_Frame1$' $t/names)" -ge 2 ]
+[ "$(grep -c '^func.eh$' $t/names)" = 3 ]
+otool -rv $t/merged.o | sed -n '/__eh_frame/,/^Relocation information (__/p' > $t/eh_relocs
+[ "$(grep -c 'SUB     False     EH_Frame1' $t/eh_relocs)" = 3 ]
+[ "$(grep -c 'SUB     False     func.eh' $t/eh_relocs)" -ge 3 ]
+grep -q 'UNSIGND False     _through_asm' $t/eh_relocs
+
 # The exception unwinds through the assembly frame after a final link
 # by either linker.
 $CXX --ld-path=$mold -o $t/exe $t/merged.o

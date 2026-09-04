@@ -251,6 +251,7 @@ fn collect_file<E: Arch>(
 fn load_pending<E: Arch>(ctx: &mut Context<E>, pending: Vec<PendingObject>) {
     use rayon::prelude::*;
     let diag = ctx.diag.clone();
+    let relocatable = ctx.args.relocatable;
     let staged: Vec<input_files::StagedObject> = t!("stage", pending
         .par_iter()
         .map(|p| {
@@ -260,6 +261,7 @@ fn load_pending<E: Arch>(ctx: &mut Context<E>, pending: Vec<PendingObject>) {
                 p.alive,
                 p.hidden,
                 p.priority,
+                relocatable,
             )
         })
         .collect());

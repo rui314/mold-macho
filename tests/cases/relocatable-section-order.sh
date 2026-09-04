@@ -53,7 +53,9 @@ NSString *cf(void) { return @"cfstr"; }
 EOF2
 
 $mold -r -arch $ARCH -o $t/r.o $t/a.o $t/b.o
-otool -l $t/r.o | awk '/sectname/{s=$2} /segname/{if(s!=""){printf "%s,%s ", $2, s; s=""}}' > $t/order
+# (x86-64 objects also carry __eh_frame, which closes __TEXT; it is
+# left out of the comparison.)
+otool -l $t/r.o | awk '/sectname/{s=$2} /segname/{if(s!=""){printf "%s,%s ", $2, s; s=""}}' | sed 's/__TEXT,__eh_frame //' > $t/order
 grep -q '^__TEXT,__text __TEXT,__StaticInit __TEXT,__zz __TEXT,__aa __TEXT,__objc_classname __TEXT,__objc_methname __TEXT,__objc_methtype __TEXT,__cstring __DATA_CONST,__const __DATA,__mod_init_func __DATA,__const __DATA,__cfstring __DATA,__objc_classlist __DATA,__objc_nlclslist __DATA,__objc_catlist __DATA,__objc_nlcatlist __DATA,__objc_protolist __DATA,__objc_imageinfo __DATA,__objc_const __DATA,__objc_selrefs __DATA,__objc_protorefs __DATA,__objc_classrefs __DATA,__objc_superrefs __DATA,__objc_ivar __DATA,__objc_data __DATA,__zz __DATA,__thread_vars __DATA,__data __DATA,__thread_data __DATA,__thread_bss __DATA,__bss __LD,__compact_unwind $' $t/order
 
 # A zero-fill section in the middle takes no file space: the sections
