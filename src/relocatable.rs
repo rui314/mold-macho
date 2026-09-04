@@ -14,7 +14,7 @@
 //! carry no relocations); like ld64, the output gets debug-note stabs
 //! naming the input objects, which a later link carries through.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::arch::Arch;
 use crate::context::Context;
@@ -95,7 +95,25 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
         }
     }
 
-    // Local symbols.
+    // Local symbols. Assembler-local labels (L...) and linker-private
+    // ones (l...) do not appear in an output, ld64's -r output
+    // included - except that a relocation needs its target symbol,
+    // so a label something refers to stays (ld64 renames those to
+    // lNNN; the arm64 assembler names every section-relative target
+    // ltmpN). The rest of the local labels are the bulk of what made
+    // our -r symbol tables larger than ld-prime's (7739 vs 6540
+    // symbols for NetNewsWire's RSCore.o).
+    let mut referenced: HashSet<crate::symbol::SymbolId> = HashSet::new();
+    for isec in ctx.isecs.iter() {
+        if !isec.is_alive() || isec.obj == u32::MAX {
+            continue;
+        }
+        for rel in crate::input_files::isec_relocs_of(&ctx.objs, isec) {
+            if let RelocTarget::Sym(idx) = rel.target() {
+                referenced.insert(ctx.objs[isec.obj as usize].syms[idx as usize]);
+            }
+        }
+    }
     for obj in &ctx.objs {
         if !obj.is_alive {
             continue;
@@ -109,6 +127,9 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
             let Some(isec) = sym.isec().map(|i| i as usize) else { continue };
             let isec = ctx.resolve_isec(isec);
             if !ctx.isecs[isec].is_alive() || sym.name().is_empty() {
+                continue;
+            }
+            if (sym.name().starts_with('l') || sym.name().starts_with('L')) && !referenced.contains(&sym_id) {
                 continue;
             }
             index_of_sym.insert(sym_id, nlists_out.len() as u32);
