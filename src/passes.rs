@@ -2002,6 +2002,14 @@ fn objc_relative_method_lists<E: Arch>(ctx: &Context<E>) -> bool {
     })
 }
 
+/// A class's ro data: class_t.data at offset 32, whose low two bits a
+/// Swift class uses as flags (FAST_IS_SWIFT_STABLE), so the record
+/// itself sits at the pointer with those bits cleared.
+fn objc_class_ro<E: Arch>(ctx: &Context<E>, cls: (u32, u64)) -> Option<(u32, u64)> {
+    let (isec, off) = objc_pointer_at(ctx, cls.0, cls.1 + 32).and_then(|r| objc_ref_location(ctx, r))?;
+    Some((isec, off & !3))
+}
+
 /// The pointer stored at `off` in a subsection: the target of the
 /// 8-byte relocation there, if any.
 fn objc_pointer_at<E: Arch>(ctx: &Context<E>, isec: u32, off: u64) -> Option<ObjcRef> {
@@ -2103,7 +2111,7 @@ pub fn convert_objc_method_lists<E: Arch>(ctx: &mut Context<E>) {
             return;
         }
         // class_t: isa, superclass, cache, vtable, data (the ro).
-        if let Some(ro) = objc_pointer_at(ctx, cls.0, 32).and_then(|r| objc_ref_location(ctx, r)) {
+        if let Some(ro) = objc_class_ro(ctx, cls) {
             // class_ro_t: baseMethods at 32.
             note(ctx, objc_pointer_at(ctx, ro.0, ro.1 + 32), lists);
         }
@@ -2331,9 +2339,9 @@ pub fn merge_objc_categories<E: Arch>(ctx: &mut Context<E>) {
         };
         for off in (0..isec.size as u64).step_by(8) {
             let Some(cls) = objc_pointer_at(ctx, i as u32, off).and_then(|r| objc_ref_location(ctx, r)) else { continue };
-            let ro = objc_pointer_at(ctx, cls.0, cls.1 + 32).and_then(|r| objc_ref_location(ctx, r));
+            let ro = objc_class_ro(ctx, cls);
             let meta = objc_pointer_at(ctx, cls.0, cls.1).and_then(|r| objc_ref_location(ctx, r));
-            let meta_ro = meta.and_then(|m| objc_pointer_at(ctx, m.0, m.1 + 32)).and_then(|r| objc_ref_location(ctx, r));
+            let meta_ro = meta.and_then(|m| objc_class_ro(ctx, m));
             let (Some(ro), Some(_meta), Some(meta_ro)) = (ro, meta, meta_ro) else { continue };
             if !classes.contains_key(&cls) {
                 class_order.push(cls);
@@ -2589,6 +2597,11 @@ pub fn merge_objc_categories<E: Arch>(ctx: &mut Context<E>) {
             ok = m.protocols.iter().all(|&r| local(ctx, r))
                 && m.iprops.iter().chain(&m.cprops).all(|&(a, b)| local(ctx, a) && local(ctx, b));
         }
+        // The ro records must be subsections of their own to be
+        // replaced. Nothing is changed until everything checks out.
+        if ro.1 != 0 || ctx.isecs[ro.0 as usize].size != 72 || meta_ro.1 != 0 || ctx.isecs[meta_ro.0 as usize].size != 72 {
+            ok = false;
+        }
         if !ok {
             continue;
         }
@@ -2772,11 +2785,6 @@ pub fn merge_objc_categories<E: Arch>(ctx: &mut Context<E>) {
             }
             blob
         };
-        // The ro must be a subsection of its own to be replaced.
-        if ro.1 != 0 || ctx.isecs[ro.0 as usize].size != 72 || meta_ro.1 != 0 || ctx.isecs[meta_ro.0 as usize].size != 72 {
-            continue;
-        }
-        // Only now is the merge irrevocable: drop the categories.
         rewrite_ro(ctx, ro, imethods, protocols, iprops, &mut new_blob);
         rewrite_ro(ctx, meta_ro, cmethods, protocols, cprops, &mut new_blob);
         let mut any_nonlazy = false;
