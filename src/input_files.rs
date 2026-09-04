@@ -98,7 +98,7 @@ pub struct DylibFile {
     pub current_version: u32,
     pub compatibility_version: u32,
     /// The 1-based ordinal used to refer to this dylib in bind records;
-    /// BIND_SPECIAL_DYLIB_MAIN_EXECUTABLE (0) for a -bundle_loader.
+    /// BIND_SPECIAL_DYLIB_MAIN_EXECUTABLE (-1) for a -bundle_loader.
     pub dylib_idx: i32,
     /// The -bundle_loader executable: its symbols bind to the main
     /// executable at run time and it gets no LC_LOAD_DYLIB.
