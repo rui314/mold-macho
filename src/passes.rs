@@ -4541,6 +4541,25 @@ pub fn create_output_symtab<E: Arch>(
                 None,
             ));
         }
+        // The selector stubs, each a non-external symbol with N_PEXT
+        // set (nm: "was a private external"), as ld64 lists them -
+        // NetNewsWire's debug dylib has 851 _objc_msgSend$... entries.
+        if !ctx.objc_stubs.is_empty() {
+            let chunk = &ctx.chunks[ctx.objc_stubs_chunk];
+            for (i, &(sym, _)) in ctx.objc_stubs.iter().enumerate() {
+                names.push(ctx.symtab[sym].name());
+                data.entries.push((
+                    NList {
+                        n_strx: 0,
+                        n_type: N_PEXT | N_SECT,
+                        n_sect: ordinals[ctx.objc_stubs_chunk],
+                        n_desc: 0,
+                        n_value: chunk.hdr.addr + i as u64 * E::OBJC_STUB_SIZE,
+                    },
+                    None,
+                ));
+            }
+        }
     }
     if std::env::var_os("MOLD_TIMING").is_some() {
         eprintln!("      symtab-locals {:?}", __t.elapsed());
