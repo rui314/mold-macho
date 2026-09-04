@@ -3516,6 +3516,37 @@ pub fn create_output_sections<E: Arch>(ctx: &mut Context<E>) {
         }
     }
 
+    // Cold code last: clang marks the rarely-run part it splits off a
+    // function (foo.cold.1, and the function it came from) N_COLD_FUNC,
+    // and ld64 lays those atoms out after every other atom of their
+    // section - in final images and -r outputs alike - so hot code
+    // stays dense.
+    {
+        let mut cold = vec![false; ctx.isecs.len()];
+        let mut any = false;
+        for obj in &ctx.objs {
+            if !obj.is_alive {
+                continue;
+            }
+            for (nlist, &sym_id) in obj.nlists.iter().zip(&obj.syms) {
+                if nlist.is_stab() || nlist.n_type() != N_SECT || nlist.n_desc & N_COLD_FUNC == 0 {
+                    continue;
+                }
+                if let Some(isec) = ctx.symtab[sym_id].isec() {
+                    cold[isec as usize] = true;
+                    any = true;
+                }
+            }
+        }
+        if any {
+            for chunk in &mut ctx.chunks {
+                if let ChunkKind::Output { isecs, .. } = &mut chunk.kind {
+                    isecs.sort_by_key(|&id| cold[id as usize]);
+                }
+            }
+        }
+    }
+
     // Compute each input section's offset within its output section.
     // Following mold's design, sections lay out in parallel: each
     // output section's offsets depend only on its own members, so the
