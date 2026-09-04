@@ -119,6 +119,10 @@ const F_NO_DEAD_STRIP: u16 = 1 << 6;
 const F_COMMON: u16 = 1 << 7;
 /// Set by mark(), a transient per-pass flag (mold-rust's IS_MARKED).
 const F_MARK: u16 = 1 << 8;
+/// Referenced non-weakly by some object: with ld64's default
+/// -weak_reference_mismatches non-weak, that makes the import strong
+/// whatever other references say.
+const F_STRONG_REF: u16 = 1 << 9;
 
 macro_rules! sym_flag {
     ($get:ident, $set:ident, $bit:expr, $doc:expr) => {
@@ -148,6 +152,8 @@ impl Symbol {
         "Some relocation refers to this symbol, so an unresolved symbol is an error.");
     sym_flag!(is_private_extern, set_is_private_extern, F_PRIVATE_EXTERN,
         "A private external symbol (visibility hidden): resolves globally at link time but is neither exported nor kept as an external symbol.");
+    sym_flag!(is_strong_ref, set_is_strong_ref, F_STRONG_REF,
+        "Referenced non-weakly by some object.");
     sym_flag!(is_weak_ref, set_is_weak_ref, F_WEAK_REF,
         "References may go unresolved at load time (a weak import).");
     sym_flag!(no_dead_strip, set_no_dead_strip, F_NO_DEAD_STRIP,

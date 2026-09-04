@@ -639,6 +639,18 @@ pub fn copy_mach_header<E: Arch>(ctx: &Context<E>, buf: &mut [u8]) {
         }
         _ => {}
     }
+    // MH_BINDS_TO_WEAK: the image binds to a symbol some dylib
+    // defines weakly (dyld must then consider weak coalescing when it
+    // binds). ld-prime sets it on an executable calling a dylib's
+    // weak definition.
+    if ctx.symtab.syms.iter().any(|sym| match sym.origin() {
+        Origin::Dylib(idx) => {
+            idx != u32::MAX && sym.is_used() && ctx.dylibs[idx as usize].weak_exports.contains(sym.name())
+        }
+        _ => false,
+    }) {
+        hdr.flags |= MH_BINDS_TO_WEAK;
+    }
     // MH_WEAK_DEFINES advertises exported weak symbols; auto-hidden
     // and private-extern weak definitions don't count, since no other
     // image can coalesce against them.

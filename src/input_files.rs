@@ -140,6 +140,9 @@ pub struct DylibFile {
     /// LC_SUB_CLIENT: clients allowed to link this subframework.
     pub sub_clients: Vec<String>,
     pub exports: hashbrown::HashSet<&'static str>,
+    /// Exports that are weak definitions: binding to one sets
+    /// MH_BINDS_TO_WEAK on the client image.
+    pub weak_exports: hashbrown::HashSet<&'static str>,
     /// The subset of exports that are thread-local variables.
     pub tlv_exports: hashbrown::HashSet<&'static str>,
 }
@@ -1669,6 +1672,7 @@ fn load_reexports<E: Arch>(
     parent: &str,
     exports: &mut hashbrown::HashSet<&'static str>,
     tlv_exports: &mut hashbrown::HashSet<&'static str>,
+    weak_exports: &mut hashbrown::HashSet<&'static str>,
 ) {
     let mut queue = reexports;
     let mut visited = std::collections::HashSet::new();
@@ -1686,6 +1690,7 @@ fn load_reexports<E: Arch>(
             if !public {
                 exports.extend(loaded.exports.iter().copied());
                 tlv_exports.extend(loaded.tlv_exports.iter().copied());
+                weak_exports.extend(loaded.weak_exports.iter().copied());
             }
             continue;
         }
@@ -1705,6 +1710,7 @@ fn load_reexports<E: Arch>(
                 tlv_exports.extend(dep_tbd.tlv_exports.iter().copied());
                 exports.extend(dep_tbd.tlv_exports);
                 exports.extend(dep_tbd.exports);
+                weak_exports.extend(dep_tbd.weak_exports.iter().copied());
                 exports.extend(dep_tbd.weak_exports);
                 for dep_name in dep_tbd.external_reexports {
                     queue.push((dep_name.to_string(), dir_of(&dep.name), Vec::new()));
@@ -1809,6 +1815,7 @@ pub fn parse_dylib_binary<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile
     }
 
     let mut exports: hashbrown::HashSet<&'static str> = hashbrown::HashSet::new();
+    let mut weak_exports: hashbrown::HashSet<&'static str> = hashbrown::HashSet::new();
     let mut tlv_exports: hashbrown::HashSet<&'static str> = hashbrown::HashSet::new();
     if let (Some(sym), Some(dysym)) = (symtab_cmd, dysymtab_cmd) {
         let nlists: Vec<NList> = read_array(data, sym.symoff as usize, sym.nsyms as usize);
@@ -1826,6 +1833,9 @@ pub fn parse_dylib_binary<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile
             if tlv_sects.contains(&nlist.n_sect) {
                 tlv_exports.insert(name);
             }
+            if nlist.n_desc & N_WEAK_DEF != 0 {
+                weak_exports.insert(name);
+            }
             exports.insert(name);
         }
     }
@@ -1833,6 +1843,9 @@ pub fn parse_dylib_binary<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile
         for (name, flags) in export_trie_entries(data, off, size) {
             if flags as u32 & EXPORT_SYMBOL_FLAGS_KIND_MASK == EXPORT_SYMBOL_FLAGS_KIND_THREAD_LOCAL {
                 tlv_exports.insert(name);
+            }
+            if flags as u32 & EXPORT_SYMBOL_FLAGS_WEAK_DEFINITION != 0 {
+                weak_exports.insert(name);
             }
             exports.insert(name);
         }
@@ -1845,7 +1858,7 @@ pub fn parse_dylib_binary<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile
         .into_iter()
         .map(|name| (name, dir_of(&mf.name), rpaths.clone()))
         .collect();
-    load_reexports(ctx, reexports, &mf.name, &mut exports, &mut tlv_exports);
+    load_reexports(ctx, reexports, &mf.name, &mut exports, &mut tlv_exports, &mut weak_exports);
 
     let priority = ctx.next_priority();
     add_dylib(
@@ -1869,6 +1882,7 @@ pub fn parse_dylib_binary<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile
             sub_framework,
             sub_clients,
             exports,
+            weak_exports,
             tlv_exports,
         },
     )
@@ -2065,6 +2079,7 @@ pub fn parse_bundle_loader<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFil
             sub_framework: None,
             sub_clients: Vec::new(),
             exports,
+            weak_exports: hashbrown::HashSet::new(),
             tlv_exports,
         },
     )
@@ -2289,6 +2304,8 @@ pub fn parse_dylib<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile) -> us
     interpret_ld_symbols(ctx, &mut tbd);
     let mut exports: hashbrown::HashSet<&'static str> =
         tbd.exports.into_iter().collect();
+    let mut weak_exports: hashbrown::HashSet<&'static str> =
+        tbd.weak_exports.iter().copied().collect();
     exports.extend(tbd.weak_exports);
     let mut tlv_exports: hashbrown::HashSet<&'static str> =
         tbd.tlv_exports.into_iter().collect();
@@ -2299,7 +2316,7 @@ pub fn parse_dylib<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile) -> us
         .into_iter()
         .map(|name| (name.to_string(), dir_of(&mf.name), Vec::new()))
         .collect();
-    load_reexports(ctx, reexports, &mf.name, &mut exports, &mut tlv_exports);
+    load_reexports(ctx, reexports, &mf.name, &mut exports, &mut tlv_exports, &mut weak_exports);
 
     let priority = ctx.next_priority();
     add_dylib(
@@ -2323,6 +2340,7 @@ pub fn parse_dylib<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile) -> us
             sub_framework: None,
             sub_clients: Vec::new(),
             exports,
+            weak_exports,
             tlv_exports,
         },
     )

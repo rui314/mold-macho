@@ -660,6 +660,7 @@ fn do_resolve<E: Arch>(ctx: &mut Context<E>, only_alive: bool) {
     // otherwise demand definitions nothing live needs.
     let used: Vec<AtomicBool> = (0..n).map(|_| AtomicBool::new(false)).collect();
     let weak_ref: Vec<AtomicBool> = (0..n).map(|_| AtomicBool::new(false)).collect();
+    let strong_ref: Vec<AtomicBool> = (0..n).map(|_| AtomicBool::new(false)).collect();
     ctx.objs
         .par_iter()
         .filter(|obj| !only_alive || obj.is_alive)
@@ -670,6 +671,8 @@ fn do_resolve<E: Arch>(ctx: &mut Context<E>, only_alive: bool) {
                     used[sym_id as usize].store(true, Ordering::Relaxed);
                     if nlist.n_desc & N_WEAK_REF != 0 {
                         weak_ref[sym_id as usize].store(true, Ordering::Relaxed);
+                    } else {
+                        strong_ref[sym_id as usize].store(true, Ordering::Relaxed);
                     }
                 }
             }
@@ -845,9 +848,17 @@ fn do_resolve<E: Arch>(ctx: &mut Context<E>, only_alive: bool) {
         );
     }
 
-    // Record weak references seen this round.
-    for (i, w) in weak_ref.iter().enumerate() {
-        if w.load(Ordering::Relaxed) {
+    // Record the references seen this round. A symbol is a weak import
+    // only if every reference to it is weak: one strong reference
+    // anywhere makes it strong (ld64's default, -weak_reference_
+    // mismatches non-weak), and so binds it non-weakly and keeps its
+    // dylib loaded non-weakly.
+    for i in 0..n {
+        if strong_ref[i].load(Ordering::Relaxed) {
+            let sym = &mut ctx.symtab.syms[i];
+            sym.set_is_strong_ref(true);
+            sym.set_is_weak_ref(false);
+        } else if weak_ref[i].load(Ordering::Relaxed) && !ctx.symtab.syms[i].is_strong_ref() {
             ctx.symtab.syms[i].set_is_weak_ref(true);
         }
     }
@@ -1620,11 +1631,26 @@ pub fn dead_strip_dylibs<E: Arch>(ctx: &mut Context<E>) {
     for (i, dylib) in ctx.dylibs.iter().enumerate() {
         used[i] = dylib.is_needed || !strippable(dylib);
     }
+    // A dylib every reference to which is a weak import loads weakly
+    // (LC_LOAD_WEAK_DYLIB), as ld64 does: the Swift overlays a program
+    // reaches only through their weak __swift_FORCE_LOAD_$_ symbols
+    // come out weak, libswiftCore strong.
+    let mut bound = vec![0u32; ctx.dylibs.len()];
+    let mut weak = vec![0u32; ctx.dylibs.len()];
     for sym in &ctx.symtab.syms {
         if let Origin::Dylib(idx) = sym.origin() {
             if idx != u32::MAX {
                 used[idx as usize] = true;
+                if sym.is_used() {
+                    bound[idx as usize] += 1;
+                    weak[idx as usize] += sym.is_weak_ref() as u32;
+                }
             }
+        }
+    }
+    for (i, dylib) in ctx.dylibs.iter_mut().enumerate() {
+        if bound[i] > 0 && weak[i] == bound[i] {
+            dylib.is_weak = true;
         }
     }
 
