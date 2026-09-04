@@ -194,6 +194,10 @@ const _: () = assert!(std::mem::size_of::<InputSection>() == 56);
 
 const IS_ALIVE: u8 = 1 << 0;
 const IS_VISITED: u8 = 1 << 1;
+/// Placed by the pass that synthesized it (its osec and output offset
+/// are set by hand), so create_output_sections must not assign it to
+/// an output section by name.
+const IS_PLACED: u8 = 1 << 2;
 
 impl InputSection {
     /// The initial flag word of a live section.
@@ -203,6 +207,15 @@ impl InputSection {
     /// The initial flag word of a section that never joins the link.
     pub fn flags_dead() -> std::sync::atomic::AtomicU8 {
         std::sync::atomic::AtomicU8::new(0)
+    }
+    /// The initial flag word of a live synthetic section placed by the
+    /// pass that made it.
+    pub fn flags_placed() -> std::sync::atomic::AtomicU8 {
+        std::sync::atomic::AtomicU8::new(IS_ALIVE | IS_PLACED)
+    }
+    #[inline]
+    pub fn is_placed(&self) -> bool {
+        self.flags.load(std::sync::atomic::Ordering::Relaxed) & IS_PLACED != 0
     }
     #[inline]
     /// The next output offset at or after `off` where this subsection

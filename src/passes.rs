@@ -1964,6 +1964,288 @@ pub fn fold_objc_classrefs<E: Arch>(ctx: &mut Context<E>) {
     }
 }
 
+/// A reference held by a rewritten method-list entry, resolved to an
+/// address when the list is written.
+#[derive(Clone, Copy, Debug)]
+pub enum ObjcRef {
+    /// A subsection plus offset.
+    Isec(u32, u64),
+    /// A symbol plus addend.
+    Sym(crate::symbol::SymbolId, i64),
+    /// Slot `n` of the synthesized selector references in the
+    /// __objc_selrefs tail (the objc stubs' slots come first).
+    TailSelref(usize),
+    Null,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct ObjcMethod {
+    /// The selector reference the entry points at (a slot holding the
+    /// uniqued selector), not the selector string.
+    pub name: ObjcRef,
+    pub types: ObjcRef,
+    pub imp: ObjcRef,
+}
+
+#[derive(Debug)]
+pub struct ObjcMethList {
+    /// The synthetic subsection standing for the rewritten list in
+    /// __TEXT,__objc_methlist.
+    pub isec: u32,
+    pub methods: Vec<ObjcMethod>,
+}
+
+fn objc_relative_method_lists<E: Arch>(ctx: &Context<E>) -> bool {
+    ctx.args.objc_relative_method_lists.unwrap_or_else(|| {
+        ctx.args.platform == crate::macho::PLATFORM_MACOS
+            && ctx.args.platform_minos >= crate::macho::encode_version(11, 0, 0)
+    })
+}
+
+/// The pointer stored at `off` in a subsection: the target of the
+/// 8-byte relocation there, if any.
+fn objc_pointer_at<E: Arch>(ctx: &Context<E>, isec: u32, off: u64) -> Option<ObjcRef> {
+    let sec = &ctx.isecs[isec];
+    if sec.obj == u32::MAX {
+        return None;
+    }
+    let rel = ctx
+        .isec_relocs(isec as usize)
+        .iter()
+        .find(|r| r.offset as u64 == off && r.size == 8 && !r.is_pcrel && !r.is_subtracted)?;
+    if E::classify_reloc(rel.r_type) != RelocClass::Plain {
+        return None;
+    }
+    Some(match rel.target() {
+        RelocTarget::Sym(idx) => ObjcRef::Sym(ctx.objs[sec.obj as usize].syms[idx as usize], rel.addend),
+        RelocTarget::Section(t) => ObjcRef::Isec(t, rel.addend as u64),
+    })
+}
+
+/// A reference's location as (live subsection, offset), for data
+/// defined in this link; None for an import or an absolute.
+fn objc_ref_location<E: Arch>(ctx: &Context<E>, r: ObjcRef) -> Option<(u32, u64)> {
+    let (isec, off) = match r {
+        ObjcRef::Isec(isec, off) => (isec, off),
+        ObjcRef::Sym(id, addend) => {
+            let sym = &ctx.symtab[id];
+            let isec = sym.isec()?;
+            (isec, (sym.value as i64 + addend) as u64)
+        }
+        _ => return None,
+    };
+    let isec = ctx.resolve_isec(isec as usize) as u32;
+    if !ctx.isecs[isec as usize].is_alive() {
+        return None;
+    }
+    Some((isec, off))
+}
+
+/// Rewrites the Objective-C method lists in the relative form, as
+/// ld64 does from a deployment target of macOS 11 (its
+/// -objc_relative_method_lists). A classic entry is three pointers
+/// (selector string, type string, implementation), each a fixup dyld
+/// must apply and the runtime must then unique; a relative entry is
+/// three 32-bit self-relative offsets, the first to a selector
+/// reference slot (already uniqued by dyld), needing no fixups at
+/// all, and the lists move to read-only __TEXT,__objc_methlist.
+///
+/// The lists are found the way the runtime finds them: through
+/// __objc_classlist (class and metaclass ro data), __objc_catlist,
+/// __objc_protolist (all four lists of a protocol) and Swift's
+/// __objc_clsrolist. A selector with no reference in any input gets
+/// one synthesized in the __objc_selrefs tail. A list is left alone
+/// when it is not the whole of its subsection or not in the classic
+/// 24-byte form.
+pub fn convert_objc_method_lists<E: Arch>(ctx: &mut Context<E>) {
+    if ctx.args.relocatable || !objc_relative_method_lists(ctx) {
+        return;
+    }
+
+    // Selector references the inputs already have, by the selector
+    // string subsection they point at.
+    let mut selref_of: hashbrown::HashMap<u32, u32> = hashbrown::HashMap::new();
+    for i in 0..ctx.isecs.len() {
+        let isec = &ctx.isecs[i];
+        if !isec.is_alive() || isec.obj == u32::MAX || isec.size != 8 {
+            continue;
+        }
+        let h = ctx.hdr_of(isec);
+        if h.sectname() != "__objc_selrefs" || h.section_type() != S_LITERAL_POINTERS {
+            continue;
+        }
+        let Some(target) = objc_pointer_at(ctx, i as u32, 0) else { continue };
+        if let Some((name, 0)) = objc_ref_location(ctx, target) {
+            let slot = ctx.resolve_isec(i) as u32;
+            selref_of.entry(name).or_insert(slot);
+        }
+    }
+
+    // Every method list the runtime would visit.
+    let mut lists: Vec<u32> = Vec::new();
+    let mut seen: hashbrown::HashSet<u32> = hashbrown::HashSet::new();
+    let mut classes_seen: hashbrown::HashSet<u32> = hashbrown::HashSet::new();
+    let mut note = |ctx: &Context<E>, r: Option<ObjcRef>, lists: &mut Vec<u32>| {
+        if let Some((isec, 0)) = r.and_then(|r| objc_ref_location(ctx, r)) {
+            if seen.insert(isec) {
+                lists.push(isec);
+            }
+        }
+    };
+    fn visit_class<E: Arch>(
+        ctx: &Context<E>,
+        cls: (u32, u64),
+        classes_seen: &mut hashbrown::HashSet<u32>,
+        note: &mut impl FnMut(&Context<E>, Option<ObjcRef>, &mut Vec<u32>),
+        lists: &mut Vec<u32>,
+    ) {
+        if cls.1 != 0 || !classes_seen.insert(cls.0) {
+            return;
+        }
+        // class_t: isa, superclass, cache, vtable, data (the ro).
+        if let Some(ro) = objc_pointer_at(ctx, cls.0, 32).and_then(|r| objc_ref_location(ctx, r)) {
+            // class_ro_t: baseMethods at 32.
+            note(ctx, objc_pointer_at(ctx, ro.0, ro.1 + 32), lists);
+        }
+        if let Some(meta) = objc_pointer_at(ctx, cls.0, 0).and_then(|r| objc_ref_location(ctx, r)) {
+            visit_class(ctx, meta, classes_seen, note, lists);
+        }
+    }
+    for i in 0..ctx.isecs.len() {
+        let isec = &ctx.isecs[i];
+        if !isec.is_alive() || isec.obj == u32::MAX {
+            continue;
+        }
+        let h = ctx.hdr_of(isec);
+        if !h.segname().starts_with("__DATA") {
+            continue;
+        }
+        match h.sectname() {
+            "__objc_classlist" | "__objc_nlclslist" => {
+                for off in (0..isec.size as u64).step_by(8) {
+                    if let Some(cls) = objc_pointer_at(ctx, i as u32, off).and_then(|r| objc_ref_location(ctx, r)) {
+                        visit_class(ctx, cls, &mut classes_seen, &mut note, &mut lists);
+                    }
+                }
+            }
+            "__objc_catlist" | "__objc_nlcatlist" => {
+                for off in (0..isec.size as u64).step_by(8) {
+                    if let Some(cat) = objc_pointer_at(ctx, i as u32, off).and_then(|r| objc_ref_location(ctx, r)) {
+                        // category_t: name, cls, instanceMethods, classMethods.
+                        note(ctx, objc_pointer_at(ctx, cat.0, cat.1 + 16), &mut lists);
+                        note(ctx, objc_pointer_at(ctx, cat.0, cat.1 + 24), &mut lists);
+                    }
+                }
+            }
+            "__objc_protolist" => {
+                for off in (0..isec.size as u64).step_by(8) {
+                    if let Some(proto) = objc_pointer_at(ctx, i as u32, off).and_then(|r| objc_ref_location(ctx, r)) {
+                        // protocol_t: isa, name, protocols, then the four
+                        // method lists.
+                        for field in [24, 32, 40, 48] {
+                            note(ctx, objc_pointer_at(ctx, proto.0, proto.1 + field), &mut lists);
+                        }
+                    }
+                }
+            }
+            "__objc_clsrolist" => {
+                for off in (0..isec.size as u64).step_by(8) {
+                    if let Some(ro) = objc_pointer_at(ctx, i as u32, off).and_then(|r| objc_ref_location(ctx, r)) {
+                        note(ctx, objc_pointer_at(ctx, ro.0, ro.1 + 32), &mut lists);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    if lists.is_empty() {
+        return;
+    }
+
+    let hdr: &'static MachSection = Box::leak(Box::new(MachSection {
+        sectname: str_to_name("__objc_methlist"),
+        segname: str_to_name("__TEXT"),
+        p2align: 2,
+        flags: S_REGULAR,
+        ..Default::default()
+    }));
+    ctx.synthetic_hdrs.push(hdr);
+    let shndx = (ctx.synthetic_hdrs.len() - 1) as u32;
+    let mut extra_of: hashbrown::HashMap<u32, usize> = hashbrown::HashMap::new();
+    let mut repoint: hashbrown::HashMap<u32, u32> = hashbrown::HashMap::new();
+    let mut offset: u64 = 0;
+    for list in lists {
+        let sec = &ctx.isecs[list as usize];
+        let data = sec.data();
+        if data.len() < 8 {
+            continue;
+        }
+        let entsize_flags = u32::from_le_bytes(data[0..4].try_into().unwrap());
+        let count = u32::from_le_bytes(data[4..8].try_into().unwrap()) as u64;
+        if entsize_flags & 0x8000_0000 != 0 || entsize_flags & 0xffff != 24 || 8 + 24 * count != data.len() as u64 {
+            continue;
+        }
+        let mut methods = Vec::with_capacity(count as usize);
+        let mut ok = true;
+        for i in 0..count {
+            let at = 8 + 24 * i;
+            let name = objc_pointer_at(ctx, list, at);
+            let types = objc_pointer_at(ctx, list, at + 8).unwrap_or(ObjcRef::Null);
+            let imp = objc_pointer_at(ctx, list, at + 16).unwrap_or(ObjcRef::Null);
+            let Some((sel, 0)) = name.and_then(|r| objc_ref_location(ctx, r)) else {
+                ok = false;
+                break;
+            };
+            let name = match selref_of.get(&sel) {
+                Some(&slot) => ObjcRef::Isec(slot, 0),
+                None => {
+                    let n = *extra_of.entry(sel).or_insert_with(|| {
+                        ctx.objc_extra_selrefs.push(sel);
+                        ctx.objc_extra_selrefs.len() - 1
+                    });
+                    ObjcRef::TailSelref(ctx.objc_stubs.len() + n)
+                }
+            };
+            methods.push(ObjcMethod { name, types, imp });
+        }
+        if !ok {
+            continue;
+        }
+        let size = 8 + 12 * count;
+        offset = align_to(offset, 4);
+        ctx.isecs.push(InputSection {
+            obj: u32::MAX,
+            shndx,
+            p2align: 2,
+            input_addr: 0,
+            size: size as u32,
+            data_ptr: 0,
+            rel_offset: 0,
+            nrels: 0,
+            osec: u32::MAX,
+            output_offset: offset as u32,
+            flags: InputSection::flags_placed(),
+            replacement: crate::input_sections::NO_REPLACEMENT,
+            unwind_offset: 0,
+            nunwind: 0,
+        });
+        offset += size;
+        let synth = (ctx.isecs.len() - 1) as u32;
+        ctx.isecs[list as usize].replacement = synth;
+        repoint.insert(list, synth);
+        ctx.objc_methlists.push(ObjcMethList { isec: synth, methods });
+    }
+    // The lists' own symbols (__OBJC_$_INSTANCE_METHODS_Foo ...) follow
+    // them into __objc_methlist.
+    for id in 0..ctx.symtab.syms.len() {
+        if let Some(isec) = ctx.symtab[id].isec() {
+            if let Some(&synth) = repoint.get(&isec) {
+                ctx.symtab[id].set_isec(Some(synth));
+            }
+        }
+    }
+}
+
 /// Defines the symbols the linker itself provides.
 pub fn add_synthetic_symbols<E: Arch>(ctx: &mut Context<E>) {
     if ctx.args.output_type == MH_EXECUTE {
@@ -2299,7 +2581,10 @@ pub fn create_output_sections<E: Arch>(ctx: &mut Context<E>) {
     let mut last_hdr: *const crate::macho::MachSection = std::ptr::null();
     let mut last_chunk: usize = 0;
     for i in 0..ctx.isecs.len() {
-        if !ctx.isecs[i].is_alive() || ctx.isecs[i].replacement != crate::input_sections::NO_REPLACEMENT {
+        if !ctx.isecs[i].is_alive()
+            || ctx.isecs[i].replacement != crate::input_sections::NO_REPLACEMENT
+            || ctx.isecs[i].is_placed()
+        {
             continue;
         }
         let hdr = ctx.hdr_of(&ctx.isecs[i]);
@@ -2540,6 +2825,8 @@ pub fn create_output_sections<E: Arch>(ctx: &mut Context<E>) {
         chunk.hdr.p2align = 5;
         chunk.hdr.size = ctx.objc_stubs.len() as u64 * E::OBJC_STUB_SIZE;
         ctx.chunks.push(chunk);
+    }
+    if !ctx.objc_stubs.is_empty() || !ctx.objc_extra_selrefs.is_empty() {
 
         // The stubs' selector strings and reference slots join the
         // sections of those names (as their tail): the Objective-C
@@ -2579,9 +2866,24 @@ pub fn create_output_sections<E: Arch>(ctx: &mut Context<E>) {
             chunk.hdr.size = chunk.tail_off + tail_size;
         };
         let methname_size = ctx.objc_methname_data.len() as u64;
-        let selrefs_size = ctx.objc_stubs.len() as u64 * 8;
-        tail_section(ctx, "__TEXT", "__objc_methname", S_CSTRING_LITERALS, 0, Tail::ObjcMethname, methname_size);
+        let selrefs_size = (ctx.objc_stubs.len() + ctx.objc_extra_selrefs.len()) as u64 * 8;
+        if methname_size > 0 {
+            tail_section(ctx, "__TEXT", "__objc_methname", S_CSTRING_LITERALS, 0, Tail::ObjcMethname, methname_size);
+        }
         tail_section(ctx, "__DATA", "__objc_selrefs", S_LITERAL_POINTERS | S_ATTR_NO_DEAD_STRIP, 3, Tail::ObjcSelrefs, selrefs_size);
+    }
+
+    if !ctx.objc_methlists.is_empty() {
+        let mut chunk = Chunk::new("__TEXT", "__objc_methlist", ChunkKind::ObjcMethlist);
+        chunk.hdr.p2align = 2;
+        let last = ctx.objc_methlists.last().unwrap().isec as usize;
+        chunk.hdr.size = ctx.isecs[last].output_offset as u64 + ctx.isecs[last].size as u64;
+        ctx.chunks.push(chunk);
+        let idx = (ctx.chunks.len() - 1) as u32;
+        for i in 0..ctx.objc_methlists.len() {
+            let isec = ctx.objc_methlists[i].isec as usize;
+            ctx.isecs[isec].osec = idx;
+        }
     }
 
     // Sections synthesized from files by -sectcreate.
@@ -3781,7 +4083,7 @@ fn build_rebase_info<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
     }
 
     // Selector reference slots hold pointers into __objc_methname.
-    for i in 0..ctx.objc_stubs.len() {
+    for i in 0..ctx.objc_stubs.len() + ctx.objc_extra_selrefs.len() {
         locs.push(ctx.objc_selref_addr(i));
     }
 
@@ -4020,7 +4322,7 @@ fn collect_fixups<E: Arch>(ctx: &Context<E>) -> Vec<(u64, Option<crate::symbol::
             fixups.push((addr + i as u64 * 8, sym, 0));
         }
     }
-    for i in 0..ctx.objc_stubs.len() {
+    for i in 0..ctx.objc_stubs.len() + ctx.objc_extra_selrefs.len() {
         fixups.push((ctx.objc_selref_addr(i), None, 0));
     }
 
@@ -4496,10 +4798,45 @@ fn copy_chunk<E: Arch>(ctx: &Context<E>, chunk: &Chunk, buf: &mut [u8]) {
                         let val = ctx.objc_methname_addr(i);
                         tail[i * 8..i * 8 + 8].copy_from_slice(&val.to_le_bytes());
                     }
+                    let n = ctx.objc_stubs.len();
+                    for (j, &name) in ctx.objc_extra_selrefs.iter().enumerate() {
+                        let val = ctx.isec_addr(name as usize);
+                        tail[(n + j) * 8..(n + j) * 8 + 8].copy_from_slice(&val.to_le_bytes());
+                    }
                 }
             }
         }
         ChunkKind::Stubs => E::write_stubs(ctx, chunk.hdr.addr, buf),
+        ChunkKind::ObjcMethlist => {
+            let addr_of = |r: ObjcRef| -> u64 {
+                match r {
+                    ObjcRef::Isec(isec, off) => ctx.isec_addr(isec as usize) + off,
+                    ObjcRef::Sym(id, addend) => (ctx.sym_addr(id) as i64 + addend) as u64,
+                    ObjcRef::TailSelref(n) => ctx.objc_selref_addr(n),
+                    ObjcRef::Null => 0,
+                }
+            };
+            for list in &ctx.objc_methlists {
+                let isec = &ctx.isecs[list.isec as usize];
+                let base = isec.output_offset as usize;
+                let addr = chunk.hdr.addr + base as u64;
+                let count = list.methods.len() as u32;
+                buf[base..base + 4].copy_from_slice(&(12u32 | 0x8000_0000).to_le_bytes());
+                buf[base + 4..base + 8].copy_from_slice(&count.to_le_bytes());
+                for (i, m) in list.methods.iter().enumerate() {
+                    let at = base + 8 + 12 * i;
+                    let field = addr + 8 + 12 * i as u64;
+                    for (k, r) in [m.name, m.types, m.imp].into_iter().enumerate() {
+                        let target = addr_of(r);
+                        let rel = if target == 0 { 0 } else { target.wrapping_sub(field + 4 * k as u64) as i64 };
+                        if rel != rel as i32 as i64 {
+                            fatal!(ctx, "relative method list entry out of range");
+                        }
+                        buf[at + 4 * k..at + 4 * k + 4].copy_from_slice(&(rel as i32).to_le_bytes());
+                    }
+                }
+            }
+        }
         ChunkKind::Got => {
             // Slots for imported symbols stay zero; dyld fills them
             // via the bind stream.

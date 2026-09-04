@@ -64,6 +64,13 @@ pub struct Context<E: Arch> {
     /// _objc_msgSend$<selector> symbols, in __objc_stubs entry order,
     /// with their selector names.
     pub objc_stubs: Vec<(SymbolId, String)>,
+    /// Selector references synthesized for method lists whose selector
+    /// no input references: the __objc_methname subsection each points
+    /// at. They follow the stubs' slots in the __objc_selrefs tail.
+    pub objc_extra_selrefs: Vec<u32>,
+    /// The method lists rewritten in relative form, with their synthetic
+    /// subsections in the __objc_methlist chunk.
+    pub objc_methlists: Vec<crate::passes::ObjcMethList>,
     /// The _objc_msgSend symbol, once objc stubs exist.
     pub objc_msgsend_sym: Option<SymbolId>,
     /// -alias names for imported symbols: (alias, imported target).
@@ -168,6 +175,8 @@ impl<E: Arch> Context<E> {
             stub_syms: Vec::new(),
             got_syms: Vec::new(),
             objc_classref_slots: Vec::new(),
+            objc_extra_selrefs: Vec::new(),
+            objc_methlists: Vec::new(),
             dylib_load_seq: 0,
             thread_ptr_syms: Vec::new(),
             objc_stubs: Vec::new(),

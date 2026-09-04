@@ -128,6 +128,14 @@ pub struct Args {
     /// defining dylib (and add a load command for it); bind to the
     /// re-exporting dylib named on the command line instead.
     pub no_implicit_dylibs: bool,
+    /// -objc_relative_method_lists / -no_objc_relative_method_lists:
+    /// rewrite Objective-C method lists in the relative form. ld64's
+    /// default is on from macOS 11.
+    pub objc_relative_method_lists: Option<bool>,
+    /// -objc_category_merging / -no_objc_category_merging: merge
+    /// categories into the classes defined in the same image. ld64's
+    /// default is on.
+    pub objc_category_merging: Option<bool>,
     /// Compute a content-hash LC_UUID (on by default; -no_uuid leaves
     /// it zeroed - dyld refuses executables without the load command).
     pub uuid: bool,
@@ -269,6 +277,8 @@ impl Default for Args {
             init_offsets: false,
             data_const: true,
             no_implicit_dylibs: false,
+            objc_relative_method_lists: None,
+            objc_category_merging: None,
             uuid: true,
             suppress_warnings: false,
             undefined_dynamic_lookup: false,
@@ -674,6 +684,10 @@ pub fn parse_args(diag: &Diagnostics, cmdline: &[String]) -> Args {
             "-data_const" => args.data_const = true,
             "-no_data_const" => args.data_const = false,
             "-no_implicit_dylibs" => args.no_implicit_dylibs = true,
+            "-objc_relative_method_lists" => args.objc_relative_method_lists = Some(true),
+            "-no_objc_relative_method_lists" => args.objc_relative_method_lists = Some(false),
+            "-objc_category_merging" => args.objc_category_merging = Some(true),
+            "-no_objc_category_merging" => args.objc_category_merging = Some(false),
             "-no_function_starts" => args.function_starts = false,
             "-data_in_code_info" => args.data_in_code_info = true,
             "-no_data_in_code_info" => args.data_in_code_info = false,

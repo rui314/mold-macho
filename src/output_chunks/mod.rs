@@ -58,6 +58,9 @@ pub enum ChunkKind {
     ThreadPtrs,
     /// Linker-synthesized _objc_msgSend$<selector> stubs.
     ObjcStubs,
+    /// __TEXT,__objc_methlist: the Objective-C method lists rewritten
+    /// in the relative (12-byte entry) form, which needs no fixups.
+    ObjcMethlist,
     /// The merged __objc_imageinfo section: the Objective-C runtime
     /// reads exactly one 8-byte record per image.
     ObjcImageInfo,
@@ -147,6 +150,7 @@ impl Chunk {
                         | ChunkKind::Got
                         | ChunkKind::ThreadPtrs
                         | ChunkKind::ObjcStubs
+                        | ChunkKind::ObjcMethlist
                         | ChunkKind::ObjcImageInfo
                         | ChunkKind::SectCreate { .. }
                         | ChunkKind::InitOffsets
