@@ -166,7 +166,7 @@ pub fn link<E: Arch>(cmdline: &[String]) -> Result<i32, String> {
     tp!("create_objc_msgsend_stubs", passes::create_objc_msgsend_stubs(&mut ctx));
     tp!("auto_hide_weak_defs", passes::auto_hide_weak_defs(&mut ctx));
     tp!("coalesce_weak_defs", passes::coalesce_weak_defs(&mut ctx));
-    tp!("check_undefined_symbols", passes::check_undefined_symbols(&mut ctx));
+    tp!("report_undef_errors", passes::report_undef_errors(&mut ctx));
     passes::print_dependencies(&ctx);
     passes::print_why_load(&ctx);
     passes::print_trace(&ctx);

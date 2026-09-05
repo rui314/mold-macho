@@ -1639,7 +1639,7 @@ fn same_shape(a: &crate::input_sections::InputSection, b: &crate::input_sections
     long.data().get(short.size as usize..).is_some_and(|tail| tail.iter().all(|&x| x == 0))
 }
 
-pub fn check_undefined_symbols<E: Arch>(ctx: &mut Context<E>) {
+pub fn report_undef_errors<E: Arch>(ctx: &mut Context<E>) {
     // Errors name a file that wants the symbol; the map from symbol to
     // referencing object is built only once an error is certain.
     let mut referencers: Option<std::collections::HashMap<crate::symbol::SymbolId, usize>> = None;
