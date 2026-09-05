@@ -120,7 +120,7 @@ pub fn dead_strip<E: Arch>(ctx: &mut Context<E>) {
         for rel in ctx.isec_relocs(id) {
             match rel.target() {
                 RelocTarget::Sym(idx) => {
-                    let sym = &ctx.symbols[ctx.objs[ctx.isecs[id].obj as usize].syms[idx as usize]];
+                    let sym = &ctx.symbols[ctx.objs[ctx.isecs[id].file as usize].syms[idx as usize]];
                     if let Some(isec) = sym.isec().map(|i| i as usize) {
                         out.push(isec);
                     }
@@ -177,7 +177,7 @@ pub fn dead_strip<E: Arch>(ctx: &mut Context<E>) {
                 match rel.target() {
                     RelocTarget::Sym(idx) => {
                         let sym =
-                            &gc.ctx.symbols[gc.ctx.objs[gc.ctx.isecs[id].obj as usize].syms[idx as usize]];
+                            &gc.ctx.symbols[gc.ctx.objs[gc.ctx.isecs[id].file as usize].syms[idx as usize]];
                         if let Some(isec) = sym.isec().map(|i| i as usize) {
                             targets.push(isec);
                         }
@@ -332,10 +332,10 @@ fn print_why_live<E: Arch>(ctx: &Context<E>, pred: &[usize]) {
             .copied()
             .map(String::from)
             .unwrap_or_else(|| format!("{},{}", ctx.hdr_of(sec).segname(), ctx.hdr_of(sec).sectname()));
-        if sec.obj == u32::MAX {
+        if sec.file == u32::MAX {
             return name;
         }
-        format!("{} from {}", name, crate::passes::file_display(&ctx.objs[sec.obj as usize]))
+        format!("{} from {}", name, crate::passes::file_display(&ctx.objs[sec.file as usize]))
     };
 
     for sym in &ctx.symbols.syms {
@@ -349,7 +349,7 @@ fn print_why_live<E: Arch>(ctx: &Context<E>, pred: &[usize]) {
         if !ctx.isecs[isec].is_alive() {
             continue;
         }
-        println!("{} from {}", sym.name(), crate::passes::file_display(&ctx.objs[ctx.isecs[isec].obj as usize]));
+        println!("{} from {}", sym.name(), crate::passes::file_display(&ctx.objs[ctx.isecs[isec].file as usize]));
         let mut indent = 1;
         while pred[isec] != usize::MAX {
             isec = pred[isec];

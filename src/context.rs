@@ -344,10 +344,10 @@ impl<E: Arch> Context<E> {
     /// section's shdr through its file the same way.
     #[inline]
     pub fn hdr_of(&self, isec: &InputSection) -> &'static crate::macho::MachSection {
-        if isec.obj == u32::MAX {
+        if isec.file == u32::MAX {
             self.synthetic_hdrs[isec.shndx as usize]
         } else {
-            &self.objs[isec.obj as usize].sect_hdrs[isec.shndx as usize]
+            &self.objs[isec.file as usize].sect_hdrs[isec.shndx as usize]
         }
     }
 
@@ -398,11 +398,11 @@ impl<E: Arch> Context<E> {
     /// (subsections keep only a rel_offset/nrels range, sold-style).
     pub fn isec_relocs(&self, id: usize) -> &[crate::input_sections::Reloc] {
         let isec = &self.isecs[id];
-        if isec.obj == u32::MAX {
+        if isec.file == u32::MAX {
             return &[];
         }
         let off = isec.rel_offset as usize;
-        &self.objs[isec.obj as usize].relocs[off..off + isec.nrels as usize]
+        &self.objs[isec.file as usize].relocs[off..off + isec.nrels as usize]
     }
 
     /// Returns the output address of an input section. Layout stores

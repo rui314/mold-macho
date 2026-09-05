@@ -137,7 +137,7 @@ pub struct InputSection {
     /// Index of the object file this section came from (u32 to keep the
     /// struct small; `usize::MAX` becomes `u32::MAX` for a synthetic
     /// section with no object).
-    pub obj: u32,
+    pub file: u32,
     /// Index of the parent section's header in the owning object's
     /// section list (or in ctx.synthetic_hdrs for a synthetic section):
     /// mold-rust's shndx. Resolved through Context::hdr_of; a u32 index

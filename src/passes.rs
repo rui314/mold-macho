@@ -1088,7 +1088,7 @@ pub fn convert_common_symbols<E: Arch>(ctx: &mut Context<E>) {
         }));
         ctx.synthetic_hdrs.push(hdr);
         ctx.isecs.push(InputSection {
-            obj: u32::MAX,
+            file: u32::MAX,
             shndx: (ctx.synthetic_hdrs.len() - 1) as u32,
             p2align: p2align as u8,
             input_addr: 0,
@@ -1133,7 +1133,7 @@ pub fn convert_init_offsets<E: Arch>(ctx: &mut Context<E>) {
         let mut relocs = ctx.isec_relocs(i).to_vec();
         relocs.sort_by_key(|r| r.offset);
         for rel in relocs {
-            let obj = ctx.isecs[i].obj as usize;
+            let obj = ctx.isecs[i].file as usize;
             let target = match ctx.reloc_target_sym(obj, &rel) {
                 Some(id) => {
                     let sym = &ctx.symbols[id];
@@ -1159,7 +1159,7 @@ pub fn convert_init_offsets<E: Arch>(ctx: &mut Context<E>) {
 /// dead, so nothing of theirs reaches the output.
 pub fn remove_unreachable_files<E: Arch>(ctx: &mut Context<E>) {
     for isec in ctx.isecs.iter_mut() {
-        if isec.obj != u32::MAX && !ctx.objs[isec.obj as usize].is_alive {
+        if isec.file != u32::MAX && !ctx.objs[isec.file as usize].is_alive {
             isec.set_alive(false);
         }
     }
@@ -1334,14 +1334,14 @@ pub fn coalesce_objc_refs<E: Arch>(ctx: &mut Context<E>) {
     let mut folds: Vec<(usize, u32)> = Vec::new();
     for i in 0..ctx.isecs.len() {
         let isec = &ctx.isecs[i];
-        if !isec.is_alive() || isec.replacement != crate::input_sections::NO_REPLACEMENT || isec.obj == u32::MAX {
+        if !isec.is_alive() || isec.replacement != crate::input_sections::NO_REPLACEMENT || isec.file == u32::MAX {
             continue;
         }
         let h = ctx.hdr_of(isec);
         if h.segname() != "__DATA" {
             continue;
         }
-        let obj = isec.obj as usize;
+        let obj = isec.file as usize;
         let rels = ctx.isec_relocs(i);
         let plain_ptr = |rel: &crate::input_sections::Reloc| {
             E::classify_reloc(rel.r_type) == RelocClass::Plain && rel.size == 8 && !rel.is_pcrel && !rel.is_subtracted
@@ -1860,7 +1860,7 @@ pub fn scan_relocations<E: Arch>(ctx: &mut Context<E>) {
         .filter(|isec| isec.is_alive())
         .flat_map_iter(|isec| {
             crate::input_files::isec_relocs_of(&ctx_ref.objs, isec).iter().filter_map(move |rel| {
-                let id = ctx_ref.reloc_target_sym(isec.obj as usize, rel)?;
+                let id = ctx_ref.reloc_target_sym(isec.file as usize, rel)?;
                 let mut class = E::classify_reloc(rel.r_type);
                 // A relaxable GOT load of a local symbol needs no
                 // slot at all; an unrelaxable one is an ordinary GOT
@@ -1962,7 +1962,7 @@ pub fn scan_objc_stubs<E: Arch>(ctx: &mut Context<E>) {
     for i in 0..ctx.isecs.len() {
         let isec = &ctx.isecs[i];
         if !isec.is_alive()
-            || isec.obj == u32::MAX
+            || isec.file == u32::MAX
             || isec.replacement != crate::input_sections::NO_REPLACEMENT
             || isec.size != 8
         {
@@ -2155,7 +2155,7 @@ pub fn fold_objc_classrefs<E: Arch>(ctx: &mut Context<E>) {
             });
             let output_offset = ctx.sym_aux(class).got_idx * 8;
             ctx.isecs.push(InputSection {
-                obj: u32::MAX,
+                file: u32::MAX,
                 shndx,
                 p2align: 3,
                 input_addr: 0,
@@ -2227,21 +2227,21 @@ fn objc_class_ro<E: Arch>(ctx: &Context<E>, cls: (u32, u64)) -> Option<(u32, u64
 /// (object, index into its relocation arena), for rewriting it.
 fn objc_pointer_reloc<E: Arch>(ctx: &Context<E>, isec: u32, off: u64) -> Option<(usize, usize)> {
     let sec = &ctx.isecs[isec as usize];
-    if sec.obj == u32::MAX {
+    if sec.file == u32::MAX {
         return None;
     }
     let k = ctx
         .isec_relocs(isec as usize)
         .iter()
         .position(|r| r.offset as u64 == off && r.size == 8 && !r.is_pcrel && !r.is_subtracted)?;
-    Some((sec.obj as usize, sec.rel_offset as usize + k))
+    Some((sec.file as usize, sec.rel_offset as usize + k))
 }
 
 /// The pointer stored at `off` in a subsection: the target of the
 /// 8-byte relocation there, if any.
 fn objc_pointer_at<E: Arch>(ctx: &Context<E>, isec: u32, off: u64) -> Option<ObjcRef> {
     let sec = &ctx.isecs[isec];
-    if sec.obj == u32::MAX {
+    if sec.file == u32::MAX {
         return None;
     }
     let rel = ctx
@@ -2252,7 +2252,7 @@ fn objc_pointer_at<E: Arch>(ctx: &Context<E>, isec: u32, off: u64) -> Option<Obj
         return None;
     }
     Some(match rel.target() {
-        RelocTarget::Sym(idx) => ObjcRef::Sym(ctx.objs[sec.obj as usize].syms[idx as usize], rel.addend),
+        RelocTarget::Sym(idx) => ObjcRef::Sym(ctx.objs[sec.file as usize].syms[idx as usize], rel.addend),
         RelocTarget::Section(t) => ObjcRef::Isec(t, rel.addend as u64),
     })
 }
@@ -2302,7 +2302,7 @@ pub fn convert_objc_method_lists<E: Arch>(ctx: &mut Context<E>) {
     let mut selref_of: hashbrown::HashMap<u32, u32> = hashbrown::HashMap::new();
     for i in 0..ctx.isecs.len() {
         let isec = &ctx.isecs[i];
-        if !isec.is_alive() || isec.obj == u32::MAX || isec.size != 8 {
+        if !isec.is_alive() || isec.file == u32::MAX || isec.size != 8 {
             continue;
         }
         let h = ctx.hdr_of(isec);
@@ -2348,7 +2348,7 @@ pub fn convert_objc_method_lists<E: Arch>(ctx: &mut Context<E>) {
     }
     for i in 0..ctx.isecs.len() {
         let isec = &ctx.isecs[i];
-        if !isec.is_alive() || isec.obj == u32::MAX {
+        if !isec.is_alive() || isec.file == u32::MAX {
             continue;
         }
         let h = ctx.hdr_of(isec);
@@ -2465,7 +2465,7 @@ pub fn convert_objc_method_lists<E: Arch>(ctx: &mut Context<E>) {
         let size = 8 + 12 * count;
         offset = align_to(offset, 4);
         ctx.isecs.push(InputSection {
-            obj: u32::MAX,
+            file: u32::MAX,
             shndx,
             p2align: 2,
             input_addr: 0,
@@ -2577,7 +2577,7 @@ pub fn merge_objc_categories<E: Arch>(ctx: &mut Context<E>) {
     let mut nlclslist_sects = false;
     for i in 0..ctx.isecs.len() {
         let isec = &ctx.isecs[i];
-        if !isec.is_alive() || isec.obj == u32::MAX {
+        if !isec.is_alive() || isec.file == u32::MAX {
             continue;
         }
         let h = ctx.hdr_of(isec);
@@ -2629,7 +2629,7 @@ pub fn merge_objc_categories<E: Arch>(ctx: &mut Context<E>) {
     let mut list_sects: Vec<ListSect> = Vec::new();
     for i in 0..ctx.isecs.len() {
         let isec = &ctx.isecs[i];
-        if !isec.is_alive() || isec.obj == u32::MAX {
+        if !isec.is_alive() || isec.file == u32::MAX {
             continue;
         }
         let h = ctx.hdr_of(isec);
@@ -2884,7 +2884,7 @@ pub fn merge_objc_categories<E: Arch>(ctx: &mut Context<E>) {
             let blob = DataBlob { sect, isec: 0, fields };
             let size = blob.size();
             ctx.isecs.push(InputSection {
-                obj: u32::MAX,
+                file: u32::MAX,
                 shndx,
                 p2align: 3,
                 input_addr: 0,
@@ -2919,7 +2919,7 @@ pub fn merge_objc_categories<E: Arch>(ctx: &mut Context<E>) {
                 let size = 8 + 12 * methods.len() as u64;
                 methlist_off = align_to(methlist_off, 4);
                 ctx.isecs.push(InputSection {
-                    obj: u32::MAX,
+                    file: u32::MAX,
                     shndx,
                     p2align: 2,
                     input_addr: 0,
@@ -3151,7 +3151,7 @@ pub fn merge_objc_categories<E: Arch>(ctx: &mut Context<E>) {
         ctx.synthetic_hdrs.push(hdr);
         let shndx = (ctx.synthetic_hdrs.len() - 1) as u32;
         ctx.isecs.push(InputSection {
-            obj: u32::MAX,
+            file: u32::MAX,
             shndx,
             p2align: 3,
             input_addr: 0,
@@ -3184,7 +3184,7 @@ pub fn merge_objc_categories<E: Arch>(ctx: &mut Context<E>) {
             ctx.synthetic_hdrs.push(hdr);
             let shndx = (ctx.synthetic_hdrs.len() - 1) as u32;
             ctx.isecs.push(InputSection {
-                obj: u32::MAX,
+                file: u32::MAX,
                 shndx,
                 p2align: 3,
                 input_addr: 0,
@@ -4169,7 +4169,7 @@ fn keep_local_symbol_in<E: Arch>(ctx: &Context<E>, name: &str, isec: Option<u32>
     match isec {
         Some(isec) => {
             let isec = &ctx.isecs[ctx.resolve_isec(isec as usize)];
-            if isec.obj == u32::MAX {
+            if isec.file == u32::MAX {
                 return true;
             }
             !matches!(
@@ -5215,9 +5215,9 @@ fn build_rebase_info<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
             // Pointers to thread-local data are thread-pointer-relative
             // offsets, not addresses, so they are not rebased.
             let imported = ctx
-                .reloc_target_sym(isec.obj as usize, rel)
+                .reloc_target_sym(isec.file as usize, rel)
                 .is_some_and(|id| ctx.symbols[id].is_imported());
-            if !imported && !ctx.reloc_target_is_tls(isec.obj as usize, rel) {
+            if !imported && !ctx.reloc_target_is_tls(isec.file as usize, rel) {
                 locs.push(base + rel.offset as u64);
             }
         }
@@ -5407,7 +5407,7 @@ fn build_bind_info<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
             {
                 continue;
             }
-            if let Some(id) = ctx.reloc_target_sym(isec.obj as usize, rel) {
+            if let Some(id) = ctx.reloc_target_sym(isec.file as usize, rel) {
                 if ctx.symbols[id].is_imported() {
                     binds.push((base + rel.offset as u64, id, rel.addend));
                 }
@@ -5522,17 +5522,17 @@ fn collect_fixups<E: Arch>(ctx: &Context<E>) -> Vec<(u64, Option<crate::symbol::
                 // the offending input section rather than the output.
                 if addr % 4 != 0 {
                     fatal!("{}({},{}): unaligned base relocation",
-                        file_display(&ctx.objs[isec.obj as usize]),
+                        file_display(&ctx.objs[isec.file as usize]),
                         ctx.hdr_of(isec).segname(),
                         ctx.hdr_of(isec).sectname()
                     );
                 }
-                match ctx.reloc_target_sym(isec.obj as usize, rel) {
+                match ctx.reloc_target_sym(isec.file as usize, rel) {
                     Some(id) if ctx.binds_at_runtime(id) => {
                         Some((addr, Some(id), rel.addend as u64))
                     }
                     _ => {
-                        if !ctx.reloc_target_is_tls(isec.obj as usize, rel) {
+                        if !ctx.reloc_target_is_tls(isec.file as usize, rel) {
                             Some((addr, None, 0))
                         } else {
                             None
@@ -5600,7 +5600,7 @@ fn build_weak_bind_info<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
             {
                 continue;
             }
-            if let Some(id) = ctx.reloc_target_sym(isec.obj as usize, rel) {
+            if let Some(id) = ctx.reloc_target_sym(isec.file as usize, rel) {
                 if ctx.binds_weak_lookup(id) {
                     binds.push((id, base + rel.offset as u64));
                 }
@@ -6108,7 +6108,7 @@ fn ensure_stub_binder<E: Arch>(ctx: &mut Context<E>) {
     ctx.synthetic_hdrs.push(hdr);
     let shndx = (ctx.synthetic_hdrs.len() - 1) as u32;
     ctx.isecs.push(InputSection {
-        obj: u32::MAX,
+        file: u32::MAX,
         shndx,
         p2align: 3,
         input_addr: 0,

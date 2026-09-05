@@ -210,7 +210,7 @@ impl Arch for X86_64 {
         base: u64,
         buf: &mut [u8],
     ) {
-        let obj = ctx.isecs[isec_id].obj as usize;
+        let obj = ctx.isecs[isec_id].file as usize;
         let mut i = 0;
         while i < rels.len() {
             let r = &rels[i];

@@ -62,11 +62,11 @@ pub fn isec_relocs_of<'a>(
     objs: &'a [ObjectFile],
     isec: &InputSection,
 ) -> &'a [crate::input_sections::Reloc] {
-    if isec.obj == u32::MAX {
+    if isec.file == u32::MAX {
         return &[];
     }
     let off = isec.rel_offset as usize;
-    &objs[isec.obj as usize].relocs[off..off + isec.nrels as usize]
+    &objs[isec.file as usize].relocs[off..off + isec.nrels as usize]
 }
 
 /// Finds the subsection containing `addr` among `subsecs` (sorted by
@@ -471,7 +471,7 @@ pub fn stage_object<E: Arch>(
                 &data[lo as usize..(lo + (end - start)) as usize]
             };
             isecs.push(InputSection {
-                obj: u32::MAX,
+                file: u32::MAX,
                 shndx: i as u32,
                 p2align: sect.p2align as u8,
                 input_addr: start as u32,
@@ -721,7 +721,7 @@ pub fn integrate_objects<E: Arch>(
             }
 
             for isec in &mut st.isecs {
-                isec.obj = obj_idx as u32;
+                isec.file = obj_idx as u32;
             }
             // Section relocation targets are object-local subsection
             // indices; rebase them to global once over the object's
@@ -886,7 +886,7 @@ pub fn integrate_object_with<E: Arch>(
     let cie_base = ctx.cies.len();
 
     for mut isec in staged.isecs {
-        isec.obj = obj_idx as u32;
+        isec.file = obj_idx as u32;
         ctx.isecs.push(isec);
     }
     let mut obj_relocs = staged.relocs;

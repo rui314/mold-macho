@@ -407,12 +407,12 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
 
     let mut referenced: HashSet<crate::symbol::SymbolId> = HashSet::new();
     for isec in ctx.isecs.iter() {
-        if !isec.is_alive() || isec.obj == u32::MAX {
+        if !isec.is_alive() || isec.file == u32::MAX {
             continue;
         }
         for rel in crate::input_files::isec_relocs_of(&ctx.objs, isec) {
             if let RelocTarget::Sym(idx) = rel.target() {
-                referenced.insert(ctx.objs[isec.obj as usize].syms[idx as usize]);
+                referenced.insert(ctx.objs[isec.file as usize].syms[idx as usize]);
             }
         }
     }
@@ -879,7 +879,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
 
                 match rel.target() {
                     RelocTarget::Sym(idx) => {
-                        let sym_id = ctx.objs[isec.obj as usize].syms[idx as usize];
+                        let sym_id = ctx.objs[isec.file as usize].syms[idx as usize];
                         let Some(&symnum) = index_of_sym.get(&sym_id) else {
                             fatal!("-r: cannot re-emit relocation against {}",
                                 ctx.symbols[sym_id].name()
