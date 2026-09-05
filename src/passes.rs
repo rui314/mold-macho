@@ -6152,7 +6152,7 @@ pub fn copy_chunks<E: Arch>(ctx: &Context<E>, buf: &mut [u8], out: &crate::outpu
 
     // Nothing below writes between the header and the symbol table.
     out.queue(hdr_end, symtab_start - hdr_end);
-    t!("copy_symtab", output_chunks::copy_symtab(ctx, buf));
+    t!("copy_symtab", output_chunks::symtab::copy_symtab(ctx, buf));
     out.queue(symtab_start, sig_start - symtab_start);
     output_chunks::copy_mach_header(ctx, buf);
 
