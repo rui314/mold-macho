@@ -5043,7 +5043,7 @@ pub fn set_osec_offsets<E: Arch>(ctx: &mut Context<E>) {
                 // come back as a patch list for the copy phase.
                 ChunkId::UnwindInfo => {
                     let (data, personalities) =
-                        t!("unwind_encode", output_chunks::encode_unwind_info(ctx));
+                        t!("unwind_encode", output_chunks::unwind_info::encode_unwind_info(ctx));
                     let len = data.len() as u64;
                     ctx.unwind_info.contents = data;
                     ctx.unwind_info.personalities = personalities;
