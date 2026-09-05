@@ -9,7 +9,25 @@ use crate::error;
 use crate::input_files::{DylibFile, ObjectFile};
 use crate::macho::{S_THREAD_LOCAL_REGULAR, S_THREAD_LOCAL_ZEROFILL};
 use crate::input_sections::{InputSection, Reloc, RelocTarget};
-use crate::output_chunks::{Chunk, OutputSegment, SymtabData};
+use crate::output_chunks::chained_fixups::ChainedFixupsSection;
+use crate::output_chunks::dyld_info::{
+    BindInfoSection, LazyBindInfoSection, RebaseInfoSection, WeakBindInfoSection,
+};
+use crate::output_chunks::eh_frame::EhFrameSection;
+use crate::output_chunks::export_trie::ExportTrieSection;
+use crate::output_chunks::got::{
+    GotSection, LazyPtrsSection, StubHelperSection, StubsSection, ThreadPtrsSection,
+};
+use crate::output_chunks::misc::{
+    CodeSignatureSection, DataInCodeSection, FunctionStartsSection, InitOffsetsSection,
+    SectCreateSection,
+};
+use crate::output_chunks::objc::{ObjcImageInfoSection, ObjcMethlistSection, ObjcStubsSection};
+use crate::output_chunks::symtab::{IndirectSymtabSection, StrtabSection, SymtabSection};
+use crate::output_chunks::unwind_info::UnwindInfoSection;
+use crate::output_chunks::{
+    ChunkHeader, ChunkId, OutputMachHeader, OutputSection, OutputSectionId, OutputSegment,
+};
 use crate::symbol::{Origin, SymbolId, SymbolTable};
 
 pub struct Context<E: Arch> {
@@ -42,40 +60,40 @@ pub struct Context<E: Arch> {
     /// DWARF CIEs and FDEs from all objects' __eh_frame sections.
     pub cies: Vec<crate::input_files::Cie>,
     pub fdes: Vec<crate::input_files::Fde>,
-    pub chunks: Vec<Chunk>,
+    /// The chunks of the output, in file order, and the segments they
+    /// are grouped into. Each chunk's header and data live in the
+    /// typed field for its kind below, as in mold-rust.
+    pub chunks: Vec<ChunkId>,
     pub segments: Vec<OutputSegment>,
-    pub symtab: SymtabData,
-    /// Symbols with a __stubs entry, in stub order.
-    pub stub_syms: Vec<SymbolId>,
-    /// Symbols with a __got slot, in slot order.
-    pub got_syms: Vec<SymbolId>,
-    /// Synthetic subsections standing for __got slots that absorbed
-    /// __objc_classrefs entries (see fold_objc_classrefs); their osec
-    /// is set once the __got chunk exists.
-    pub objc_classref_slots: Vec<u32>,
+    pub mach_header: OutputMachHeader,
+    pub output_sections: Vec<OutputSection>,
+    pub stubs: StubsSection,
+    pub stub_helper: StubHelperSection,
+    pub lazy_ptrs: LazyPtrsSection,
+    pub got: GotSection,
+    pub thread_ptrs: ThreadPtrsSection,
+    pub objc_stubs: ObjcStubsSection,
+    pub objc_methlist: ObjcMethlistSection,
+    pub objc_imageinfo: ObjcImageInfoSection,
+    pub sectcreate_sections: Vec<SectCreateSection>,
+    pub init_offsets: InitOffsetsSection,
+    pub unwind_info: UnwindInfoSection,
+    pub eh_frame: EhFrameSection,
+    pub rebase_info: RebaseInfoSection,
+    pub bind_info: BindInfoSection,
+    pub weak_bind_info: WeakBindInfoSection,
+    pub lazy_bind_info: LazyBindInfoSection,
+    pub chained_fixups: ChainedFixupsSection,
+    pub export_trie: ExportTrieSection,
+    pub function_starts: FunctionStartsSection,
+    pub data_in_code: DataInCodeSection,
+    pub indirect_symtab: IndirectSymtabSection,
+    pub symtab: SymtabSection,
+    pub strtab: StrtabSection,
+    pub code_signature: CodeSignatureSection,
     /// Sequence number of the next dylib named on the command line or
     /// by an auto-link option; orders their load commands.
     pub dylib_load_seq: u32,
-    /// Thread-local symbols with a __thread_ptrs slot, in slot order.
-    pub thread_ptr_syms: Vec<SymbolId>,
-    /// _objc_msgSend$<selector> symbols, in __objc_stubs entry order,
-    /// with their selector names.
-    pub objc_stubs: Vec<(SymbolId, String)>,
-    /// Selector references synthesized for method lists whose selector
-    /// no input references: the __objc_methname subsection each points
-    /// at. They follow the stubs' slots in the __objc_selrefs tail.
-    pub objc_extra_selrefs: Vec<u32>,
-    /// Per selector stub: an input __objc_selrefs slot for its selector
-    /// that the stub loads instead of a synthesized one (u32::MAX for
-    /// none), and its slot's index in the tail when it has one.
-    pub objc_stub_selref: Vec<u32>,
-    pub objc_stub_tail: Vec<u32>,
-    /// The number of stub slots in the __objc_selrefs tail; the extra
-    /// selector references follow them.
-    pub objc_tail_slots: usize,
-    /// The method lists rewritten in relative form, with their synthetic
-    /// subsections in the __objc_methlist chunk.
-    pub objc_methlists: Vec<crate::passes::ObjcMethList>,
     /// Objective-C data records the linker synthesized (see
     /// merge_objc_categories), each placed as the tail of the output
     /// section it names.
@@ -84,8 +102,6 @@ pub struct Context<E: Arch> {
     /// ld64's __OBJC_$_INSTANCE_METHODS_Foo(A|B) on a merged method
     /// list, and the like. (name, subsection).
     pub extra_local_syms: Vec<(&'static str, u32)>,
-    /// The _objc_msgSend symbol, once objc stubs exist.
-    pub objc_msgsend_sym: Option<SymbolId>,
     /// -alias names for imported symbols: (alias, imported target).
     /// Emitted as N_INDR symbols and re-export trie entries.
     pub indirect_aliases: Vec<(SymbolId, SymbolId)>,
@@ -95,74 +111,12 @@ pub struct Context<E: Arch> {
     /// For -why_load: the symbol that made each object live, refreshed
     /// each resolution round.
     pub why_load: std::collections::HashMap<usize, &'static str>,
-    /// The export trie, encoded once when its chunk is sized (every
-    /// address is final by then) and reused when copied out.
-    pub export_trie_data: Vec<u8>,
-    /// __unwind_info likewise, except its personality cells (GOT
-    /// addresses unknown when __TEXT is sized): the symbols to patch
-    /// into offsets 28, 32, ... at copy time.
-    pub unwind_info_data: Vec<u8>,
-    pub unwind_personalities: Vec<crate::symbol::SymbolId>,
-    /// Chunk indices of the synthetic slot sections, resolved once at
-    /// the start of layout so per-slot address lookups don't search
-    /// the chunk list (mold keeps direct references on Context too).
-    pub stubs_chunk: usize,
-    pub stub_helper_chunk: usize,
-    pub lazy_ptrs_chunk: usize,
-    pub got_chunk: usize,
-    pub thread_ptrs_chunk: usize,
-    pub objc_stubs_chunk: usize,
-    /// The output sections carrying the synthesized selector strings
-    /// and selector references as their tail (see Tail).
-    pub objc_methname_chunk: usize,
-    pub objc_selrefs_chunk: usize,
-    /// Contents of the synthesized __objc_methname tail, and each
-    /// selector's offset in it.
-    pub objc_methname_data: Vec<u8>,
-    pub objc_methname_offs: Vec<u64>,
-    /// The rebase opcode stream for LC_DYLD_INFO, built during layout.
-    pub rebase_data: Vec<u8>,
-    /// The bind opcode stream for LC_DYLD_INFO, built during layout.
-    pub bind_data: Vec<u8>,
-    /// The lazy-bind opcode stream, and each stub's record offset in
-    /// it (what its stub helper entry pushes for dyld_stub_binder).
-    pub lazy_bind_data: Vec<u8>,
-    pub lazy_bind_offsets: Vec<u32>,
-    /// The classic weak_bind stream: the slots that refer to this
-    /// image's own exported weak definitions, for dyld to redirect to
-    /// whichever image's copy wins coalescing.
-    pub weak_bind_data: Vec<u8>,
-    /// dyld_stub_binder, resolved from the loaded dylibs when lazy
-    /// binding is in use, and the __dyld_private word the stub helper
-    /// hands it (a synthesized record in __DATA,__data).
-    pub dyld_stub_binder: Option<SymbolId>,
-    pub dyld_private_isec: u32,
-    /// The LC_FUNCTION_STARTS contents, built during layout.
-    pub function_starts_data: Vec<u8>,
-    /// Every dynamic fixup location, sorted by address, when emitting
-    /// chained fixups: (address, bound symbol or None for a rebase,
-    /// addend).
-    pub fixups: Vec<(u64, Option<SymbolId>, u64)>,
-    /// The chained-fixups import table: (symbol, table addend), sorted;
-    /// and each symbol's first ordinal.
-    pub fixup_imports: Vec<(SymbolId, u64)>,
-    pub fixup_ordinals: std::collections::HashMap<SymbolId, usize>,
-    /// The encoded LC_DYLD_CHAINED_FIXUPS payload, built during layout.
-    pub chained_data: Vec<u8>,
-    /// LC_DATA_IN_CODE entries (fileoff, length, kind), built once
-    /// when layout reaches __LINKEDIT.
-    pub dice_data: Vec<(u32, u16, u16)>,
     /// The address of the first thread-local data section. Thread
     /// pointers are encoded relative to it.
     pub tls_begin: u64,
     /// Deduplication map for literal elements: (section type, contents)
     /// to the surviving subsection.
     pub literals: std::collections::HashMap<(u32, &'static [u8]), usize>,
-    /// The merged __objc_imageinfo flags word.
-    pub objc_image_info_flags: u32,
-    /// Initializer targets for -init_offsets, in run order: the
-    /// subsection and offset of each initializer function.
-    pub init_funcs: Vec<(usize, u64)>,
     /// The output's UUID, computed from its contents.
     pub uuid: std::sync::Mutex<[u8; 16]>,
     /// The resolved address of the entry point symbol.
@@ -192,59 +146,122 @@ impl<E: Arch> Context<E> {
             fdes: Vec::new(),
             chunks: Vec::new(),
             segments: Vec::new(),
-            symtab: SymtabData::default(),
-            stub_syms: Vec::new(),
-            got_syms: Vec::new(),
-            objc_classref_slots: Vec::new(),
-            objc_extra_selrefs: Vec::new(),
-            objc_stub_selref: Vec::new(),
-            objc_stub_tail: Vec::new(),
-            objc_tail_slots: 0,
-            objc_methlists: Vec::new(),
+            mach_header: OutputMachHeader::new(),
+            output_sections: Vec::new(),
+            stubs: StubsSection::new(),
+            stub_helper: StubHelperSection::new(),
+            lazy_ptrs: LazyPtrsSection::new(),
+            got: GotSection::new(),
+            thread_ptrs: ThreadPtrsSection::new(),
+            objc_stubs: ObjcStubsSection::new(),
+            objc_methlist: ObjcMethlistSection::new(),
+            objc_imageinfo: ObjcImageInfoSection::new(),
+            sectcreate_sections: Vec::new(),
+            init_offsets: InitOffsetsSection::new(),
+            unwind_info: UnwindInfoSection::new(),
+            eh_frame: EhFrameSection::new(),
+            rebase_info: RebaseInfoSection::new(),
+            bind_info: BindInfoSection::new(),
+            weak_bind_info: WeakBindInfoSection::new(),
+            lazy_bind_info: LazyBindInfoSection::new(),
+            chained_fixups: ChainedFixupsSection::new(),
+            export_trie: ExportTrieSection::new(),
+            function_starts: FunctionStartsSection::new(),
+            data_in_code: DataInCodeSection::new(),
+            indirect_symtab: IndirectSymtabSection::new(),
+            symtab: SymtabSection::new(),
+            strtab: StrtabSection::new(),
+            code_signature: CodeSignatureSection::new(),
             data_blobs: Vec::new(),
             extra_local_syms: Vec::new(),
             dylib_load_seq: 0,
-            thread_ptr_syms: Vec::new(),
-            objc_stubs: Vec::new(),
-            objc_msgsend_sym: None,
             indirect_aliases: Vec::new(),
             boundary_syms: Vec::new(),
             why_load: std::collections::HashMap::new(),
-            export_trie_data: Vec::new(),
-            unwind_info_data: Vec::new(),
-            unwind_personalities: Vec::new(),
-            stubs_chunk: usize::MAX,
-            stub_helper_chunk: usize::MAX,
-            lazy_ptrs_chunk: usize::MAX,
-            got_chunk: usize::MAX,
-            thread_ptrs_chunk: usize::MAX,
-            objc_stubs_chunk: usize::MAX,
-            objc_methname_chunk: usize::MAX,
-            objc_selrefs_chunk: usize::MAX,
-            objc_methname_data: Vec::new(),
-            objc_methname_offs: Vec::new(),
-            rebase_data: Vec::new(),
-            bind_data: Vec::new(),
-            lazy_bind_data: Vec::new(),
-            lazy_bind_offsets: Vec::new(),
-            weak_bind_data: Vec::new(),
-            dyld_stub_binder: None,
-            dyld_private_isec: u32::MAX,
-            function_starts_data: Vec::new(),
-            fixups: Vec::new(),
-            fixup_imports: Vec::new(),
-            fixup_ordinals: std::collections::HashMap::new(),
-            chained_data: Vec::new(),
-            dice_data: Vec::new(),
             tls_begin: 0,
             literals: std::collections::HashMap::new(),
-            objc_image_info_flags: 0,
-            init_funcs: Vec::new(),
             uuid: std::sync::Mutex::new([0; 16]),
             entry_addr: 0,
             output_size: 0,
             _marker: PhantomData,
         }
+    }
+
+    /// The header of any chunk.
+    pub fn chunk_header(&self, id: ChunkId) -> &ChunkHeader {
+        match id {
+            ChunkId::MachHeader => &self.mach_header.hdr,
+            ChunkId::Output(id) => &self.output_sections[id.index()].hdr,
+            ChunkId::Stubs => &self.stubs.hdr,
+            ChunkId::StubHelper => &self.stub_helper.hdr,
+            ChunkId::LazyPtrs => &self.lazy_ptrs.hdr,
+            ChunkId::Got => &self.got.hdr,
+            ChunkId::ThreadPtrs => &self.thread_ptrs.hdr,
+            ChunkId::ObjcStubs => &self.objc_stubs.hdr,
+            ChunkId::ObjcMethlist => &self.objc_methlist.hdr,
+            ChunkId::ObjcImageInfo => &self.objc_imageinfo.hdr,
+            ChunkId::SectCreate(i) => &self.sectcreate_sections[i as usize].hdr,
+            ChunkId::InitOffsets => &self.init_offsets.hdr,
+            ChunkId::UnwindInfo => &self.unwind_info.hdr,
+            ChunkId::EhFrame => &self.eh_frame.hdr,
+            ChunkId::RebaseInfo => &self.rebase_info.hdr,
+            ChunkId::BindInfo => &self.bind_info.hdr,
+            ChunkId::WeakBindInfo => &self.weak_bind_info.hdr,
+            ChunkId::LazyBindInfo => &self.lazy_bind_info.hdr,
+            ChunkId::ChainedFixups => &self.chained_fixups.hdr,
+            ChunkId::ExportTrie => &self.export_trie.hdr,
+            ChunkId::FunctionStarts => &self.function_starts.hdr,
+            ChunkId::DataInCode => &self.data_in_code.hdr,
+            ChunkId::IndirectSymtab => &self.indirect_symtab.hdr,
+            ChunkId::Symtab => &self.symtab.hdr,
+            ChunkId::Strtab => &self.strtab.hdr,
+            ChunkId::CodeSignature => &self.code_signature.hdr,
+        }
+    }
+
+    pub fn chunk_header_mut(&mut self, id: ChunkId) -> &mut ChunkHeader {
+        match id {
+            ChunkId::MachHeader => &mut self.mach_header.hdr,
+            ChunkId::Output(id) => &mut self.output_sections[id.index()].hdr,
+            ChunkId::Stubs => &mut self.stubs.hdr,
+            ChunkId::StubHelper => &mut self.stub_helper.hdr,
+            ChunkId::LazyPtrs => &mut self.lazy_ptrs.hdr,
+            ChunkId::Got => &mut self.got.hdr,
+            ChunkId::ThreadPtrs => &mut self.thread_ptrs.hdr,
+            ChunkId::ObjcStubs => &mut self.objc_stubs.hdr,
+            ChunkId::ObjcMethlist => &mut self.objc_methlist.hdr,
+            ChunkId::ObjcImageInfo => &mut self.objc_imageinfo.hdr,
+            ChunkId::SectCreate(i) => &mut self.sectcreate_sections[i as usize].hdr,
+            ChunkId::InitOffsets => &mut self.init_offsets.hdr,
+            ChunkId::UnwindInfo => &mut self.unwind_info.hdr,
+            ChunkId::EhFrame => &mut self.eh_frame.hdr,
+            ChunkId::RebaseInfo => &mut self.rebase_info.hdr,
+            ChunkId::BindInfo => &mut self.bind_info.hdr,
+            ChunkId::WeakBindInfo => &mut self.weak_bind_info.hdr,
+            ChunkId::LazyBindInfo => &mut self.lazy_bind_info.hdr,
+            ChunkId::ChainedFixups => &mut self.chained_fixups.hdr,
+            ChunkId::ExportTrie => &mut self.export_trie.hdr,
+            ChunkId::FunctionStarts => &mut self.function_starts.hdr,
+            ChunkId::DataInCode => &mut self.data_in_code.hdr,
+            ChunkId::IndirectSymtab => &mut self.indirect_symtab.hdr,
+            ChunkId::Symtab => &mut self.symtab.hdr,
+            ChunkId::Strtab => &mut self.strtab.hdr,
+            ChunkId::CodeSignature => &mut self.code_signature.hdr,
+        }
+    }
+
+    pub fn output_section(&self, id: OutputSectionId) -> &OutputSection {
+        &self.output_sections[id.index()]
+    }
+
+    pub fn output_section_mut(&mut self, id: OutputSectionId) -> &mut OutputSection {
+        &mut self.output_sections[id.index()]
+    }
+
+    /// The section ordinal (nlist n_sect) of the chunk a subsection is
+    /// laid out in; 0 when it has none.
+    pub fn isec_n_sect(&self, isec: &InputSection) -> u8 {
+        isec.output_section().map_or(0, |id| self.chunk_header(id).n_sect)
     }
 
     /// Address of the selector reference slot for objc stub `i` (or,
@@ -254,32 +271,33 @@ impl<E: Arch> Context<E> {
     pub fn objc_selref_addr(&self, i: usize) -> u64 {
         // (There is no tail chunk when every stub reuses a slot and no
         // extra reference exists.)
+        let stubs = &self.objc_stubs;
         let tail = |slot: usize| {
-            let chunk = &self.chunks[self.objc_selrefs_chunk];
-            chunk.hdr.addr + chunk.tail_off + slot as u64 * 8
+            let osec = self.output_section(stubs.selrefs.unwrap());
+            osec.hdr.addr + osec.tail_off + slot as u64 * 8
         };
-        if i < self.objc_stubs.len() {
-            let reused = self.objc_stub_selref[i];
+        if i < stubs.symbols.len() {
+            let reused = stubs.selref[i];
             if reused != u32::MAX {
                 return self.isec_addr(reused as usize);
             }
-            tail(self.objc_stub_tail[i] as usize)
+            tail(stubs.tail[i] as usize)
         } else {
-            tail(self.objc_tail_slots + (i - self.objc_stubs.len()))
+            tail(stubs.tail_slots + (i - stubs.symbols.len()))
         }
     }
 
     /// True if selector stub `i` loads an input's selector reference
     /// rather than a synthesized slot.
     pub fn objc_stub_reuses_selref(&self, i: usize) -> bool {
-        self.objc_stub_selref.get(i).is_some_and(|&s| s != u32::MAX)
+        self.objc_stubs.selref.get(i).is_some_and(|&s| s != u32::MAX)
     }
 
     /// Address of the synthesized selector name string for objc stub
     /// `i`: in the tail of the __objc_methname output section.
     pub fn objc_methname_addr(&self, i: usize) -> u64 {
-        let chunk = &self.chunks[self.objc_methname_chunk];
-        chunk.hdr.addr + chunk.tail_off + self.objc_methname_offs[i]
+        let osec = self.output_section(self.objc_stubs.methname.unwrap());
+        osec.hdr.addr + osec.tail_off + self.objc_stubs.methname_offs[i]
     }
 
     /// The library ordinal as the chained-fixups import formats encode
@@ -421,10 +439,13 @@ impl<E: Arch> Context<E> {
         if isec.replacement != crate::input_sections::NO_REPLACEMENT {
             isec = &self.isecs[self.resolve_isec(id)];
         }
-        if isec.output_section == u32::MAX || isec.offset == u32::MAX {
+        let Some(chunk) = isec.output_section() else {
+            return 0;
+        };
+        if isec.offset == u32::MAX {
             return 0;
         }
-        self.chunks[isec.output_section as usize].hdr.addr + isec.offset as u64
+        self.chunk_header(chunk).addr + isec.offset as u64
     }
 
     /// Returns the output address of a symbol.
@@ -439,7 +460,7 @@ impl<E: Arch> Context<E> {
                 if let Some(isec) = sym.isec().map(|i| i as usize) {
                     self.isec_addr(isec) + sym.value
                 } else if self.sym_aux(id).objc_stub_idx != crate::symbol::NO_IDX {
-                    self.chunks[self.objc_stubs_chunk].hdr.addr
+                    self.objc_stubs.hdr.addr
                         + self.sym_aux(id).objc_stub_idx as u64 * E::OBJC_STUB_SIZE
                 } else {
                     sym.value
@@ -460,8 +481,7 @@ impl<E: Arch> Context<E> {
 
     /// Returns the address of a symbol's __stubs entry.
     pub fn sym_stub_addr(&self, id: SymbolId) -> u64 {
-        self.chunks[self.stubs_chunk].hdr.addr
-            + self.sym_aux(id).stub_idx as u64 * E::STUB_SIZE
+        self.stubs.hdr.addr + self.sym_aux(id).stub_idx as u64 * E::STUB_SIZE
     }
 
     /// Whether imported functions are called through lazy pointers
@@ -478,7 +498,7 @@ impl<E: Arch> Context<E> {
     /// lazy binder cannot do weak lookup), as in ld64.
     pub fn stub_ptr_addr(&self, i: usize, id: SymbolId) -> u64 {
         if self.lazy_binding() && !self.binds_weak_lookup(id) {
-            self.chunks[self.lazy_ptrs_chunk].hdr.addr + i as u64 * 8
+            self.lazy_ptrs.hdr.addr + i as u64 * 8
         } else {
             self.sym_got_addr(id)
         }
@@ -556,13 +576,12 @@ impl<E: Arch> Context<E> {
 
     /// Returns the address of a symbol's __got slot.
     pub fn sym_got_addr(&self, id: SymbolId) -> u64 {
-        self.chunks[self.got_chunk].hdr.addr + self.sym_aux(id).got_idx as u64 * 8
+        self.got.hdr.addr + self.sym_aux(id).got_idx as u64 * 8
     }
 
     /// Returns the address of a symbol's __thread_ptrs slot.
     pub fn sym_tlv_ptr_addr(&self, id: SymbolId) -> u64 {
-        self.chunks[self.thread_ptrs_chunk].hdr.addr
-            + self.sym_aux(id).tlv_idx as u64 * 8
+        self.thread_ptrs.hdr.addr + self.sym_aux(id).tlv_idx as u64 * 8
     }
 
     /// Returns the symbol a relocation refers to, if it refers to one.

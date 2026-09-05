@@ -2,15 +2,33 @@
 //!
 //! A chunk is a contiguous byte range of the output: the mach header with
 //! its load commands, an output section collecting input sections, or a
-//! table in __LINKEDIT. Segments group chunks for the LC_SEGMENT_64 load
-//! commands.
+//! table in __LINKEDIT. Each kind is a struct of its own holding a
+//! ChunkHeader and the data it is written from, reached through the
+//! typed fields of Context; a ChunkId names one, and `ctx.chunks` lists
+//! the chunks of the output in file order. Segments group chunks for
+//! the LC_SEGMENT_64 load commands. mold-rust's output_chunks has the
+//! same shape.
+
+pub mod chained_fixups;
+pub mod dyld_info;
+pub mod eh_frame;
+pub mod export_trie;
+pub mod got;
+pub mod misc;
+pub mod objc;
+pub mod output_section;
+pub mod symtab;
+pub mod unwind_info;
+
+use std::num::NonZeroU32;
 
 use crate::arch::Arch;
 use crate::context::Context;
-use crate::input_sections::InputSectionId;
 use crate::macho::*;
 use crate::symbol::{Origin, SymbolId};
 use crate::util::align_to;
+
+pub use output_section::{OutputSection, Tail, Thunk};
 
 #[derive(Debug)]
 pub struct ChunkHeader {
@@ -27,165 +45,170 @@ pub struct ChunkHeader {
     /// segment's load command. Linkedit tables and the mach header are
     /// not.
     pub is_sect: bool,
+    /// The 1-based ordinal of the section among the output's sections
+    /// (what an nlist's n_sect holds), 0 for a chunk that is not a
+    /// section; mold-rust's shndx.
+    pub n_sect: u8,
 }
 
-/// A range-extension thunk: a block of jump entries placed inside an
-/// output section so that branches whose targets are further than the
-/// instruction's reach can hop through it.
-#[derive(Debug)]
-pub struct Thunk {
-    /// Offset of the thunk within the output section.
-    pub offset: u64,
-    pub syms: Vec<SymbolId>,
-}
-
-#[derive(Debug)]
-pub enum ChunkKind {
-    /// The mach header, load commands and header padding.
-    MachHeader,
-    /// A section of the output image, concatenating input sections.
-    Output {
-        isecs: Vec<InputSectionId>,
-        thunks: Vec<Thunk>,
-    },
-    /// Jump stubs for calls to imported functions.
-    Stubs,
-    /// __TEXT,__stub_helper: with classic dyld info, the code a lazy
-    /// pointer initially points at, which enters dyld_stub_binder with
-    /// the pointer's lazy-bind record.
-    StubHelper,
-    /// __DATA,__la_symbol_ptr: the lazy pointers the stubs jump
-    /// through, bound by dyld on first call.
-    LazyPtrs,
-    /// The weak-bind opcode stream for LC_DYLD_INFO, in __LINKEDIT:
-    /// the slots dyld redirects when another image's copy of one of
-    /// this image's weak definitions wins coalescing.
-    WeakBindInfo,
-    /// The lazy-bind opcode stream for LC_DYLD_INFO, in __LINKEDIT.
-    LazyBindInfo,
-    /// The global offset table: pointers to symbols, bound by dyld for
-    /// imported ones.
-    Got,
-    /// Pointers to thread-local variable descriptors: what a
-    /// TLVP-relocated instruction sequence loads from.
-    ThreadPtrs,
-    /// Linker-synthesized _objc_msgSend$<selector> stubs.
-    ObjcStubs,
-    /// __TEXT,__objc_methlist: the Objective-C method lists rewritten
-    /// in the relative (12-byte entry) form, which needs no fixups.
-    ObjcMethlist,
-    /// The merged __objc_imageinfo section: the Objective-C runtime
-    /// reads exactly one 8-byte record per image.
-    ObjcImageInfo,
-    /// A section created from a file by -sectcreate.
-    SectCreate { data: &'static [u8] },
-    /// __TEXT,__init_offsets: 32-bit image-relative initializer
-    /// offsets, replacing __mod_init_func's absolute pointers.
-    InitOffsets,
-    /// The __TEXT,__unwind_info section, generated from the objects'
-    /// compact unwind records.
-    UnwindInfo,
-    /// The re-synthesized __TEXT,__eh_frame section, holding the DWARF
-    /// unwind records that compact unwind can't express.
-    EhFrame,
-    /// The rebase opcode stream for LC_DYLD_INFO, in __LINKEDIT.
-    RebaseInfo,
-    /// The bind opcode stream for LC_DYLD_INFO, in __LINKEDIT.
-    BindInfo,
-    /// The chained-fixups payload (LC_DYLD_CHAINED_FIXUPS) in
-    /// __LINKEDIT: the modern replacement for the rebase/bind streams.
-    ChainedFixups,
-    /// The export trie in __LINKEDIT: dyld's index of exported symbols.
-    ExportTrie,
-    /// LC_FUNCTION_STARTS data in __LINKEDIT: delta-encoded function
-    /// addresses, used by debuggers and crash reporters.
-    FunctionStarts,
-    /// LC_DATA_IN_CODE: ranges inside __text that hold data (jump
-    /// tables, inline constants), so disassemblers and the signature
-    /// verifier can treat them as bytes.
-    DataInCode,
-    /// The indirect symbol table in __LINKEDIT.
-    IndirectSymtab,
-    /// The symbol table in __LINKEDIT.
-    Symtab,
-    /// The string table in __LINKEDIT.
-    Strtab,
-    /// The ad-hoc code signature. Must be the last chunk in the file.
-    CodeSignature,
-}
-
-/// Linker-synthesized data appended to an output section after its
-/// input subsections. The Objective-C runtime reads exactly one
-/// __objc_selrefs section per image (the selectors it uniques at load
-/// time) and one __objc_methname, so the selector references and name
-/// strings the _objc_msgSend$<selector> stubs need cannot form
-/// sections of their own next to the compilers'; they are laid out as
-/// the tail of the section of that name, which is created empty when
-/// no input provides one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Tail {
-    None,
-    /// Selector name strings for the synthesized objc stubs.
-    ObjcMethname,
-    /// Selector references (pointers into __objc_methname) loaded by the
-    /// synthesized objc stubs.
-    ObjcSelrefs,
-    /// Objective-C data the linker synthesized (merged class data:
-    /// class_ro_t records, protocol and property lists, classic method
-    /// lists) in the section of that name.
-    DataBlobs,
-}
-
-#[derive(Debug)]
-pub struct Chunk {
-    pub hdr: ChunkHeader,
-    pub kind: ChunkKind,
-    pub tail: Tail,
-    /// Offset of the tail within the section, set at layout.
-    pub tail_off: u64,
-}
-
-impl Chunk {
-    pub fn new(segname: &'static str, sectname: &str, kind: ChunkKind) -> Chunk {
-        Chunk {
-            tail: Tail::None,
-            tail_off: 0,
-            hdr: ChunkHeader {
-                segname,
-                sectname: sectname.to_string(),
-                addr: 0,
-                fileoff: 0,
-                size: 0,
-                p2align: 0,
-                flags: 0,
-                reserved1: 0,
-                reserved2: 0,
-                is_sect: matches!(
-                    kind,
-                    ChunkKind::Output { .. }
-                        | ChunkKind::Stubs
-                        | ChunkKind::StubHelper
-                        | ChunkKind::LazyPtrs
-                        | ChunkKind::Got
-                        | ChunkKind::ThreadPtrs
-                        | ChunkKind::ObjcStubs
-                        | ChunkKind::ObjcMethlist
-                        | ChunkKind::ObjcImageInfo
-                        | ChunkKind::SectCreate { .. }
-                        | ChunkKind::InitOffsets
-                        | ChunkKind::UnwindInfo
-                        | ChunkKind::EhFrame
-                ),
-            },
-            kind,
+impl ChunkHeader {
+    /// The header of a section of the image.
+    pub fn new(segname: &'static str, sectname: &str) -> ChunkHeader {
+        ChunkHeader {
+            segname,
+            sectname: sectname.to_string(),
+            addr: 0,
+            fileoff: 0,
+            size: 0,
+            p2align: 0,
+            flags: 0,
+            reserved1: 0,
+            reserved2: 0,
+            is_sect: true,
+            n_sect: 0,
         }
     }
 
+    /// The header of a __LINKEDIT table, which no section header
+    /// describes.
+    pub fn linkedit() -> ChunkHeader {
+        let mut hdr = ChunkHeader::new("__LINKEDIT", "");
+        hdr.is_sect = false;
+        hdr
+    }
+
     pub fn is_zerofill(&self) -> bool {
-        matches!(
-            self.hdr.flags & SECTION_TYPE,
-            S_ZEROFILL | S_THREAD_LOCAL_ZEROFILL
-        )
+        matches!(self.flags & SECTION_TYPE, S_ZEROFILL | S_THREAD_LOCAL_ZEROFILL)
+    }
+}
+
+/// Index of an output section in `Context::output_sections`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct OutputSectionId(NonZeroU32);
+
+impl OutputSectionId {
+    #[inline]
+    pub fn new(index: u32) -> OutputSectionId {
+        let encoded = index.checked_add(1).expect("too many output sections");
+        OutputSectionId(NonZeroU32::new(encoded).unwrap())
+    }
+
+    #[inline]
+    pub fn index(self) -> usize {
+        (self.0.get() - 1) as usize
+    }
+}
+
+/// Names a chunk of the output. Every kind but the output sections and
+/// the -sectcreate sections exists at most once, so the kind alone
+/// names it; `Context::chunk_header` reaches any chunk's header, and
+/// the typed Context field its data.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ChunkId {
+    /// The mach header, load commands and header padding.
+    MachHeader,
+    /// A section of the output image, concatenating input sections.
+    Output(OutputSectionId),
+    Stubs,
+    StubHelper,
+    LazyPtrs,
+    Got,
+    ThreadPtrs,
+    ObjcStubs,
+    ObjcMethlist,
+    ObjcImageInfo,
+    /// A section created from a file by -sectcreate (or empty, for
+    /// -add_empty_section): an index into `Context::sectcreate_sections`.
+    SectCreate(u32),
+    InitOffsets,
+    UnwindInfo,
+    EhFrame,
+    RebaseInfo,
+    BindInfo,
+    WeakBindInfo,
+    LazyBindInfo,
+    ChainedFixups,
+    ExportTrie,
+    FunctionStarts,
+    DataInCode,
+    IndirectSymtab,
+    Symtab,
+    Strtab,
+    /// Must be the last chunk in the file.
+    CodeSignature,
+}
+
+impl ChunkId {
+    /// The chunks that exist at most once, in the order `pack` numbers
+    /// them.
+    const UNITS: [ChunkId; 24] = [
+        ChunkId::MachHeader,
+        ChunkId::Stubs,
+        ChunkId::StubHelper,
+        ChunkId::LazyPtrs,
+        ChunkId::Got,
+        ChunkId::ThreadPtrs,
+        ChunkId::ObjcStubs,
+        ChunkId::ObjcMethlist,
+        ChunkId::ObjcImageInfo,
+        ChunkId::InitOffsets,
+        ChunkId::UnwindInfo,
+        ChunkId::EhFrame,
+        ChunkId::RebaseInfo,
+        ChunkId::BindInfo,
+        ChunkId::WeakBindInfo,
+        ChunkId::LazyBindInfo,
+        ChunkId::ChainedFixups,
+        ChunkId::ExportTrie,
+        ChunkId::FunctionStarts,
+        ChunkId::DataInCode,
+        ChunkId::IndirectSymtab,
+        ChunkId::Symtab,
+        ChunkId::Strtab,
+        ChunkId::CodeSignature,
+    ];
+
+    /// The id as one u32 (never u32::MAX), for InputSection, whose
+    /// size counts: the top two bits say which of the three shapes it
+    /// is, the rest holds the index. mold-rust's InputSection stores an
+    /// Option<OutputSectionId>, a word too, since an ELF subsection
+    /// only ever lands in an output section; a Mach-O subsection may
+    /// also stand for a GOT slot or a rewritten method list.
+    pub fn pack(self) -> u32 {
+        match self {
+            ChunkId::Output(id) => {
+                let i = id.index() as u32;
+                assert!(i < 1 << 30, "too many output sections");
+                i
+            }
+            ChunkId::SectCreate(i) => (1 << 30) | i,
+            _ => (2 << 30) | ChunkId::UNITS.iter().position(|&c| c == self).unwrap() as u32,
+        }
+    }
+
+    #[inline]
+    pub fn unpack(v: u32) -> ChunkId {
+        let i = v & ((1 << 30) - 1);
+        match v >> 30 {
+            0 => ChunkId::Output(OutputSectionId::new(i)),
+            1 => ChunkId::SectCreate(i),
+            _ => ChunkId::UNITS[i as usize],
+        }
+    }
+}
+
+/// The mach header, load commands and header padding: the first
+/// chunk of __TEXT.
+#[derive(Debug)]
+pub struct OutputMachHeader {
+    pub hdr: ChunkHeader,
+}
+
+impl OutputMachHeader {
+    pub fn new() -> OutputMachHeader {
+        let mut hdr = ChunkHeader::new("__TEXT", "");
+        hdr.is_sect = false;
+        OutputMachHeader { hdr }
     }
 }
 
@@ -193,8 +216,7 @@ impl Chunk {
 #[derive(Debug, Default)]
 pub struct OutputSegment {
     pub name: &'static str,
-    /// Indices into `ctx.chunks`.
-    pub chunks: Vec<usize>,
+    pub chunks: Vec<ChunkId>,
     pub cmd: SegmentCommand,
 }
 
@@ -218,49 +240,36 @@ pub fn segment_prot(name: &str) -> u32 {
     }
 }
 
-/// The symbol table contents, laid out before addresses are known. The
-/// symbol slot of each entry supplies its final `n_value` when the table
-/// is copied to the output.
-#[derive(Debug, Default)]
-pub struct SymtabData {
-    pub entries: Vec<(NList, Option<SymbolId>)>,
-    /// The string table's total size (bytes, padded to 8). The bytes
-    /// themselves are not materialized here - `strtab_uniques` lists
-    /// the deduplicated strings with their offsets, and copy_symtab
-    /// writes them straight into the output, skipping a 150MB temp Vec
-    /// and the copy that would follow it.
-    pub strtab_size: usize,
-    /// Each distinct string with its offset in the string table.
-    pub strtab_uniques: Vec<(u32, &'static str)>,
-    pub nlocal: u32,
-    pub nextdef: u32,
-    pub nundef: u32,
-    /// Each symbol's index in the output symbol table (u32::MAX if
-    /// absent), for the indirect symbol table. mold keeps output
-    /// symtab indices as direct per-symbol data too, not in a map;
-    /// one flat array serves here because Mach-O name-sorts its
-    /// globals across all files, which rules out per-file bases.
-    pub output_sym_indices: Vec<u32>,
-}
-
-pub fn find_chunk<E: Arch>(ctx: &Context<E>, f: impl Fn(&ChunkKind) -> bool) -> Option<usize> {
-    ctx.chunks.iter().position(|c| f(&c.kind))
-}
-
-/// Returns, for each chunk, its 1-based section ordinal in the output, or
-/// 0 for chunks that are not sections.
-pub fn section_ordinals<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
-    let mut ordinals = vec![0; ctx.chunks.len()];
-    let mut ord = 1;
-    for seg in &ctx.segments {
-        for &idx in &seg.chunks {
-            if ctx.chunks[idx].hdr.is_sect {
-                ordinals[idx] = ord;
-                ord += 1;
-            }
-        }
+/// Writes a chunk's bytes into its own slice of the output. The mach
+/// header, the symbol and string tables and the code signature are
+/// written serially after the parallel copy (see copy_chunks), so they
+/// have nothing to do here.
+pub fn copy_buf<E: Arch>(ctx: &Context<E>, id: ChunkId, buf: &mut [u8]) {
+    match id {
+        ChunkId::MachHeader | ChunkId::Symtab | ChunkId::Strtab | ChunkId::CodeSignature => {}
+        ChunkId::Output(id) => output_section::copy_buf(ctx, id, buf),
+        ChunkId::Stubs => got::stubs::copy_buf(ctx, buf),
+        ChunkId::StubHelper => got::stub_helper::copy_buf(ctx, buf),
+        ChunkId::LazyPtrs => got::lazy_ptrs::copy_buf(ctx, buf),
+        ChunkId::Got => got::got::copy_buf(ctx, buf),
+        ChunkId::ThreadPtrs => got::thread_ptrs::copy_buf(ctx, buf),
+        ChunkId::ObjcStubs => objc::objc_stubs::copy_buf(ctx, buf),
+        ChunkId::ObjcMethlist => objc::objc_methlist::copy_buf(ctx, buf),
+        ChunkId::ObjcImageInfo => objc::objc_imageinfo::copy_buf(ctx, buf),
+        ChunkId::SectCreate(i) => misc::sectcreate::copy_buf(ctx, i, buf),
+        ChunkId::InitOffsets => misc::init_offsets::copy_buf(ctx, buf),
+        ChunkId::UnwindInfo => unwind_info::copy_buf(ctx, buf),
+        ChunkId::EhFrame => eh_frame::copy_buf(ctx, buf),
+        ChunkId::RebaseInfo => dyld_info::rebase_info::copy_buf(ctx, buf),
+        ChunkId::BindInfo => dyld_info::bind_info::copy_buf(ctx, buf),
+        ChunkId::WeakBindInfo => dyld_info::weak_bind_info::copy_buf(ctx, buf),
+        ChunkId::LazyBindInfo => dyld_info::lazy_bind_info::copy_buf(ctx, buf),
+        ChunkId::ChainedFixups => chained_fixups::copy_buf(ctx, buf),
+        ChunkId::ExportTrie => export_trie::copy_buf(ctx, buf),
+        ChunkId::FunctionStarts => misc::function_starts::copy_buf(ctx, buf),
+        ChunkId::DataInCode => misc::data_in_code::copy_buf(ctx, buf),
+        ChunkId::IndirectSymtab => symtab::indirect_symtab::copy_buf(ctx, buf),
     }
-    ordinals
 }
 
 fn to_vec(record: &impl FileRecord) -> Vec<u8> {
@@ -281,11 +290,11 @@ fn create_segment_cmd<E: Arch>(ctx: &Context<E>, seg: &OutputSegment) -> Vec<u8>
     cmd.cmd = LC_SEGMENT_64;
     cmd.segname = str_to_name(seg.name);
 
-    let sects: Vec<&Chunk> = seg
+    let sects: Vec<&ChunkHeader> = seg
         .chunks
         .iter()
-        .map(|&i| &ctx.chunks[i])
-        .filter(|c| c.hdr.is_sect)
+        .map(|&id| ctx.chunk_header(id))
+        .filter(|hdr| hdr.is_sect)
         .collect();
 
     cmd.nsects = sects.len() as u32;
@@ -298,20 +307,20 @@ fn create_segment_cmd<E: Arch>(ctx: &Context<E>, seg: &OutputSegment) -> Vec<u8>
     }
 
     let mut buf = to_vec(&cmd);
-    for chunk in sects {
+    for hdr in sects {
         let mut sect = MachSection {
-            sectname: str_to_name(&chunk.hdr.sectname),
+            sectname: str_to_name(&hdr.sectname),
             segname: str_to_name(seg.name),
-            addr: chunk.hdr.addr,
-            size: chunk.hdr.size,
-            offset: chunk.hdr.fileoff as u32,
-            p2align: chunk.hdr.p2align,
-            flags: chunk.hdr.flags,
-            reserved1: chunk.hdr.reserved1,
-            reserved2: chunk.hdr.reserved2,
+            addr: hdr.addr,
+            size: hdr.size,
+            offset: hdr.fileoff as u32,
+            p2align: hdr.p2align,
+            flags: hdr.flags,
+            reserved1: hdr.reserved1,
+            reserved2: hdr.reserved2,
             ..Default::default()
         };
-        if chunk.is_zerofill() {
+        if hdr.is_zerofill() {
             sect.offset = 0;
         }
         buf.extend_from_slice(sect.as_bytes());
@@ -325,50 +334,42 @@ fn create_dyld_info_cmd<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
         cmdsize: size_of::<DyldInfoCommand>() as u32,
         ..Default::default()
     };
-    if let Some(idx) = find_chunk(ctx, |k| matches!(k, ChunkKind::RebaseInfo)) {
-        if ctx.chunks[idx].hdr.size > 0 {
-            cmd.rebase_off = ctx.chunks[idx].hdr.fileoff as u32;
-            cmd.rebase_size = ctx.chunks[idx].hdr.size as u32;
-        }
+    let hdr = &ctx.rebase_info.hdr;
+    if hdr.size > 0 {
+        cmd.rebase_off = hdr.fileoff as u32;
+        cmd.rebase_size = hdr.size as u32;
     }
-    if let Some(idx) = find_chunk(ctx, |k| matches!(k, ChunkKind::BindInfo)) {
-        if ctx.chunks[idx].hdr.size > 0 {
-            cmd.bind_off = ctx.chunks[idx].hdr.fileoff as u32;
-            cmd.bind_size = ctx.chunks[idx].hdr.size as u32;
-        }
+    let hdr = &ctx.bind_info.hdr;
+    if hdr.size > 0 {
+        cmd.bind_off = hdr.fileoff as u32;
+        cmd.bind_size = hdr.size as u32;
     }
-    if let Some(idx) = find_chunk(ctx, |k| matches!(k, ChunkKind::WeakBindInfo)) {
-        if ctx.chunks[idx].hdr.size > 0 {
-            cmd.weak_bind_off = ctx.chunks[idx].hdr.fileoff as u32;
-            cmd.weak_bind_size = ctx.chunks[idx].hdr.size as u32;
-        }
+    let hdr = &ctx.weak_bind_info.hdr;
+    if hdr.size > 0 {
+        cmd.weak_bind_off = hdr.fileoff as u32;
+        cmd.weak_bind_size = hdr.size as u32;
     }
-    if let Some(idx) = find_chunk(ctx, |k| matches!(k, ChunkKind::LazyBindInfo)) {
-        if ctx.chunks[idx].hdr.size > 0 {
-            cmd.lazy_bind_off = ctx.chunks[idx].hdr.fileoff as u32;
-            cmd.lazy_bind_size = ctx.chunks[idx].hdr.size as u32;
-        }
+    let hdr = &ctx.lazy_bind_info.hdr;
+    if hdr.size > 0 {
+        cmd.lazy_bind_off = hdr.fileoff as u32;
+        cmd.lazy_bind_size = hdr.size as u32;
     }
-    if let Some(idx) = find_chunk(ctx, |k| matches!(k, ChunkKind::ExportTrie)) {
-        if ctx.chunks[idx].hdr.size > 0 {
-            cmd.export_off = ctx.chunks[idx].hdr.fileoff as u32;
-            cmd.export_size = ctx.chunks[idx].hdr.size as u32;
-        }
+    let hdr = &ctx.export_trie.hdr;
+    if hdr.size > 0 {
+        cmd.export_off = hdr.fileoff as u32;
+        cmd.export_size = hdr.size as u32;
     }
     to_vec(&cmd)
 }
 
 fn create_symtab_cmd<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
-    let symtab = &ctx.chunks[find_chunk(ctx, |k| matches!(k, ChunkKind::Symtab)).unwrap()];
-    let strtab = &ctx.chunks[find_chunk(ctx, |k| matches!(k, ChunkKind::Strtab)).unwrap()];
-
     let cmd = SymtabCommand {
         cmd: LC_SYMTAB,
         cmdsize: size_of::<SymtabCommand>() as u32,
-        symoff: symtab.hdr.fileoff as u32,
+        symoff: ctx.symtab.hdr.fileoff as u32,
         nsyms: ctx.symtab.entries.len() as u32,
-        stroff: strtab.hdr.fileoff as u32,
-        strsize: strtab.hdr.size as u32,
+        stroff: ctx.strtab.hdr.fileoff as u32,
+        strsize: ctx.strtab.hdr.size as u32,
     };
     to_vec(&cmd)
 }
@@ -386,23 +387,15 @@ fn create_dysymtab_cmd<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
         nundefsym: data.nundef,
         ..Default::default()
     };
-    if let Some(idx) = find_chunk(ctx, |k| matches!(k, ChunkKind::IndirectSymtab)) {
-        cmd.indirectsymoff = ctx.chunks[idx].hdr.fileoff as u32;
-        cmd.nindirectsyms = (ctx.chunks[idx].hdr.size / 4) as u32;
+    if ctx.chunks.contains(&ChunkId::IndirectSymtab) {
+        cmd.indirectsymoff = ctx.indirect_symtab.hdr.fileoff as u32;
+        cmd.nindirectsyms = (ctx.indirect_symtab.hdr.size / 4) as u32;
     }
     to_vec(&cmd)
 }
 
 fn create_function_starts_cmd<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
-    let chunk =
-        &ctx.chunks[find_chunk(ctx, |k| matches!(k, ChunkKind::FunctionStarts)).unwrap()];
-    let cmd = LinkEditDataCommand {
-        cmd: LC_FUNCTION_STARTS,
-        cmdsize: size_of::<LinkEditDataCommand>() as u32,
-        dataoff: chunk.hdr.fileoff as u32,
-        datasize: chunk.hdr.size as u32,
-    };
-    to_vec(&cmd)
+    create_linkedit_data_cmd(LC_FUNCTION_STARTS, &ctx.function_starts.hdr)
 }
 
 fn create_uuid_cmd<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
@@ -529,24 +522,16 @@ fn create_main_cmd<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
     to_vec(&cmd)
 }
 
-fn create_code_signature_cmd<E: Arch>(ctx: &Context<E>, idx: usize) -> Vec<u8> {
-    let chunk = &ctx.chunks[idx];
-    let cmd = LinkEditDataCommand {
-        cmd: LC_CODE_SIGNATURE,
-        cmdsize: size_of::<LinkEditDataCommand>() as u32,
-        dataoff: chunk.hdr.fileoff as u32,
-        datasize: chunk.hdr.size as u32,
-    };
-    to_vec(&cmd)
+fn create_code_signature_cmd<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
+    create_linkedit_data_cmd(LC_CODE_SIGNATURE, &ctx.code_signature.hdr)
 }
 
-fn create_linkedit_data_cmd<E: Arch>(ctx: &Context<E>, cmd: u32, kind_idx: usize) -> Vec<u8> {
-    let chunk = &ctx.chunks[kind_idx];
+fn create_linkedit_data_cmd(cmd: u32, hdr: &ChunkHeader) -> Vec<u8> {
     let cmd = LinkEditDataCommand {
         cmd,
         cmdsize: size_of::<LinkEditDataCommand>() as u32,
-        dataoff: chunk.hdr.fileoff as u32,
-        datasize: chunk.hdr.size as u32,
+        dataoff: hdr.fileoff as u32,
+        datasize: hdr.size as u32,
     };
     to_vec(&cmd)
 }
@@ -575,14 +560,10 @@ pub fn create_load_commands<E: Arch>(ctx: &Context<E>) -> Vec<Vec<u8>> {
 
     // Chained fixups replace the classic dyld info; the export trie
     // then gets a load command of its own.
-    let chained = find_chunk(ctx, |k| matches!(k, ChunkKind::ChainedFixups))
-        .filter(|&idx| ctx.chunks[idx].hdr.size > 0);
-    if let Some(idx) = chained {
-        vec.push(create_linkedit_data_cmd(ctx, LC_DYLD_CHAINED_FIXUPS, idx));
-        if let Some(trie) = find_chunk(ctx, |k| matches!(k, ChunkKind::ExportTrie)) {
-            if ctx.chunks[trie].hdr.size > 0 {
-                vec.push(create_linkedit_data_cmd(ctx, LC_DYLD_EXPORTS_TRIE, trie));
-            }
+    if ctx.chained_fixups.hdr.size > 0 {
+        vec.push(create_linkedit_data_cmd(LC_DYLD_CHAINED_FIXUPS, &ctx.chained_fixups.hdr));
+        if ctx.export_trie.hdr.size > 0 {
+            vec.push(create_linkedit_data_cmd(LC_DYLD_EXPORTS_TRIE, &ctx.export_trie.hdr));
         }
     } else {
         vec.push(create_dyld_info_cmd(ctx));
@@ -612,26 +593,18 @@ pub fn create_load_commands<E: Arch>(ctx: &Context<E>) -> Vec<Vec<u8>> {
         vec.push(create_string_cmd(LC_RPATH, rpath));
     }
 
-    if let Some(idx) = find_chunk(ctx, |k| matches!(k, ChunkKind::FunctionStarts)) {
-        if ctx.chunks[idx].hdr.size > 0 {
-            vec.push(create_function_starts_cmd(ctx));
-        }
+    if ctx.function_starts.hdr.size > 0 {
+        vec.push(create_function_starts_cmd(ctx));
     }
 
     // ld64 always writes LC_DATA_IN_CODE, even with no entries;
     // tooling takes its absence as "old linker".
-    if let Some(idx) = find_chunk(ctx, |k| matches!(k, ChunkKind::DataInCode)) {
-        let chunk = &ctx.chunks[idx];
-        vec.push(to_vec(&LinkEditDataCommand {
-            cmd: LC_DATA_IN_CODE,
-            cmdsize: size_of::<LinkEditDataCommand>() as u32,
-            dataoff: chunk.hdr.fileoff as u32,
-            datasize: chunk.hdr.size as u32,
-        }));
+    if ctx.chunks.contains(&ChunkId::DataInCode) {
+        vec.push(create_linkedit_data_cmd(LC_DATA_IN_CODE, &ctx.data_in_code.hdr));
     }
 
-    if let Some(idx) = find_chunk(ctx, |k| matches!(k, ChunkKind::CodeSignature)) {
-        vec.push(create_code_signature_cmd(ctx, idx));
+    if ctx.chunks.contains(&ChunkId::CodeSignature) {
+        vec.push(create_code_signature_cmd(ctx));
     }
     vec
 }
@@ -684,8 +657,8 @@ pub fn copy_mach_header<E: Arch>(ctx: &Context<E>, buf: &mut [u8]) {
             idx != u32::MAX && sym.is_used() && ctx.dylibs[idx as usize].weak_exports.contains(sym.name())
         }
         _ => false,
-    }) || ctx.fixup_imports.iter().any(|&(id, _)| ctx.binds_weak_lookup(id))
-        || !ctx.weak_bind_data.is_empty()
+    }) || ctx.chained_fixups.imports.iter().any(|&(id, _)| ctx.binds_weak_lookup(id))
+        || !ctx.weak_bind_info.contents.is_empty()
     {
         hdr.flags |= MH_BINDS_TO_WEAK;
     }
@@ -711,7 +684,7 @@ pub fn copy_mach_header<E: Arch>(ctx: &Context<E>, buf: &mut [u8]) {
     if ctx
         .chunks
         .iter()
-        .any(|c| c.hdr.flags & SECTION_TYPE == S_THREAD_LOCAL_VARIABLES)
+        .any(|&id| ctx.chunk_header(id).flags & SECTION_TYPE == S_THREAD_LOCAL_VARIABLES)
     {
         hdr.flags |= MH_HAS_TLV_DESCRIPTORS;
     }
@@ -726,8 +699,7 @@ pub fn copy_mach_header<E: Arch>(ctx: &Context<E>, buf: &mut [u8]) {
 
 pub fn copy_symtab<E: Arch>(ctx: &Context<E>, buf: &mut [u8]) {
     use rayon::prelude::*;
-    let chunk = &ctx.chunks[find_chunk(ctx, |k| matches!(k, ChunkKind::Symtab)).unwrap()];
-    let off = chunk.hdr.fileoff as usize;
+    let off = ctx.symtab.hdr.fileoff as usize;
     let entries = &ctx.symtab.entries;
     // Millions of entries, each wanting a sym_addr lookup for its
     // n_value: emit them in parallel blocks.
@@ -749,8 +721,7 @@ pub fn copy_symtab<E: Arch>(ctx: &Context<E>, buf: &mut [u8]) {
     // intermediate 150MB buffer. The " \0-\0" prefix (offsets 1 and 2
     // are the empty and "-" placeholders), then every distinct string
     // at its offset, on all cores; each string owns a disjoint range.
-    let chunk = &ctx.chunks[find_chunk(ctx, |k| matches!(k, ChunkKind::Strtab)).unwrap()];
-    let off = chunk.hdr.fileoff as usize;
+    let off = ctx.strtab.hdr.fileoff as usize;
     let strtab = &mut buf[off..off + ctx.symtab.strtab_size];
     strtab[..4].copy_from_slice(b" \0-\0");
     struct BufPtr(*mut u8);
@@ -1375,11 +1346,9 @@ pub fn encode_unwind_info<E: Arch>(ctx: &Context<E>) -> (Vec<u8>, Vec<SymbolId>)
 /// personality cells rewritten to be GOT-relative, then live FDEs with
 /// their CIE pointer, function pointer and LSDA pointer re-targeted.
 pub fn copy_eh_frame<E: Arch>(ctx: &Context<E>, buf: &mut [u8]) {
-    let chunk_idx = find_chunk(ctx, |k| matches!(k, ChunkKind::EhFrame)).unwrap();
-    let chunk = &ctx.chunks[chunk_idx];
     // `buf` is the chunk's own slice of the output.
     let base_off = 0;
-    let base_addr = chunk.hdr.addr;
+    let base_addr = ctx.eh_frame.hdr.addr;
 
     for cie in &ctx.cies {
         if !cie.is_alive {
@@ -1492,8 +1461,7 @@ pub fn write_code_signature<E: Arch>(
     buf: &mut [u8],
     hashes: &[[u8; SHA256_SIZE]],
 ) {
-    let chunk = &ctx.chunks[find_chunk(ctx, |k| matches!(k, ChunkKind::CodeSignature)).unwrap()];
-    let cs_off = chunk.hdr.fileoff;
+    let cs_off = ctx.code_signature.hdr.fileoff;
     let ident = file_basename(&ctx.args.output);
     let ident_size = align_to(ident.len() as u64 + 1, 16);
     let nblocks = cs_off.div_ceil(CS_PAGE_SIZE);
@@ -1502,12 +1470,12 @@ pub fn write_code_signature<E: Arch>(
     let text = ctx.segments.iter().find(|s| s.name == "__TEXT").unwrap();
 
     // All code signature fields are big-endian.
-    let mut sig = Vec::with_capacity(chunk.hdr.size as usize);
+    let mut sig = Vec::with_capacity(ctx.code_signature.hdr.size as usize);
 
     // The superblob header and the index of its single blob, the code
     // directory.
     push_be32(&mut sig, CSMAGIC_EMBEDDED_SIGNATURE);
-    push_be32(&mut sig, chunk.hdr.size as u32);
+    push_be32(&mut sig, ctx.code_signature.hdr.size as u32);
     push_be32(&mut sig, 1);
     push_be32(&mut sig, CSSLOT_CODEDIRECTORY);
     push_be32(&mut sig, 20);
@@ -1548,6 +1516,6 @@ pub fn write_code_signature<E: Arch>(
         sig.extend_from_slice(hash);
     }
 
-    debug_assert_eq!(sig.len() as u64, chunk.hdr.size);
+    debug_assert_eq!(sig.len() as u64, ctx.code_signature.hdr.size);
     buf[cs_off as usize..cs_off as usize + sig.len()].copy_from_slice(&sig);
 }

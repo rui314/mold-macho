@@ -84,7 +84,7 @@ impl Arch for X86_64 {
     }
 
     fn write_stubs(ctx: &Context<Self>, addr: u64, buf: &mut [u8]) {
-        for (i, &sym) in ctx.stub_syms.iter().enumerate() {
+        for (i, &sym) in ctx.stubs.symbols.iter().enumerate() {
             let ent = &mut buf[i * 6..];
             let ent_addr = addr + i as u64 * 6;
             let ptr_addr = ctx.stub_ptr_addr(i, sym);
@@ -102,8 +102,8 @@ impl Arch for X86_64 {
         //   push %r11
         //   jmp  *dyld_stub_binder@GOTPCREL(%rip)
         //   nop
-        let private = ctx.isec_addr(ctx.dyld_private_isec as usize);
-        let binder = ctx.sym_got_addr(ctx.dyld_stub_binder.unwrap());
+        let private = ctx.isec_addr(ctx.stub_helper.dyld_private_isec as usize);
+        let binder = ctx.sym_got_addr(ctx.stub_helper.dyld_stub_binder.unwrap());
         buf[0..3].copy_from_slice(&[0x4c, 0x8d, 0x1d]);
         write32(&mut buf[3..], private.wrapping_sub(addr + 7) as u32);
         buf[7..9].copy_from_slice(&[0x41, 0x53]);
@@ -111,20 +111,20 @@ impl Arch for X86_64 {
         write32(&mut buf[11..], binder.wrapping_sub(addr + 15) as u32);
         buf[15] = 0x90;
         // Each entry: push $offset; jmp header.
-        for i in 0..ctx.stub_syms.len() {
+        for i in 0..ctx.stubs.symbols.len() {
             let off = 16 + i * 10;
             let ent_addr = addr + off as u64;
             buf[off] = 0x68;
-            write32(&mut buf[off + 1..], ctx.lazy_bind_offsets[i]);
+            write32(&mut buf[off + 1..], ctx.lazy_bind_info.offsets[i]);
             buf[off + 5] = 0xe9;
             write32(&mut buf[off + 6..], addr.wrapping_sub(ent_addr + 10) as u32);
         }
     }
 
     fn write_objc_stubs(ctx: &Context<Self>, addr: u64, buf: &mut [u8]) {
-        let msgsend_got = ctx.sym_got_addr(ctx.objc_msgsend_sym.unwrap());
+        let msgsend_got = ctx.sym_got_addr(ctx.objc_stubs.msgsend_sym.unwrap());
 
-        for i in 0..ctx.objc_stubs.len() {
+        for i in 0..ctx.objc_stubs.symbols.len() {
             let ent = &mut buf[i * 16..];
             let ent_addr = addr + i as u64 * 16;
             let sel_addr = ctx.objc_selref_addr(i);

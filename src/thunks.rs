@@ -29,7 +29,7 @@
 use crate::arch::{Arch, RelocClass};
 use crate::context::Context;
 use crate::input_sections::InputSectionId;
-use crate::output_chunks::{self, ChunkKind};
+use crate::output_chunks::{self, OutputSectionId};
 use crate::symbol::{Origin, SymbolId};
 use crate::util::align_to;
 
@@ -176,7 +176,7 @@ fn scan_batch<E: Arch>(
             if obj == usize::MAX {
                 return out;
             }
-            let osec = ctx_ref.isecs[isec_id].output_section;
+            let osec = ctx_ref.isecs[isec_id].output_section();
             let ro = ctx_ref.isecs[isec_id].rel_offset as usize;
             let nr = ctx_ref.isecs[isec_id].nrels as usize;
             for r in 0..nr {
@@ -192,7 +192,7 @@ fn scan_batch<E: Arch>(
                     let t = &ctx_ref.isecs[ctx_ref.resolve_isec(target as usize)];
                     // A target in another output section has no offset
                     // in this section's space; reserve an entry.
-                    if t.output_section != osec {
+                    if t.output_section() != osec {
                         // conservative: fall through to the entry below
                     } else if t.offset != u32::MAX {
                         let target_off = t.offset as u64 + sym.value;
@@ -232,19 +232,17 @@ fn scan_batch<E: Arch>(
 /// thunk_addrs), in address order, so that applying an out-of-range
 /// branch can pick the entry within reach. mold-rust's
 /// gather_thunk_addresses.
-pub fn gather_thunk_addresses<E: Arch>(ctx: &mut Context<E>, chunk_idxs: &[usize]) {
-    // The chunks are read while the symbol tables are written, so the
-    // borrows are split and the addresses recorded as the thunks are
-    // walked, without a temporary list (mold-rust 94e2104).
-    let chunks = &ctx.chunks;
+pub fn gather_thunk_addresses<E: Arch>(ctx: &mut Context<E>, osecs: &[OutputSectionId]) {
+    // The sections are read while the symbol tables are written, so
+    // the borrows are split and the addresses recorded as the thunks
+    // are walked, without a temporary list (mold-rust 94e2104).
+    let output_sections = &ctx.output_sections;
     let symtab = &mut ctx.symbols;
     let sym_aux = &mut ctx.sym_aux;
-    for &ci in chunk_idxs {
-        let base = chunks[ci].hdr.addr;
-        let ChunkKind::Output { thunks, .. } = &chunks[ci].kind else {
-            continue;
-        };
-        for thunk in thunks {
+    for &id in osecs {
+        let osec = &output_sections[id.index()];
+        let base = osec.hdr.addr;
+        for thunk in &osec.thunks {
             for (i, &sym) in thunk.syms.iter().enumerate() {
                 let addr = base + thunk.offset + i as u64 * E::THUNK_SIZE;
                 Context::<E>::sym_aux_mut_in(symtab, sym_aux, sym).thunk_addrs.push(addr);

@@ -12,9 +12,11 @@ use crate::input_files;
 use crate::input_sections::{InputSection, RelocTarget};
 use crate::macho::*;
 use crate::mapped_file::MappedFile;
+use crate::output_chunks::misc::SectCreateSection;
+use crate::output_chunks::symtab::SymtabSection;
 use crate::output_chunks::{
-    self, Chunk, ChunkKind, OutputSegment, SymtabData, Tail, code_signature_size,
-    mach_header_size, section_ordinals,
+    self, ChunkId, OutputSection, OutputSectionId, OutputSegment, Tail, code_signature_size,
+    mach_header_size,
 };
 use crate::arch::RelocClass;
 use crate::symbol::Origin;
@@ -1126,7 +1128,7 @@ pub fn convert_init_offsets<E: Arch>(ctx: &mut Context<E>) {
                     _ => continue,
                 },
             };
-            ctx.init_funcs.push(target);
+            ctx.init_offsets.init_funcs.push(target);
         }
         ctx.isecs[i].set_alive(false);
     }
@@ -1392,16 +1394,16 @@ pub fn create_objc_msgsend_stubs<E: Arch>(ctx: &mut Context<E>) {
             continue;
         };
         let sel = sel.to_string();
-        let idx = ctx.objc_stubs.len() as u32;
+        let idx = ctx.objc_stubs.symbols.len() as u32;
         ctx.symbols[i].set_origin(Origin::Synthetic);
         ctx.sym_aux_mut(i as u32).objc_stub_idx = idx;
-        ctx.objc_stubs.push((i as u32, sel));
+        ctx.objc_stubs.symbols.push((i as u32, sel));
     }
 
-    if !ctx.objc_stubs.is_empty() {
+    if !ctx.objc_stubs.symbols.is_empty() {
         let id = ctx.symbols.intern("_objc_msgSend");
         ctx.symbols[id].set_is_used(true);
-        ctx.objc_msgsend_sym = Some(id);
+        ctx.objc_stubs.msgsend_sym = Some(id);
 
         // The stub machinery itself references _objc_msgSend; resolve
         // it now, since regular resolution has already run.
@@ -1420,11 +1422,11 @@ pub fn create_objc_msgsend_stubs<E: Arch>(ctx: &mut Context<E>) {
 
         // Build the __objc_methname contents: one NUL-terminated string
         // per selector.
-        for i in 0..ctx.objc_stubs.len() {
-            ctx.objc_methname_offs.push(ctx.objc_methname_data.len() as u64);
-            let sel = ctx.objc_stubs[i].1.clone();
-            ctx.objc_methname_data.extend_from_slice(sel.as_bytes());
-            ctx.objc_methname_data.push(0);
+        for i in 0..ctx.objc_stubs.symbols.len() {
+            ctx.objc_stubs.methname_offs.push(ctx.objc_stubs.methname_data.len() as u64);
+            let sel = ctx.objc_stubs.symbols[i].1.clone();
+            ctx.objc_stubs.methname_data.extend_from_slice(sel.as_bytes());
+            ctx.objc_stubs.methname_data.push(0);
         }
     }
 }
@@ -1973,7 +1975,7 @@ pub fn is_thread_local_sym<E: Arch>(ctx: &Context<E>, id: crate::symbol::SymbolI
 
 /// The synthesized objc stubs call _objc_msgSend through the GOT.
 pub fn scan_objc_stubs<E: Arch>(ctx: &mut Context<E>) {
-    if let Some(id) = ctx.objc_msgsend_sym {
+    if let Some(id) = ctx.objc_stubs.msgsend_sym {
         add_got(ctx, id);
     }
 
@@ -2002,22 +2004,22 @@ pub fn scan_objc_stubs<E: Arch>(ctx: &mut Context<E>) {
         slot_of.entry(&data[..end]).or_insert(i as u32);
     }
     let mut tail = 0u32;
-    ctx.objc_stub_selref = Vec::with_capacity(ctx.objc_stubs.len());
-    ctx.objc_stub_tail = Vec::with_capacity(ctx.objc_stubs.len());
-    for i in 0..ctx.objc_stubs.len() {
-        match slot_of.get(ctx.objc_stubs[i].1.as_bytes()) {
+    ctx.objc_stubs.selref = Vec::with_capacity(ctx.objc_stubs.symbols.len());
+    ctx.objc_stubs.tail = Vec::with_capacity(ctx.objc_stubs.symbols.len());
+    for i in 0..ctx.objc_stubs.symbols.len() {
+        match slot_of.get(ctx.objc_stubs.symbols[i].1.as_bytes()) {
             Some(&slot) => {
-                ctx.objc_stub_selref.push(slot);
-                ctx.objc_stub_tail.push(u32::MAX);
+                ctx.objc_stubs.selref.push(slot);
+                ctx.objc_stubs.tail.push(u32::MAX);
             }
             None => {
-                ctx.objc_stub_selref.push(u32::MAX);
-                ctx.objc_stub_tail.push(tail);
+                ctx.objc_stubs.selref.push(u32::MAX);
+                ctx.objc_stubs.tail.push(tail);
                 tail += 1;
             }
         }
     }
-    ctx.objc_tail_slots = tail as usize;
+    ctx.objc_stubs.tail_slots = tail as usize;
 }
 
 /// Personality functions are referenced from __unwind_info through the
@@ -2036,22 +2038,22 @@ pub fn scan_unwind_personalities<E: Arch>(ctx: &mut Context<E>) {
 
 fn add_thread_ptr<E: Arch>(ctx: &mut Context<E>, id: crate::symbol::SymbolId) {
     if ctx.sym_aux(id).tlv_idx == crate::symbol::NO_IDX {
-        ctx.sym_aux_mut(id).tlv_idx = ctx.thread_ptr_syms.len() as u32;
-        ctx.thread_ptr_syms.push(id);
+        ctx.sym_aux_mut(id).tlv_idx = ctx.thread_ptrs.symbols.len() as u32;
+        ctx.thread_ptrs.symbols.push(id);
     }
 }
 
 fn add_stub<E: Arch>(ctx: &mut Context<E>, id: crate::symbol::SymbolId) {
     if ctx.sym_aux(id).stub_idx == crate::symbol::NO_IDX {
-        ctx.sym_aux_mut(id).stub_idx = ctx.stub_syms.len() as u32;
-        ctx.stub_syms.push(id);
+        ctx.sym_aux_mut(id).stub_idx = ctx.stubs.symbols.len() as u32;
+        ctx.stubs.symbols.push(id);
     }
 }
 
 fn add_got<E: Arch>(ctx: &mut Context<E>, id: crate::symbol::SymbolId) {
     if ctx.sym_aux(id).got_idx == crate::symbol::NO_IDX {
-        ctx.sym_aux_mut(id).got_idx = ctx.got_syms.len() as u32;
-        ctx.got_syms.push(id);
+        ctx.sym_aux_mut(id).got_idx = ctx.got.got_syms.len() as u32;
+        ctx.got.got_syms.push(id);
     }
 }
 
@@ -2195,7 +2197,7 @@ pub fn fold_objc_classrefs<E: Arch>(ctx: &mut Context<E>) {
             });
             let synth = (ctx.isecs.len() - 1) as u32;
             ctx.isecs[slot as usize].replacement = synth;
-            ctx.objc_classref_slots.push(synth);
+            ctx.got.objc_classref_slots.push(synth);
         }
     }
 }
@@ -2431,7 +2433,7 @@ pub fn convert_objc_method_lists<E: Arch>(ctx: &mut Context<E>) {
     let shndx = (ctx.synthetic_hdrs.len() - 1) as u32;
     let mut extra_of: hashbrown::HashMap<u32, usize> = hashbrown::HashMap::new();
     let stub_of: hashbrown::HashMap<Vec<u8>, usize> = ctx
-        .objc_stubs
+        .objc_stubs.symbols
         .iter()
         .enumerate()
         .map(|(i, (_, sel))| (sel.as_bytes().to_vec(), i))
@@ -2472,10 +2474,10 @@ pub fn convert_objc_method_lists<E: Arch>(ctx: &mut Context<E>) {
                         Some(&i) => ObjcRef::TailSelref(i),
                         None => {
                             let n = *extra_of.entry(sel).or_insert_with(|| {
-                                ctx.objc_extra_selrefs.push(sel);
-                                ctx.objc_extra_selrefs.len() - 1
+                                ctx.objc_stubs.extra_selrefs.push(sel);
+                                ctx.objc_stubs.extra_selrefs.len() - 1
                             });
-                            ObjcRef::TailSelref(ctx.objc_stubs.len() + n)
+                            ObjcRef::TailSelref(ctx.objc_stubs.symbols.len() + n)
                         }
                     }
                 }
@@ -2507,7 +2509,7 @@ pub fn convert_objc_method_lists<E: Arch>(ctx: &mut Context<E>) {
         let synth = (ctx.isecs.len() - 1) as u32;
         ctx.isecs[list as usize].replacement = synth;
         repoint.insert(list, synth);
-        ctx.objc_methlists.push(ObjcMethList { isec: synth, methods });
+        ctx.objc_methlist.lists.push(ObjcMethList { isec: synth, methods });
     }
     // The lists' own symbols (__OBJC_$_INSTANCE_METHODS_Foo ...) follow
     // them into __objc_methlist.
@@ -2704,7 +2706,7 @@ pub fn merge_objc_categories<E: Arch>(ctx: &mut Context<E>) {
             return None;
         }
         let resolved = ctx.resolve_isec(isec as usize) as u32;
-        if let Some(list) = ctx.objc_methlists.iter().find(|l| l.isec == resolved) {
+        if let Some(list) = ctx.objc_methlist.lists.iter().find(|l| l.isec == resolved) {
             return Some(list.methods.clone());
         }
         if relative {
@@ -2766,7 +2768,7 @@ pub fn merge_objc_categories<E: Arch>(ctx: &mut Context<E>) {
 
     let mut methlist_hdr: Option<u32> = None;
     let mut methlist_off: u64 = ctx
-        .objc_methlists
+        .objc_methlist.lists
         .last()
         .map(|l| ctx.isecs[l.isec as usize].offset as u64 + ctx.isecs[l.isec as usize].size as u64)
         .unwrap_or(0);
@@ -2959,7 +2961,7 @@ pub fn merge_objc_categories<E: Arch>(ctx: &mut Context<E>) {
                 });
                 methlist_off += size;
                 let isec = (ctx.isecs.len() - 1) as u32;
-                ctx.objc_methlists.push(ObjcMethList { isec, methods });
+                ctx.objc_methlist.lists.push(ObjcMethList { isec, methods });
                 isec
             } else {
                 let mut fields = vec![DataField::Bytes(24u32.to_le_bytes().to_vec()), DataField::Bytes((methods.len() as u32).to_le_bytes().to_vec())];
@@ -2978,7 +2980,7 @@ pub fn merge_objc_categories<E: Arch>(ctx: &mut Context<E>) {
             if let Some((isec, 0)) = r.and_then(|r| objc_ref_location(ctx, r)) {
                 let resolved = ctx.resolve_isec(isec as usize);
                 if Some(resolved as u32) != merged {
-                    ctx.objc_methlists.retain(|l| l.isec as usize != resolved);
+                    ctx.objc_methlist.lists.retain(|l| l.isec as usize != resolved);
                     ctx.isecs[resolved].set_alive(false);
                     if let Some(merged) = merged {
                         ctx.isecs[resolved].replacement = merged;
@@ -3341,17 +3343,18 @@ pub fn fix_synthetic_symbols<E: Arch>(ctx: &mut Context<E>) {
         let (id, is_start, seg, sect) = ctx.boundary_syms[i].clone();
         let value = match &sect {
             Some(sect) => {
-                let Some(chunk) = ctx
+                let Some(hdr) = ctx
                     .chunks
                     .iter()
-                    .find(|c| c.hdr.is_sect && c.hdr.segname == seg && c.hdr.sectname == *sect)
+                    .map(|&id| ctx.chunk_header(id))
+                    .find(|hdr| hdr.is_sect && hdr.segname == seg && hdr.sectname == *sect)
                 else {
                     fatal!("no section for boundary symbol: {}", ctx.symbols[id].name());
                 };
                 if is_start {
-                    chunk.hdr.addr
+                    hdr.addr
                 } else {
-                    chunk.hdr.addr + chunk.hdr.size
+                    hdr.addr + hdr.size
                 }
             }
             None => {
@@ -3556,7 +3559,7 @@ fn output_section_flags(segname: &str, sectname: &str, input: u32, relocatable: 
 /// Creates output section chunks and appends each input section to its
 /// chunk, and groups chunks into segments.
 pub fn create_output_sections<E: Arch>(ctx: &mut Context<E>) {
-    ctx.chunks.push(Chunk::new("__TEXT", "", ChunkKind::MachHeader));
+    ctx.chunks.push(ChunkId::MachHeader);
 
     // Assign each input section to an output section, creating output
     // sections as needed. Keyed by the raw 16-byte name pairs, so the
@@ -3564,11 +3567,11 @@ pub fn create_output_sections<E: Arch>(ctx: &mut Context<E>) {
     // still created in first-encounter order.
     let relocatable = ctx.args.relocatable;
     let objc_const_refs = objc_refs_are_const(ctx);
-    let mut by_name: hashbrown::HashMap<([u8; 16], [u8; 16]), usize> =
+    let mut by_name: hashbrown::HashMap<([u8; 16], [u8; 16]), Option<OutputSectionId>> =
         hashbrown::HashMap::new();
-    // Output chunks by their (possibly renamed) output section names:
-    // several input section names can land in one output section.
-    let mut by_out: hashbrown::HashMap<(&'static str, &'static str), usize> =
+    // Output sections by their (possibly renamed) names: several input
+    // section names can land in one output section.
+    let mut by_out: hashbrown::HashMap<(&'static str, &'static str), OutputSectionId> =
         hashbrown::HashMap::new();
     // All subsections of one input section share the exact same leaked
     // header pointer and are contiguous in the arena, and a header
@@ -3578,7 +3581,7 @@ pub fn create_output_sections<E: Arch>(ctx: &mut Context<E>) {
     // first subsection of each section; on a debug link this turns
     // millions of hash lookups into a handful of thousands.
     let mut last_hdr: *const crate::macho::MachSection = std::ptr::null();
-    let mut last_chunk: usize = 0;
+    let mut last_osec: Option<OutputSectionId> = None;
     for i in 0..ctx.isecs.len() {
         if !ctx.isecs[i].is_alive()
             || ctx.isecs[i].replacement != crate::input_sections::NO_REPLACEMENT
@@ -3588,67 +3591,57 @@ pub fn create_output_sections<E: Arch>(ctx: &mut Context<E>) {
         }
         let hdr = ctx.hdr_of(&ctx.isecs[i]);
         let hdr_ptr = hdr as *const crate::macho::MachSection;
-        let chunk_idx = if hdr_ptr == last_hdr {
-            last_chunk
+        let osec_id = if hdr_ptr == last_hdr {
+            last_osec
         } else {
-        let key = (hdr.segname, hdr.sectname);
-        let idx = match by_name.get(&key) {
-            Some(&idx) => idx,
-            None => {
-                let idx = match output_section_for(
-                    relocatable,
-                    ctx.args.data_const,
-                    objc_const_refs,
-                    hdr.segname(),
-                    hdr.sectname(),
-                ) {
-                    None => usize::MAX,
-                    Some(out) => match by_out.get(&out) {
-                        Some(&idx) => idx,
+            let key = (hdr.segname, hdr.sectname);
+            let id = match by_name.get(&key) {
+                Some(&id) => id,
+                None => {
+                    let id = output_section_for(
+                        relocatable,
+                        ctx.args.data_const,
+                        objc_const_refs,
+                        hdr.segname(),
+                        hdr.sectname(),
+                    )
+                    .map(|out| match by_out.get(&out) {
+                        Some(&id) => id,
                         None => {
-                            let mut chunk = Chunk::new(
-                                out.0,
-                                out.1,
-                                ChunkKind::Output {
-                                    isecs: vec![],
-                                    thunks: vec![],
-                                },
-                            );
-                            chunk.hdr.flags = output_section_flags(out.0, out.1, hdr.flags, relocatable);
-                            ctx.chunks.push(chunk);
-                            by_out.insert(out, ctx.chunks.len() - 1);
-                            ctx.chunks.len() - 1
+                            let mut osec = OutputSection::new(out.0, out.1);
+                            osec.hdr.flags = output_section_flags(out.0, out.1, hdr.flags, relocatable);
+                            let id = OutputSectionId::new(ctx.output_sections.len() as u32);
+                            ctx.output_sections.push(osec);
+                            ctx.chunks.push(ChunkId::Output(id));
+                            by_out.insert(out, id);
+                            id
                         }
-                    },
-                };
-                by_name.insert(key, idx);
-                idx
-            }
+                    });
+                    by_name.insert(key, id);
+                    id
+                }
+            };
+            last_hdr = hdr_ptr;
+            last_osec = id;
+            id
         };
-        last_hdr = hdr_ptr;
-        last_chunk = idx;
-        idx
-        };
-        if chunk_idx == usize::MAX {
+        let Some(osec_id) = osec_id else {
             // Consumed by the link: no output section.
             ctx.isecs[i].set_alive(false);
             continue;
-        }
+        };
 
-        let chunk = &mut ctx.chunks[chunk_idx];
-        chunk.hdr.p2align = chunk.hdr.p2align.max(ctx.isecs[i].p2align as u32);
+        let osec = &mut ctx.output_sections[osec_id.index()];
+        osec.hdr.p2align = osec.hdr.p2align.max(ctx.isecs[i].p2align as u32);
         // __thread_vars contains pointers but clang emits it with an
         // alignment of 1, so override.
-        if chunk.hdr.flags & SECTION_TYPE == S_THREAD_LOCAL_VARIABLES {
-            chunk.hdr.p2align = chunk.hdr.p2align.max(3);
+        if osec.hdr.flags & SECTION_TYPE == S_THREAD_LOCAL_VARIABLES {
+            osec.hdr.p2align = osec.hdr.p2align.max(3);
         }
-        chunk.hdr.flags |=
-            output_section_flags(chunk.hdr.segname, &chunk.hdr.sectname, hdr.flags, relocatable) & !SECTION_TYPE;
-        let ChunkKind::Output { isecs, .. } = &mut chunk.kind else {
-            unreachable!()
-        };
-        isecs.push(i as u32);
-        ctx.isecs[i].output_section = chunk_idx as u32;
+        osec.hdr.flags |=
+            output_section_flags(osec.hdr.segname, &osec.hdr.sectname, hdr.flags, relocatable) & !SECTION_TYPE;
+        osec.members.push(i as u32);
+        ctx.isecs[i].set_output_section(ChunkId::Output(osec_id));
     }
 
     // -sectalign overrides an output section's alignment, e.g. to
@@ -3656,9 +3649,9 @@ pub fn create_output_sections<E: Arch>(ctx: &mut Context<E>) {
     // It can only raise the alignment: subsections were placed by
     // their own requirements, which must still hold.
     for (seg, sect, p2align) in &ctx.args.sectalign.clone() {
-        for chunk in &mut ctx.chunks {
-            if chunk.hdr.is_sect && chunk.hdr.segname == *seg && chunk.hdr.sectname == *sect {
-                chunk.hdr.p2align = chunk.hdr.p2align.max(*p2align as u32);
+        for osec in &mut ctx.output_sections {
+            if osec.hdr.segname == *seg && osec.hdr.sectname == *sect {
+                osec.hdr.p2align = osec.hdr.p2align.max(*p2align as u32);
             }
         }
     }
@@ -3667,10 +3660,8 @@ pub fn create_output_sections<E: Arch>(ctx: &mut Context<E>) {
     // output sections, in the file's order; everything else keeps its
     // input order behind them. A stable sort by rank does both.
     if let Some(ranks) = order_file_ranks(ctx) {
-        for chunk in &mut ctx.chunks {
-            if let ChunkKind::Output { isecs, .. } = &mut chunk.kind {
-                isecs.sort_by_key(|&id| ranks[id as usize]);
-            }
+        for osec in &mut ctx.output_sections {
+            osec.members.sort_by_key(|&id| ranks[id as usize]);
         }
     }
 
@@ -3697,8 +3688,9 @@ pub fn create_output_sections<E: Arch>(ctx: &mut Context<E>) {
             }
         }
         if any {
-            for chunk in &mut ctx.chunks {
-                if let ChunkKind::Output { isecs, .. } = &mut chunk.kind {
+            for osec in &mut ctx.output_sections {
+                {
+                    let isecs = &mut osec.members;
                     isecs.sort_by_key(|&id| cold[id as usize]);
                 }
             }
@@ -3723,36 +3715,28 @@ pub fn create_output_sections<E: Arch>(ctx: &mut Context<E>) {
         // for all of them (a small late section like __StaticInit is
         // exactly the one whose backward branches span the farthest).
         let mut exec_total: u64 = 0;
-        for chunk in &ctx.chunks {
-            if let ChunkKind::Output { isecs, .. } = &chunk.kind {
-                if chunk.hdr.flags & (S_ATTR_PURE_INSTRUCTIONS | S_ATTR_SOME_INSTRUCTIONS)
-                    != 0
-                {
-                    exec_total += isecs.iter().map(|&id| ctx.isecs[id].size as u64 + 16).sum::<u64>();
-                }
+        for osec in &ctx.output_sections {
+            if osec.hdr.flags & (S_ATTR_PURE_INSTRUCTIONS | S_ATTR_SOME_INSTRUCTIONS) != 0 {
+                exec_total += osec.members.iter().map(|&id| ctx.isecs[id].size as u64 + 16).sum::<u64>();
             }
         }
         let need_thunks = exec_total > E::BRANCH_RANGE / 2 - 64 * 1024 * 1024;
 
         let mut thunked: Vec<usize> = Vec::new();
         let mut plain: Vec<(usize, Vec<crate::input_sections::InputSectionId>)> = Vec::new();
-        for chunk_idx in 0..ctx.chunks.len() {
-            let ChunkKind::Output { isecs, .. } = &ctx.chunks[chunk_idx].kind else {
-                continue;
-            };
-            let is_exec = ctx.chunks[chunk_idx].hdr.flags
-                & (S_ATTR_PURE_INSTRUCTIONS | S_ATTR_SOME_INSTRUCTIONS)
-                != 0;
+        for (i, osec) in ctx.output_sections.iter().enumerate() {
+            let is_exec =
+                osec.hdr.flags & (S_ATTR_PURE_INSTRUCTIONS | S_ATTR_SOME_INSTRUCTIONS) != 0;
             if is_exec && need_thunks {
-                thunked.push(chunk_idx);
+                thunked.push(i);
             } else {
-                plain.push((chunk_idx, isecs.clone()));
+                plain.push((i, osec.members.clone()));
             }
         }
 
         let offsets: Vec<(usize, Vec<u64>, u64)> = plain
             .par_iter()
-            .map(|(chunk_idx, isecs)| {
+            .map(|(i, isecs)| {
                 let mut offs = Vec::with_capacity(isecs.len());
                 let mut off = 0;
                 for &id in isecs {
@@ -3761,24 +3745,18 @@ pub fn create_output_sections<E: Arch>(ctx: &mut Context<E>) {
                     offs.push(off);
                     off += isec.size as u64;
                 }
-                (*chunk_idx, offs, off)
+                (*i, offs, off)
             })
             .collect();
-        for (chunk_idx, offs, size) in offsets {
-            let ChunkKind::Output { isecs, .. } = &ctx.chunks[chunk_idx].kind else {
-                unreachable!()
-            };
-            for (&id, off) in isecs.clone().iter().zip(offs) {
+        for (i, offs, size) in offsets {
+            for (&id, off) in ctx.output_sections[i].members.clone().iter().zip(offs) {
                 ctx.isecs[id].offset = off as u32;
             }
-            ctx.chunks[chunk_idx].hdr.size = size;
+            ctx.output_sections[i].hdr.size = size;
         }
 
-        for chunk_idx in thunked {
-            let ChunkKind::Output { isecs, .. } = &ctx.chunks[chunk_idx].kind else {
-                unreachable!()
-            };
-            let isecs = isecs.clone();
+        for i in thunked {
+            let isecs = ctx.output_sections[i].members.clone();
             let thunks = crate::thunks::create_range_extension_thunks::<E>(ctx, &isecs);
             let end = match thunks.last() {
                 Some(t) => t.offset + t.syms.len() as u64 * E::THUNK_SIZE,
@@ -3788,78 +3766,55 @@ pub fn create_output_sections<E: Arch>(ctx: &mut Context<E>) {
                 .last()
                 .map(|&id| ctx.isecs[id].offset as u64 + ctx.isecs[id].size as u64)
                 .unwrap_or(0);
-            let chunk = &mut ctx.chunks[chunk_idx];
-            chunk.hdr.size = end.max(data_end);
-            let ChunkKind::Output { thunks: t, .. } = &mut chunk.kind else {
-                unreachable!()
-            };
-            *t = thunks;
+            let osec = &mut ctx.output_sections[i];
+            osec.hdr.size = end.max(data_end);
+            osec.thunks = thunks;
         }
     }
 
-    if !ctx.stub_syms.is_empty() {
-        let mut chunk = Chunk::new("__TEXT", "__stubs", ChunkKind::Stubs);
-        chunk.hdr.flags = S_SYMBOL_STUBS | S_ATTR_PURE_INSTRUCTIONS | S_ATTR_SOME_INSTRUCTIONS;
-        chunk.hdr.p2align = 2;
-        chunk.hdr.reserved2 = E::STUB_SIZE as u32;
-        chunk.hdr.size = ctx.stub_syms.len() as u64 * E::STUB_SIZE;
-        ctx.chunks.push(chunk);
+    if !ctx.stubs.symbols.is_empty() {
+        ctx.stubs.hdr.reserved2 = E::STUB_SIZE as u32;
+        ctx.stubs.hdr.size = ctx.stubs.symbols.len() as u64 * E::STUB_SIZE;
+        ctx.chunks.push(ChunkId::Stubs);
     }
     // (A stub bound by weak lookup goes through the GOT; only lazily
     // bound stubs need the helper and lazy pointers.)
-    if ctx.lazy_binding() && ctx.stub_syms.iter().any(|&id| !ctx.binds_weak_lookup(id)) {
-        let mut chunk = Chunk::new("__TEXT", "__stub_helper", ChunkKind::StubHelper);
-        chunk.hdr.flags = S_ATTR_PURE_INSTRUCTIONS | S_ATTR_SOME_INSTRUCTIONS;
-        chunk.hdr.p2align = 2;
-        chunk.hdr.size =
-            E::STUB_HELPER_HEADER_SIZE + ctx.stub_syms.len() as u64 * E::STUB_HELPER_ENTRY_SIZE;
-        ctx.chunks.push(chunk);
-        let mut chunk = Chunk::new("__DATA", "__la_symbol_ptr", ChunkKind::LazyPtrs);
-        chunk.hdr.flags = S_LAZY_SYMBOL_POINTERS;
-        chunk.hdr.p2align = 3;
+    if ctx.lazy_binding() && ctx.stubs.symbols.iter().any(|&id| !ctx.binds_weak_lookup(id)) {
+        ctx.stub_helper.hdr.size =
+            E::STUB_HELPER_HEADER_SIZE + ctx.stubs.symbols.len() as u64 * E::STUB_HELPER_ENTRY_SIZE;
+        ctx.chunks.push(ChunkId::StubHelper);
         // Indirect symbol table entries: stubs, the GOT's, then these.
-        chunk.hdr.reserved1 = (ctx.stub_syms.len() + ctx.got_syms.len()) as u32;
-        chunk.hdr.size = ctx.stub_syms.len() as u64 * 8;
-        ctx.chunks.push(chunk);
+        ctx.lazy_ptrs.hdr.reserved1 = (ctx.stubs.symbols.len() + ctx.got.got_syms.len()) as u32;
+        ctx.lazy_ptrs.hdr.size = ctx.stubs.symbols.len() as u64 * 8;
+        ctx.chunks.push(ChunkId::LazyPtrs);
     }
 
-    if !ctx.got_syms.is_empty() {
-        let mut chunk = Chunk::new(data_seg(ctx), "__got", ChunkKind::Got);
-        chunk.hdr.flags = S_NON_LAZY_SYMBOL_POINTERS;
-        chunk.hdr.p2align = 3;
+    if !ctx.got.got_syms.is_empty() {
+        ctx.got.hdr.segname = data_seg(ctx);
         // Indirect symbol table entries for stubs come first, then the
         // GOT's.
-        chunk.hdr.reserved1 = ctx.stub_syms.len() as u32;
-        chunk.hdr.size = ctx.got_syms.len() as u64 * 8;
-        ctx.chunks.push(chunk);
-        let got = (ctx.chunks.len() - 1) as u32;
-        for &slot in &ctx.objc_classref_slots {
-            ctx.isecs[slot as usize].output_section = got;
+        ctx.got.hdr.reserved1 = ctx.stubs.symbols.len() as u32;
+        ctx.got.hdr.size = ctx.got.got_syms.len() as u64 * 8;
+        ctx.chunks.push(ChunkId::Got);
+        for i in 0..ctx.got.objc_classref_slots.len() {
+            let slot = ctx.got.objc_classref_slots[i];
+            ctx.isecs[slot as usize].set_output_section(ChunkId::Got);
         }
     }
 
-    if !ctx.init_funcs.is_empty() {
-        let mut chunk = Chunk::new("__TEXT", "__init_offsets", ChunkKind::InitOffsets);
-        chunk.hdr.flags = S_INIT_FUNC_OFFSETS;
-        chunk.hdr.p2align = 2;
-        chunk.hdr.size = ctx.init_funcs.len() as u64 * 4;
-        ctx.chunks.push(chunk);
+    if !ctx.init_offsets.init_funcs.is_empty() {
+        ctx.init_offsets.hdr.size = ctx.init_offsets.init_funcs.len() as u64 * 4;
+        ctx.chunks.push(ChunkId::InitOffsets);
     }
 
-    if !ctx.thread_ptr_syms.is_empty() {
-        let mut chunk = Chunk::new("__DATA", "__thread_ptrs", ChunkKind::ThreadPtrs);
-        chunk.hdr.flags = S_THREAD_LOCAL_VARIABLE_POINTERS;
-        chunk.hdr.p2align = 3;
-        chunk.hdr.size = ctx.thread_ptr_syms.len() as u64 * 8;
-        ctx.chunks.push(chunk);
+    if !ctx.thread_ptrs.symbols.is_empty() {
+        ctx.thread_ptrs.hdr.size = ctx.thread_ptrs.symbols.len() as u64 * 8;
+        ctx.chunks.push(ChunkId::ThreadPtrs);
     }
 
-    if !ctx.objc_stubs.is_empty() {
-        let mut chunk = Chunk::new("__TEXT", "__objc_stubs", ChunkKind::ObjcStubs);
-        chunk.hdr.flags = S_ATTR_PURE_INSTRUCTIONS | S_ATTR_SOME_INSTRUCTIONS;
-        chunk.hdr.p2align = 5;
-        chunk.hdr.size = ctx.objc_stubs.len() as u64 * E::OBJC_STUB_SIZE;
-        ctx.chunks.push(chunk);
+    if !ctx.objc_stubs.symbols.is_empty() {
+        ctx.objc_stubs.hdr.size = ctx.objc_stubs.symbols.len() as u64 * E::OBJC_STUB_SIZE;
+        ctx.chunks.push(ChunkId::ObjcStubs);
     }
     {
 
@@ -3877,37 +3832,37 @@ pub fn create_output_sections<E: Arch>(ctx: &mut Context<E>) {
                             p2align: u32,
                             tail: Tail,
                             tail_size: u64| {
-            let idx = match ctx.chunks.iter().position(|c| {
-                matches!(c.kind, ChunkKind::Output { .. })
-                    && c.hdr.segname == seg
-                    && c.hdr.sectname == sect
-            }) {
-                Some(idx) => idx,
+            let id = match ctx
+                .output_sections
+                .iter()
+                .position(|o| o.hdr.segname == seg && o.hdr.sectname == sect)
+            {
+                Some(i) => OutputSectionId::new(i as u32),
                 None => {
-                    let mut chunk = Chunk::new(
-                        seg,
-                        sect,
-                        ChunkKind::Output { isecs: Vec::new(), thunks: Vec::new() },
-                    );
-                    chunk.hdr.flags = flags;
-                    ctx.chunks.push(chunk);
-                    ctx.chunks.len() - 1
+                    let mut osec = OutputSection::new(seg, sect);
+                    osec.hdr.flags = flags;
+                    let id = OutputSectionId::new(ctx.output_sections.len() as u32);
+                    ctx.output_sections.push(osec);
+                    ctx.chunks.push(ChunkId::Output(id));
+                    id
                 }
             };
-            let chunk = &mut ctx.chunks[idx];
-            chunk.hdr.p2align = chunk.hdr.p2align.max(p2align);
-            chunk.tail = tail;
-            chunk.tail_off = align_to(chunk.hdr.size, 1 << p2align);
-            chunk.hdr.size = chunk.tail_off + tail_size;
-            idx
+            let osec = ctx.output_section_mut(id);
+            osec.hdr.p2align = osec.hdr.p2align.max(p2align);
+            osec.tail = tail;
+            osec.tail_off = align_to(osec.hdr.size, 1 << p2align);
+            osec.hdr.size = osec.tail_off + tail_size;
+            id
         };
-        let methname_size = ctx.objc_methname_data.len() as u64;
-        let selrefs_size = (ctx.objc_tail_slots + ctx.objc_extra_selrefs.len()) as u64 * 8;
+        let methname_size = ctx.objc_stubs.methname_data.len() as u64;
+        let selrefs_size = (ctx.objc_stubs.tail_slots + ctx.objc_stubs.extra_selrefs.len()) as u64 * 8;
         if methname_size > 0 {
-            tail_section(ctx, "__TEXT", "__objc_methname", S_CSTRING_LITERALS, 0, Tail::ObjcMethname, methname_size);
+            let id = tail_section(ctx, "__TEXT", "__objc_methname", S_CSTRING_LITERALS, 0, Tail::ObjcMethname, methname_size);
+            ctx.objc_stubs.methname = Some(id);
         }
         if selrefs_size > 0 {
-            tail_section(ctx, "__DATA", "__objc_selrefs", S_LITERAL_POINTERS | S_ATTR_NO_DEAD_STRIP, 3, Tail::ObjcSelrefs, selrefs_size);
+            let id = tail_section(ctx, "__DATA", "__objc_selrefs", S_LITERAL_POINTERS | S_ATTR_NO_DEAD_STRIP, 3, Tail::ObjcSelrefs, selrefs_size);
+            ctx.objc_stubs.selrefs = Some(id);
         }
     // Synthesized Objective-C records go in the tail of the section
     // they name; each blob's subsection is placed there.
@@ -3925,19 +3880,17 @@ pub fn create_output_sections<E: Arch>(ctx: &mut Context<E>) {
                 offs.push((b.isec, size));
                 size += b.size();
             }
-            let idx = tail_section(ctx, seg, out, flags, 3, Tail::DataBlobs, size);
-            let tail_off = ctx.chunks[idx].tail_off;
+            let id = tail_section(ctx, seg, out, flags, 3, Tail::DataBlobs, size);
+            let tail_off = ctx.output_section(id).tail_off;
             for (isec, off) in offs {
-                ctx.isecs[isec as usize].output_section = idx as u32;
+                ctx.isecs[isec as usize].set_output_section(ChunkId::Output(id));
                 ctx.isecs[isec as usize].offset = (tail_off + off) as u32;
             }
         }
     }
     }
 
-    if !ctx.objc_methlists.is_empty() {
-        let mut chunk = Chunk::new("__TEXT", "__objc_methlist", ChunkKind::ObjcMethlist);
-        chunk.hdr.p2align = 3;
+    if !ctx.objc_methlist.lists.is_empty() {
         // ld64 lays the lists out sorted by their symbol's name, each
         // 8-byte aligned; category merging also retires some after
         // their first placement.
@@ -3951,21 +3904,20 @@ pub fn create_output_sections<E: Arch>(ctx: &mut Context<E>) {
                 }
             }
         }
-        let mut order: Vec<usize> = (0..ctx.objc_methlists.len()).collect();
-        order.sort_by_key(|&i| (name_of.get(&ctx.objc_methlists[i].isec).copied().unwrap_or(""), i));
+        let mut order: Vec<usize> = (0..ctx.objc_methlist.lists.len()).collect();
+        order.sort_by_key(|&i| (name_of.get(&ctx.objc_methlist.lists[i].isec).copied().unwrap_or(""), i));
         let mut off = 0u64;
         for i in order {
-            let isec = ctx.objc_methlists[i].isec as usize;
+            let isec = ctx.objc_methlist.lists[i].isec as usize;
             off = align_to(off, 8);
             ctx.isecs[isec].offset = off as u32;
             off += ctx.isecs[isec].size as u64;
         }
-        chunk.hdr.size = off;
-        ctx.chunks.push(chunk);
-        let idx = (ctx.chunks.len() - 1) as u32;
-        for i in 0..ctx.objc_methlists.len() {
-            let isec = ctx.objc_methlists[i].isec as usize;
-            ctx.isecs[isec].output_section = idx;
+        ctx.objc_methlist.hdr.size = off;
+        ctx.chunks.push(ChunkId::ObjcMethlist);
+        for i in 0..ctx.objc_methlist.lists.len() {
+            let isec = ctx.objc_methlist.lists[i].isec as usize;
+            ctx.isecs[isec].set_output_section(ChunkId::ObjcMethlist);
         }
     }
 
@@ -3976,18 +3928,7 @@ pub fn create_output_sections<E: Arch>(ctx: &mut Context<E>) {
             fatal!("-sectcreate: cannot read {path}");
         };
         let segname: &'static str = String::leak(seg.clone());
-        let mut chunk = Chunk::new(
-            segname,
-            sect,
-            ChunkKind::SectCreate {
-                data: Vec::leak(data),
-            },
-        );
-        let ChunkKind::SectCreate { data } = chunk.kind else {
-            unreachable!()
-        };
-        chunk.hdr.size = data.len() as u64;
-        ctx.chunks.push(chunk);
+        add_sectcreate(ctx, SectCreateSection::new(segname, sect, Vec::leak(data)));
     }
     ctx.args.sectcreate = sectcreate;
 
@@ -3997,8 +3938,7 @@ pub fn create_output_sections<E: Arch>(ctx: &mut Context<E>) {
     let empties = std::mem::take(&mut ctx.args.add_empty_section);
     for (seg, sect) in &empties {
         let segname: &'static str = String::leak(seg.clone());
-        let chunk = Chunk::new(segname, sect, ChunkKind::SectCreate { data: &[] });
-        ctx.chunks.push(chunk);
+        add_sectcreate(ctx, SectCreateSection::new(segname, sect, &[]));
     }
     ctx.args.add_empty_section = empties;
 
@@ -4007,14 +3947,12 @@ pub fn create_output_sections<E: Arch>(ctx: &mut Context<E>) {
         let (_, _, seg, Some(sect)) = &ctx.boundary_syms[i] else {
             continue;
         };
-        if !ctx
-            .chunks
-            .iter()
-            .any(|c| c.hdr.is_sect && c.hdr.segname == *seg && c.hdr.sectname == *sect)
-        {
+        if !ctx.chunks.iter().any(|&id| {
+            let hdr = ctx.chunk_header(id);
+            hdr.is_sect && hdr.segname == *seg && hdr.sectname == *sect
+        }) {
             let segname: &'static str = String::leak(seg.clone());
-            let chunk = Chunk::new(segname, sect, ChunkKind::SectCreate { data: &[] });
-            ctx.chunks.push(chunk);
+            add_sectcreate(ctx, SectCreateSection::new(segname, sect, &[]));
         }
     }
 
@@ -4042,17 +3980,14 @@ pub fn create_output_sections<E: Arch>(ctx: &mut Context<E>) {
         let cat = infos.iter().all(|f| f & 0x40 != 0);
         let flags = (lang << 16) | (swift_version << 8) | if cat { 0x40 } else { 0 };
 
-        ctx.objc_image_info_flags = flags;
-        let mut chunk = Chunk::new(data_seg(ctx), "__objc_imageinfo", ChunkKind::ObjcImageInfo);
-        chunk.hdr.p2align = 2;
-        chunk.hdr.size = 8;
-        ctx.chunks.push(chunk);
+        ctx.objc_imageinfo.flags = flags;
+        ctx.objc_imageinfo.hdr.segname = data_seg(ctx);
+        ctx.objc_imageinfo.hdr.size = 8;
+        ctx.chunks.push(ChunkId::ObjcImageInfo);
     }
 
     if !ctx.unwind_records.is_empty() {
-        let mut chunk = Chunk::new("__TEXT", "__unwind_info", ChunkKind::UnwindInfo);
-        chunk.hdr.p2align = 2;
-        ctx.chunks.push(chunk);
+        ctx.chunks.push(ChunkId::UnwindInfo);
     }
 
     // Lay out the surviving DWARF records: live CIEs first, then FDEs.
@@ -4103,72 +4038,87 @@ pub fn create_output_sections<E: Arch>(ctx: &mut Context<E>) {
             off += fde.data.len() as u32;
         }
 
-        let mut chunk = Chunk::new("__TEXT", "__eh_frame", ChunkKind::EhFrame);
-        chunk.hdr.flags = output_section_flags("__TEXT", "__eh_frame", 0, false);
-        chunk.hdr.p2align = 3;
-        chunk.hdr.size = off as u64;
-        ctx.chunks.push(chunk);
+        ctx.eh_frame.hdr.flags = output_section_flags("__TEXT", "__eh_frame", 0, false);
+        ctx.eh_frame.hdr.size = off as u64;
+        ctx.chunks.push(ChunkId::EhFrame);
     }
 
-    ctx.chunks.push(Chunk::new("__LINKEDIT", "", ChunkKind::ChainedFixups));
-    ctx.chunks.push(Chunk::new("__LINKEDIT", "", ChunkKind::RebaseInfo));
-    ctx.chunks.push(Chunk::new("__LINKEDIT", "", ChunkKind::BindInfo));
-    ctx.chunks.push(Chunk::new("__LINKEDIT", "", ChunkKind::WeakBindInfo));
-    ctx.chunks.push(Chunk::new("__LINKEDIT", "", ChunkKind::LazyBindInfo));
-    ctx.chunks.push(Chunk::new("__LINKEDIT", "", ChunkKind::ExportTrie));
-    ctx.chunks.push(Chunk::new("__LINKEDIT", "", ChunkKind::FunctionStarts));
+    ctx.chunks.push(ChunkId::ChainedFixups);
+    ctx.chunks.push(ChunkId::RebaseInfo);
+    ctx.chunks.push(ChunkId::BindInfo);
+    ctx.chunks.push(ChunkId::WeakBindInfo);
+    ctx.chunks.push(ChunkId::LazyBindInfo);
+    ctx.chunks.push(ChunkId::ExportTrie);
+    ctx.chunks.push(ChunkId::FunctionStarts);
     if ctx.args.data_in_code_info {
-        ctx.chunks.push(Chunk::new("__LINKEDIT", "", ChunkKind::DataInCode));
+        ctx.chunks.push(ChunkId::DataInCode);
     }
-    ctx.chunks.push(Chunk::new("__LINKEDIT", "", ChunkKind::Symtab));
-    if !ctx.stub_syms.is_empty() || !ctx.got_syms.is_empty() {
-        let mut chunk = Chunk::new("__LINKEDIT", "", ChunkKind::IndirectSymtab);
-        let lazy = if ctx.lazy_binding() { ctx.stub_syms.len() } else { 0 };
-        chunk.hdr.size = (ctx.stub_syms.len() + ctx.got_syms.len() + lazy) as u64 * 4;
-        ctx.chunks.push(chunk);
+    ctx.chunks.push(ChunkId::Symtab);
+    if !ctx.stubs.symbols.is_empty() || !ctx.got.got_syms.is_empty() {
+        let lazy = if ctx.lazy_binding() { ctx.stubs.symbols.len() } else { 0 };
+        ctx.indirect_symtab.hdr.size =
+            (ctx.stubs.symbols.len() + ctx.got.got_syms.len() + lazy) as u64 * 4;
+        ctx.chunks.push(ChunkId::IndirectSymtab);
     }
-    ctx.chunks.push(Chunk::new("__LINKEDIT", "", ChunkKind::Strtab));
+    ctx.chunks.push(ChunkId::Strtab);
     if ctx.args.adhoc_codesign {
-        ctx.chunks
-            .push(Chunk::new("__LINKEDIT", "", ChunkKind::CodeSignature));
+        ctx.chunks.push(ChunkId::CodeSignature);
     }
 
-    // Group chunks into segments, in the standard segment order. Chunk
-    // order within a segment follows section ranks.
-    let mut order: Vec<usize> = (0..ctx.chunks.len()).collect();
-    order.sort_by_key(|&i| {
-        let c = &ctx.chunks[i];
-        let seg_rank = match c.hdr.segname {
+    // Sort the chunks into file order: the standard segment order, and
+    // section ranks within a segment (the sort is stable, so chunks of
+    // one rank keep their creation order).
+    let mut order = ctx.chunks.clone();
+    order.sort_by_key(|&id| {
+        let hdr = ctx.chunk_header(id);
+        let seg_rank = match hdr.segname {
             "__TEXT" => 0,
             "__DATA_CONST" => 1,
             "__DATA" => 2,
             "__LINKEDIT" => 4,
             _ => 3,
         };
-        let sect_rank = match c.kind {
-            ChunkKind::MachHeader => 0,
-            ChunkKind::UnwindInfo => 100,
-            ChunkKind::EhFrame => 101,
-            ChunkKind::CodeSignature => u32::MAX,
-            _ => 1 + output_section_rank(c.hdr.segname, &c.hdr.sectname),
+        let sect_rank = match id {
+            ChunkId::MachHeader => 0,
+            ChunkId::UnwindInfo => 100,
+            ChunkId::EhFrame => 101,
+            ChunkId::CodeSignature => u32::MAX,
+            _ => 1 + output_section_rank(hdr.segname, &hdr.sectname),
         };
         // Zero-fill sections go last in their segment so that they don't
         // occupy file space in the middle of it.
-        (seg_rank, c.is_zerofill(), sect_rank, i)
+        (seg_rank, hdr.is_zerofill(), sect_rank)
     });
 
+    // Group them into segments, and number the sections: an nlist's
+    // n_sect is the 1-based ordinal of its section in the load
+    // commands.
     let mut segments = Vec::new();
     if ctx.args.pagezero_size > 0 {
         segments.push(OutputSegment::new("__PAGEZERO"));
     }
-    for idx in order {
-        let segname = ctx.chunks[idx].hdr.segname;
+    let mut n_sect = 1u8;
+    for &id in &order {
+        let segname = ctx.chunk_header(id).segname;
         if segments.last().map(|s: &OutputSegment| s.name) != Some(segname) {
             segments.push(OutputSegment::new(segname));
         }
-        segments.last_mut().unwrap().chunks.push(idx);
+        segments.last_mut().unwrap().chunks.push(id);
+        let hdr = ctx.chunk_header_mut(id);
+        if hdr.is_sect {
+            hdr.n_sect = n_sect;
+            n_sect = n_sect.wrapping_add(1);
+        }
     }
     ctx.segments = segments;
+    ctx.chunks = order;
+}
+
+/// Adds a synthesized section with fixed contents to the output.
+fn add_sectcreate<E: Arch>(ctx: &mut Context<E>, sec: SectCreateSection) {
+    let idx = ctx.sectcreate_sections.len() as u32;
+    ctx.sectcreate_sections.push(sec);
+    ctx.chunks.push(ChunkId::SectCreate(idx));
 }
 
 /// Returns true if a local symbol should appear in the output symbol
@@ -4225,7 +4175,6 @@ fn keep_local_symbol_in<E: Arch>(ctx: &Context<E>, name: &str, isec: Option<u32>
 pub fn plan_object_stabs<E: Arch>(
     ctx: &Context<E>,
     obj_idx: usize,
-    ordinals: &[u8],
     cwd: &str,
 ) -> Vec<(&'static str, NList, Option<crate::symbol::SymbolId>)> {
     let obj = &ctx.objs[obj_idx];
@@ -4269,7 +4218,7 @@ pub fn plan_object_stabs<E: Arch>(
                     continue;
                 };
                 ent.n_value = ctx.isec_addr(isec) + off;
-                ent.n_sect = ordinals[ctx.isecs[isec].output_section as usize];
+                ent.n_sect = ctx.isec_n_sect(&ctx.isecs[isec]);
             } else if nlist.n_type == N_FUN && skip_size {
                 skip_size = false;
                 continue;
@@ -4371,7 +4320,7 @@ pub fn plan_object_stabs<E: Arch>(
             // address, then its size), N_ENSYM. Its stab reader takes
             // an N_FUN without the bracketing symbols badly (a crash
             // on a -r output that had only the pair).
-            let sect = ordinals[isec.output_section as usize];
+            let sect = ctx.isec_n_sect(isec);
             out.push((
                 "",
                 NList {
@@ -4418,7 +4367,7 @@ pub fn plan_object_stabs<E: Arch>(
                 NList {
                     n_strx: 0,
                     n_type: if nlist.is_extern() { N_GSYM } else { N_STSYM },
-                    n_sect: ordinals[isec.output_section as usize],
+                    n_sect: ctx.isec_n_sect(isec),
                     ..Default::default()
                 },
                 Some(sym_id),
@@ -4447,9 +4396,8 @@ pub fn plan_object_stabs<E: Arch>(
 pub fn create_output_symtab<E: Arch>(
     ctx: &Context<E>,
     sorted_globals: &[crate::symbol::SymbolId],
-) -> SymtabData {
-    let ordinals = section_ordinals(ctx);
-    let mut data = SymtabData::default();
+) -> SymtabSection {
+    let mut data = SymtabSection::new();
     // The string table opens with " \0-\0": offset 1 is the empty
     // string, offset 2 the "-" placeholder for stab source-file
     // entries. copy_symtab writes this prefix; the deduplicated
@@ -4497,7 +4445,7 @@ pub fn create_output_symtab<E: Arch>(
             .objs
             .par_iter()
             .enumerate()
-            .map(|(obj_idx, _)| plan_object_stabs(ctx, obj_idx, &ordinals, cwd))
+            .map(|(obj_idx, _)| plan_object_stabs(ctx, obj_idx, cwd))
             .collect();
         // Write the planned stabs into prefix-summed ranges in
         // parallel, instead of appending object by object - mold's
@@ -4584,7 +4532,7 @@ pub fn create_output_symtab<E: Arch>(
                     let ent = NList {
                         n_strx: 0,
                         n_type: N_SECT,
-                        n_sect: ordinals[ctx_ref.isecs[isec].output_section as usize],
+                        n_sect: ctx_ref.isec_n_sect(&ctx_ref.isecs[isec]),
                         n_desc: 0,
                         n_value: 0,
                     };
@@ -4603,7 +4551,7 @@ pub fn create_output_symtab<E: Arch>(
         // addresses are final by now.
         for &(name, isec) in &ctx.extra_local_syms {
             let sec = &ctx.isecs[isec as usize];
-            if !sec.is_alive() || sec.output_section == u32::MAX {
+            if !sec.is_alive() || sec.output_section().is_none() {
                 continue;
             }
             names.push(name);
@@ -4611,7 +4559,7 @@ pub fn create_output_symtab<E: Arch>(
                 NList {
                     n_strx: 0,
                     n_type: N_SECT,
-                    n_sect: ordinals[sec.output_section as usize],
+                    n_sect: ctx.isec_n_sect(sec),
                     n_desc: 0,
                     n_value: ctx.isec_addr(isec as usize),
                 },
@@ -4621,17 +4569,17 @@ pub fn create_output_symtab<E: Arch>(
         // The selector stubs, each a non-external symbol with N_PEXT
         // set (nm: "was a private external"), as ld64 lists them -
         // NetNewsWire's debug dylib has 851 _objc_msgSend$... entries.
-        if !ctx.objc_stubs.is_empty() {
-            let chunk = &ctx.chunks[ctx.objc_stubs_chunk];
-            for (i, &(sym, _)) in ctx.objc_stubs.iter().enumerate() {
+        if !ctx.objc_stubs.symbols.is_empty() {
+            let hdr = &ctx.objc_stubs.hdr;
+            for (i, &(sym, _)) in ctx.objc_stubs.symbols.iter().enumerate() {
                 names.push(ctx.symbols[sym].name());
                 data.entries.push((
                     NList {
                         n_strx: 0,
                         n_type: N_PEXT | N_SECT,
-                        n_sect: ordinals[ctx.objc_stubs_chunk],
+                        n_sect: hdr.n_sect,
                         n_desc: 0,
-                        n_value: chunk.hdr.addr + i as u64 * E::OBJC_STUB_SIZE,
+                        n_value: hdr.addr + i as u64 * E::OBJC_STUB_SIZE,
                     },
                     None,
                 ));
@@ -4694,7 +4642,7 @@ pub fn create_output_symtab<E: Arch>(
         let ent = NList {
             n_strx: 0,
             n_type: N_SECT | N_PEXT,
-            n_sect: ordinals[ctx.isecs[isec].output_section as usize],
+            n_sect: ctx.isec_n_sect(&ctx.isecs[isec]),
             n_desc: 0,
             n_value: 0,
         };
@@ -4712,7 +4660,7 @@ pub fn create_output_symtab<E: Arch>(
         let (n_type, n_sect, mut n_desc) = match (sym.origin(), sym.isec()) {
             (_, Some(isec)) => (
                 N_SECT | N_EXT,
-                ordinals[ctx.isecs[ctx.resolve_isec(isec as usize)].output_section as usize],
+                ctx.isec_n_sect(&ctx.isecs[ctx.resolve_isec(isec as usize)]),
                 0,
             ),
             (Origin::Synthetic, None) => (N_SECT | N_EXT, 1, REFERENCED_DYNAMICALLY),
@@ -4936,27 +4884,6 @@ pub fn set_osec_offsets<E: Arch>(ctx: &mut Context<E>) {
     let page = E::PAGE_SIZE;
     let mut addr = 0;
     let mut fileoff = 0;
-    let mut trie_cache: Option<Vec<u8>> = None;
-    let mut unwind_cache: Option<(Vec<u8>, Vec<crate::symbol::SymbolId>)> = None;
-
-    // The chunk list is final once layout begins; resolve the synthetic
-    // slot sections once so per-slot address lookups are one index.
-    for (i, chunk) in ctx.chunks.iter().enumerate() {
-        match chunk.kind {
-            ChunkKind::Stubs => ctx.stubs_chunk = i,
-            ChunkKind::StubHelper => ctx.stub_helper_chunk = i,
-            ChunkKind::LazyPtrs => ctx.lazy_ptrs_chunk = i,
-            ChunkKind::Got => ctx.got_chunk = i,
-            ChunkKind::ThreadPtrs => ctx.thread_ptrs_chunk = i,
-            ChunkKind::ObjcStubs => ctx.objc_stubs_chunk = i,
-            _ => {}
-        }
-        match chunk.tail {
-            Tail::ObjcMethname => ctx.objc_methname_chunk = i,
-            Tail::ObjcSelrefs => ctx.objc_selrefs_chunk = i,
-            Tail::DataBlobs | Tail::None => {}
-        }
-    }
 
     // Chunk sizes that are independent of the layout.
     let header_size = mach_header_size(ctx);
@@ -5044,23 +4971,38 @@ pub fn set_osec_offsets<E: Arch>(ctx: &mut Context<E>) {
                     )
                 },
             );
+            // Each table's size follows from its contents; the chunk
+            // loop below places them.
             ctx.symtab = symtab;
-            ctx.dice_data = dice;
+            ctx.symtab.hdr.size = (ctx.symtab.entries.len() * size_of::<NList>()) as u64;
+            ctx.strtab.hdr.size = ctx.symtab.strtab_size as u64;
+            ctx.data_in_code.hdr.size = (dice.len() * 8) as u64;
+            ctx.data_in_code.entries = dice;
             match streams {
-                Streams::Chained(chained) => {
-                    (ctx.chained_data, ctx.fixups, ctx.fixup_imports, ctx.fixup_ordinals) =
-                        chained;
+                Streams::Chained((contents, fixups, imports, ordinals)) => {
+                    let sec = &mut ctx.chained_fixups;
+                    sec.hdr.size = contents.len() as u64;
+                    sec.contents = contents;
+                    sec.fixups = fixups;
+                    sec.imports = imports;
+                    sec.ordinals = ordinals;
                 }
                 Streams::Classic(rebase, bind, weak, lazy, lazy_offsets) => {
-                    ctx.rebase_data = rebase;
-                    ctx.bind_data = bind;
-                    ctx.weak_bind_data = weak;
-                    ctx.lazy_bind_data = lazy;
-                    ctx.lazy_bind_offsets = lazy_offsets;
+                    ctx.rebase_info.hdr.size = rebase.len() as u64;
+                    ctx.rebase_info.contents = rebase;
+                    ctx.bind_info.hdr.size = bind.len() as u64;
+                    ctx.bind_info.contents = bind;
+                    ctx.weak_bind_info.hdr.size = weak.len() as u64;
+                    ctx.weak_bind_info.contents = weak;
+                    ctx.lazy_bind_info.hdr.size = lazy.len() as u64;
+                    ctx.lazy_bind_info.contents = lazy;
+                    ctx.lazy_bind_info.offsets = lazy_offsets;
                 }
             }
-            ctx.function_starts_data = starts;
-            trie_cache = Some(trie);
+            ctx.function_starts.hdr.size = starts.len() as u64;
+            ctx.function_starts.contents = starts;
+            ctx.export_trie.hdr.size = trie.len() as u64;
+            ctx.export_trie.contents = trie;
         }
 
         if ctx.segments[seg_idx].name == "__PAGEZERO" {
@@ -5075,70 +5017,64 @@ pub fn set_osec_offsets<E: Arch>(ctx: &mut Context<E>) {
         let seg_fileoff = fileoff;
         let mut cursor = fileoff;
 
-        let chunk_idxs = ctx.segments[seg_idx].chunks.clone();
+        let chunk_ids = ctx.segments[seg_idx].chunks.clone();
 
         // The output sections with range-extension thunks (executable
         // sections of __TEXT); their entries' addresses are recorded on
         // the symbols once this segment is placed.
-        let thunked: Vec<usize> = chunk_idxs
+        let thunked: Vec<OutputSectionId> = chunk_ids
             .iter()
-            .copied()
-            .filter(|&i| matches!(&ctx.chunks[i].kind, ChunkKind::Output { thunks, .. } if !thunks.is_empty()))
+            .filter_map(|&id| match id {
+                ChunkId::Output(id) if !ctx.output_section(id).thunks.is_empty() => Some(id),
+                _ => None,
+            })
             .collect();
         // Regular chunks, in file order
-        for &idx in &chunk_idxs {
-            if ctx.chunks[idx].is_zerofill() {
+        for &id in &chunk_ids {
+            if ctx.chunk_header(id).is_zerofill() {
                 continue;
             }
-            let size = match &ctx.chunks[idx].kind {
-                ChunkKind::MachHeader => header_size,
-                ChunkKind::Symtab => {
-                    (ctx.symtab.entries.len() * size_of::<NList>()) as u64
-                }
-                ChunkKind::Strtab => ctx.symtab.strtab_size as u64,
-                // Encoded once; the personality cells the encoding
-                // cannot know yet (GOT addresses) come back as a
-                // patch list for the copy phase.
-                ChunkKind::UnwindInfo => {
+            let size = match id {
+                ChunkId::MachHeader => header_size,
+                // Encoded once its segment's addresses are known (the
+                // __LINKEDIT tables are built ahead, above, but
+                // __unwind_info embeds __TEXT offsets); the personality
+                // cells the encoding cannot know yet (GOT addresses)
+                // come back as a patch list for the copy phase.
+                ChunkId::UnwindInfo => {
                     let (data, personalities) =
                         t!("unwind_encode", output_chunks::encode_unwind_info(ctx));
                     let len = data.len() as u64;
-                    unwind_cache = Some((data, personalities));
+                    ctx.unwind_info.contents = data;
+                    ctx.unwind_info.personalities = personalities;
                     len
                 }
-                ChunkKind::ChainedFixups => ctx.chained_data.len() as u64,
-                ChunkKind::RebaseInfo => ctx.rebase_data.len() as u64,
-                ChunkKind::BindInfo => ctx.bind_data.len() as u64,
-                ChunkKind::WeakBindInfo => ctx.weak_bind_data.len() as u64,
-                ChunkKind::LazyBindInfo => ctx.lazy_bind_data.len() as u64,
-                // Encoded with the other LINKEDIT tables when layout
-                // reached __LINKEDIT, and copied out verbatim later.
-                // (__unwind_info above cannot get the same treatment:
-                // its content includes personality GOT addresses,
-                // which the data segments haven't fixed yet when
-                // __TEXT is sized.)
-                ChunkKind::ExportTrie => trie_cache.as_ref().unwrap().len() as u64,
-                ChunkKind::FunctionStarts => ctx.function_starts_data.len() as u64,
-                ChunkKind::DataInCode => (ctx.dice_data.len() * 8) as u64,
-                ChunkKind::CodeSignature => {
+                ChunkId::CodeSignature => {
                     cursor = align_to(cursor, 16);
                     code_signature_size(&ctx.args.output, cursor)
                 }
-                _ => ctx.chunks[idx].hdr.size,
+                _ => ctx.chunk_header(id).size,
             };
-            let chunk = &mut ctx.chunks[idx];
-            let p2align = match chunk.kind {
-                ChunkKind::Symtab | ChunkKind::Strtab | ChunkKind::RebaseInfo
-                | ChunkKind::BindInfo | ChunkKind::WeakBindInfo | ChunkKind::LazyBindInfo | ChunkKind::ChainedFixups | ChunkKind::ExportTrie
-                | ChunkKind::FunctionStarts | ChunkKind::DataInCode => 3,
-                ChunkKind::IndirectSymtab => 2,
-                ChunkKind::CodeSignature => 4,
-                _ => chunk.hdr.p2align,
+            let p2align = match id {
+                ChunkId::Symtab
+                | ChunkId::Strtab
+                | ChunkId::RebaseInfo
+                | ChunkId::BindInfo
+                | ChunkId::WeakBindInfo
+                | ChunkId::LazyBindInfo
+                | ChunkId::ChainedFixups
+                | ChunkId::ExportTrie
+                | ChunkId::FunctionStarts
+                | ChunkId::DataInCode => 3,
+                ChunkId::IndirectSymtab => 2,
+                ChunkId::CodeSignature => 4,
+                _ => ctx.chunk_header(id).p2align,
             };
             cursor = align_to(cursor, 1 << p2align);
-            chunk.hdr.fileoff = cursor;
-            chunk.hdr.addr = seg_vmaddr + (cursor - seg_fileoff);
-            chunk.hdr.size = size;
+            let hdr = ctx.chunk_header_mut(id);
+            hdr.fileoff = cursor;
+            hdr.addr = seg_vmaddr + (cursor - seg_fileoff);
+            hdr.size = size;
             cursor += size;
         }
 
@@ -5151,15 +5087,15 @@ pub fn set_osec_offsets<E: Arch>(ctx: &mut Context<E>) {
 
         // Zero-fill chunks occupy address space after the file-backed
         // part of the segment.
-        for &idx in &chunk_idxs {
-            if !ctx.chunks[idx].is_zerofill() {
+        for &id in &chunk_ids {
+            let hdr = ctx.chunk_header_mut(id);
+            if !hdr.is_zerofill() {
                 continue;
             }
-            let chunk = &mut ctx.chunks[idx];
-            vm_end = align_to(vm_end, 1 << chunk.hdr.p2align);
-            chunk.hdr.addr = vm_end;
-            chunk.hdr.fileoff = 0;
-            vm_end += chunk.hdr.size;
+            vm_end = align_to(vm_end, 1 << hdr.p2align);
+            hdr.addr = vm_end;
+            hdr.fileoff = 0;
+            vm_end += hdr.size;
         }
 
         // __LINKEDIT's file contents end exactly at the code signature;
@@ -5179,23 +5115,20 @@ pub fn set_osec_offsets<E: Arch>(ctx: &mut Context<E>) {
     }
 
     ctx.output_size = fileoff;
-    ctx.export_trie_data = trie_cache.unwrap_or_default();
-    let (unwind_data, unwind_personalities) = unwind_cache.unwrap_or_default();
-    ctx.unwind_info_data = unwind_data;
-    ctx.unwind_personalities = unwind_personalities;
 
     // Thread pointers are relative to the start of the first
     // thread-local data section.
     ctx.tls_begin = ctx
         .chunks
         .iter()
-        .filter(|c| {
+        .map(|&id| ctx.chunk_header(id))
+        .filter(|hdr| {
             matches!(
-                c.hdr.flags & SECTION_TYPE,
+                hdr.flags & SECTION_TYPE,
                 S_THREAD_LOCAL_REGULAR | S_THREAD_LOCAL_ZEROFILL
             )
         })
-        .map(|c| c.hdr.addr)
+        .map(|hdr| hdr.addr)
         .min()
         .unwrap_or(0);
 }
@@ -5225,7 +5158,7 @@ fn build_rebase_info<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
         if !isec.is_alive() || isec.replacement != crate::input_sections::NO_REPLACEMENT {
             continue;
         }
-        let base = ctx.chunks[isec.output_section as usize].hdr.addr + isec.offset as u64;
+        let base = ctx.chunk_header(isec.output_section().unwrap()).addr + isec.offset as u64;
         for rel in crate::input_files::isec_relocs_of(&ctx.objs, isec) {
             if E::classify_reloc(rel.r_type) != RelocClass::Plain
                 || rel.size != 8
@@ -5248,9 +5181,9 @@ fn build_rebase_info<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
 
     // __thread_ptrs slots hold descriptor addresses, which need
     // sliding.
-    if let Some(idx) = output_chunks::find_chunk(ctx, |k| matches!(k, ChunkKind::ThreadPtrs)) {
-        let addr = ctx.chunks[idx].hdr.addr;
-        for (i, &id) in ctx.thread_ptr_syms.iter().enumerate() {
+    {
+        let addr = ctx.thread_ptrs.hdr.addr;
+        for (i, &id) in ctx.thread_ptrs.symbols.iter().enumerate() {
             if !ctx.symbols[id].is_imported() {
                 locs.push(addr + i as u64 * 8);
             }
@@ -5259,7 +5192,7 @@ fn build_rebase_info<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
 
     // Synthesized selector reference slots hold pointers into
     // __objc_methname (a reused input slot has its own relocation).
-    for i in 0..ctx.objc_stubs.len() + ctx.objc_extra_selrefs.len() {
+    for i in 0..ctx.objc_stubs.symbols.len() + ctx.objc_stubs.extra_selrefs.len() {
         if !ctx.objc_stub_reuses_selref(i) {
             locs.push(ctx.objc_selref_addr(i));
         }
@@ -5271,17 +5204,17 @@ fn build_rebase_info<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
     // Lazy pointers start out pointing at their stub helper entries (a
     // weak-lookup stub's GOT slot is rebased with the GOT).
     if ctx.lazy_binding() {
-        for i in 0..ctx.stub_syms.len() {
-            if !ctx.binds_weak_lookup(ctx.stub_syms[i]) {
-                locs.push(ctx.stub_ptr_addr(i, ctx.stub_syms[i]));
+        for i in 0..ctx.stubs.symbols.len() {
+            if !ctx.binds_weak_lookup(ctx.stubs.symbols[i]) {
+                locs.push(ctx.stub_ptr_addr(i, ctx.stubs.symbols[i]));
             }
         }
     }
 
     // GOT slots that hold local addresses.
-    if let Some(idx) = output_chunks::find_chunk(ctx, |k| matches!(k, ChunkKind::Got)) {
-        let got_addr = ctx.chunks[idx].hdr.addr;
-        for (i, &id) in ctx.got_syms.iter().enumerate() {
+    {
+        let got_addr = ctx.got.hdr.addr;
+        for (i, &id) in ctx.got.got_syms.iter().enumerate() {
             if !ctx.symbols[id].is_imported() {
                 locs.push(got_addr + i as u64 * 8);
             }
@@ -5348,12 +5281,12 @@ fn build_rebase_info<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
 /// done), and each record's offset, which the stub helper entry pushes
 /// for dyld_stub_binder. ld64's layout, byte for byte.
 fn build_lazy_bind_info<E: Arch>(ctx: &Context<E>) -> (Vec<u8>, Vec<u32>) {
-    if !ctx.lazy_binding() || ctx.stub_syms.is_empty() {
+    if !ctx.lazy_binding() || ctx.stubs.symbols.is_empty() {
         return (Vec::new(), Vec::new());
     }
     let mut buf = Vec::new();
-    let mut offsets = Vec::with_capacity(ctx.stub_syms.len());
-    for (i, &id) in ctx.stub_syms.iter().enumerate() {
+    let mut offsets = Vec::with_capacity(ctx.stubs.symbols.len());
+    for (i, &id) in ctx.stubs.symbols.iter().enumerate() {
         offsets.push(buf.len() as u32);
         // A stub for a symbol bound by weak lookup jumps through its
         // GOT slot, not lazily.
@@ -5394,9 +5327,9 @@ fn build_bind_info<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
     let mut binds: Vec<(u64, crate::symbol::SymbolId, i64)> = Vec::new();
 
     // GOT slots for imported symbols.
-    if let Some(idx) = output_chunks::find_chunk(ctx, |k| matches!(k, ChunkKind::Got)) {
-        let got_addr = ctx.chunks[idx].hdr.addr;
-        for (i, &id) in ctx.got_syms.iter().enumerate() {
+    {
+        let got_addr = ctx.got.hdr.addr;
+        for (i, &id) in ctx.got.got_syms.iter().enumerate() {
             if ctx.symbols[id].is_imported() {
                 binds.push((got_addr + i as u64 * 8, id, 0));
             }
@@ -5405,9 +5338,9 @@ fn build_bind_info<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
 
     // __thread_ptrs slots for thread-locals imported from dylibs: dyld
     // writes the foreign TLV descriptor's address.
-    if let Some(idx) = output_chunks::find_chunk(ctx, |k| matches!(k, ChunkKind::ThreadPtrs)) {
-        let addr = ctx.chunks[idx].hdr.addr;
-        for (i, &id) in ctx.thread_ptr_syms.iter().enumerate() {
+    {
+        let addr = ctx.thread_ptrs.hdr.addr;
+        for (i, &id) in ctx.thread_ptrs.symbols.iter().enumerate() {
             if ctx.symbols[id].is_imported() {
                 binds.push((addr + i as u64 * 8, id, 0));
             }
@@ -5420,7 +5353,7 @@ fn build_bind_info<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
         if !isec.is_alive() || isec.replacement != crate::input_sections::NO_REPLACEMENT {
             continue;
         }
-        let base = ctx.chunks[isec.output_section as usize].hdr.addr + isec.offset as u64;
+        let base = ctx.chunk_header(isec.output_section().unwrap()).addr + isec.offset as u64;
         for rel in crate::input_files::isec_relocs_of(&ctx.objs, isec) {
             if E::classify_reloc(rel.r_type) != RelocClass::Plain
                 || rel.size != 8
@@ -5529,7 +5462,7 @@ fn collect_fixups<E: Arch>(ctx: &Context<E>) -> Vec<(u64, Option<crate::symbol::
         .par_iter()
         .filter(|isec| isec.is_alive() && isec.replacement == crate::input_sections::NO_REPLACEMENT)
         .flat_map_iter(|isec| {
-            let base = ctx.chunks[isec.output_section as usize].hdr.addr + isec.offset as u64;
+            let base = ctx.chunk_header(isec.output_section().unwrap()).addr + isec.offset as u64;
             crate::input_files::isec_relocs_of(&ctx.objs, isec).iter().filter_map(move |rel| {
                 if E::classify_reloc(rel.r_type) != RelocClass::Plain
                     || rel.size != 8
@@ -5566,21 +5499,21 @@ fn collect_fixups<E: Arch>(ctx: &Context<E>) -> Vec<(u64, Option<crate::symbol::
         })
         .collect();
 
-    if let Some(idx) = output_chunks::find_chunk(ctx, |k| matches!(k, ChunkKind::Got)) {
-        let addr = ctx.chunks[idx].hdr.addr;
-        for (i, &id) in ctx.got_syms.iter().enumerate() {
+    {
+        let addr = ctx.got.hdr.addr;
+        for (i, &id) in ctx.got.got_syms.iter().enumerate() {
             let sym = Some(id).filter(|&id| ctx.binds_at_runtime(id));
             fixups.push((addr + i as u64 * 8, sym, 0));
         }
     }
-    if let Some(idx) = output_chunks::find_chunk(ctx, |k| matches!(k, ChunkKind::ThreadPtrs)) {
-        let addr = ctx.chunks[idx].hdr.addr;
-        for (i, &id) in ctx.thread_ptr_syms.iter().enumerate() {
+    {
+        let addr = ctx.thread_ptrs.hdr.addr;
+        for (i, &id) in ctx.thread_ptrs.symbols.iter().enumerate() {
             let sym = Some(id).filter(|&id| ctx.symbols[id].is_imported());
             fixups.push((addr + i as u64 * 8, sym, 0));
         }
     }
-    for i in 0..ctx.objc_stubs.len() + ctx.objc_extra_selrefs.len() {
+    for i in 0..ctx.objc_stubs.symbols.len() + ctx.objc_stubs.extra_selrefs.len() {
         if !ctx.objc_stub_reuses_selref(i) {
             fixups.push((ctx.objc_selref_addr(i), None, 0));
         }
@@ -5601,9 +5534,9 @@ fn collect_fixups<E: Arch>(ctx: &Context<E>) -> Vec<(u64, Option<crate::symbol::
 /// name, then address, as ld64 writes them.
 fn build_weak_bind_info<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
     let mut binds: Vec<(crate::symbol::SymbolId, u64)> = Vec::new();
-    if let Some(idx) = output_chunks::find_chunk(ctx, |k| matches!(k, ChunkKind::Got)) {
-        let got_addr = ctx.chunks[idx].hdr.addr;
-        for (i, &id) in ctx.got_syms.iter().enumerate() {
+    {
+        let got_addr = ctx.got.hdr.addr;
+        for (i, &id) in ctx.got.got_syms.iter().enumerate() {
             if ctx.binds_weak_lookup(id) {
                 binds.push((id, got_addr + i as u64 * 8));
             }
@@ -5613,7 +5546,7 @@ fn build_weak_bind_info<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
         if !isec.is_alive() || isec.replacement != crate::input_sections::NO_REPLACEMENT {
             continue;
         }
-        let base = ctx.chunks[isec.output_section as usize].hdr.addr + isec.offset as u64;
+        let base = ctx.chunk_header(isec.output_section().unwrap()).addr + isec.offset as u64;
         for rel in crate::input_files::isec_relocs_of(&ctx.objs, isec) {
             if E::classify_reloc(rel.r_type) != RelocClass::Plain
                 || rel.size != 8
@@ -5856,11 +5789,12 @@ fn write_fixup_chains<E: Arch>(ctx: &Context<E>, buf: &mut [u8]) {
     let page_mask = !(E::PAGE_SIZE - 1);
 
     for seg in &ctx.segments {
-        let lo = ctx.fixups.partition_point(|&(a, _, _)| a < seg.cmd.vmaddr);
+        let lo = ctx.chained_fixups.fixups.partition_point(|&(a, _, _)| a < seg.cmd.vmaddr);
         let hi = ctx
+            .chained_fixups
             .fixups
             .partition_point(|&(a, _, _)| a < seg.cmd.vmaddr + seg.cmd.vmsize);
-        let fx = &ctx.fixups[lo..hi];
+        let fx = &ctx.chained_fixups.fixups[lo..hi];
 
         for (i, &(addr, sym, addend)) in fx.iter().enumerate() {
             let next = match fx.get(i + 1) {
@@ -5878,10 +5812,10 @@ fn write_fixup_chains<E: Arch>(ctx: &Context<E>, buf: &mut [u8]) {
                 Some(sym) => {
                     // dyld_chained_ptr_64_bind
                     let ordinal = if addend <= MAX_INLINE_ADDEND {
-                        ctx.fixup_ordinals[&sym] as u64
+                        ctx.chained_fixups.ordinals[&sym] as u64
                     } else {
-                        let base = ctx.fixup_ordinals[&sym];
-                        ctx.fixup_imports[base..]
+                        let base = ctx.chained_fixups.ordinals[&sym];
+                        ctx.chained_fixups.imports[base..]
                             .iter()
                             .position(|&(s, a)| s == sym && a == addend)
                             .map(|p| (base + p) as u64)
@@ -5898,8 +5832,9 @@ fn write_fixup_chains<E: Arch>(ctx: &Context<E>, buf: &mut [u8]) {
                         let sect = ctx
                             .chunks
                             .iter()
-                            .find(|c| c.hdr.addr <= addr && addr < c.hdr.addr + c.hdr.size)
-                            .map(|c| format!("{},{}", c.hdr.segname, c.hdr.sectname))
+                            .map(|&id| ctx.chunk_header(id))
+                            .find(|hdr| hdr.addr <= addr && addr < hdr.addr + hdr.size)
+                            .map(|hdr| format!("{},{}", hdr.segname, hdr.sectname))
                             .unwrap_or_default();
                         fatal!("rebase target unencodable at {addr:#x} in {sect} (value {val:#x}); re-link with -no_fixup_chains"
                         );
@@ -6010,7 +5945,7 @@ fn build_data_in_code<E: Arch>(ctx: &Context<E>) -> Vec<(u32, u16, u16)> {
             };
             let isec = &ctx.isecs[ctx.resolve_isec(isec as usize)];
             if isec.is_alive() {
-                let fileoff = ctx.chunks[isec.output_section as usize].hdr.fileoff + isec.offset as u64 + off_in;
+                let fileoff = ctx.chunk_header(isec.output_section().unwrap()).fileoff + isec.offset as u64 + off_in;
                 out.push((fileoff as u32, len, kind));
             }
         }
@@ -6037,7 +5972,7 @@ fn build_function_starts<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
                 && ctx.hdr_of(isec).segname() == "__TEXT"
                 && ctx.hdr_of(isec).sectname() == "__text"
             {
-                Some(ctx.chunks[isec.output_section as usize].hdr.addr + isec.offset as u64 + sym.value)
+                Some(ctx.chunk_header(isec.output_section().unwrap()).addr + isec.offset as u64 + sym.value)
             } else {
                 None
             }
@@ -6102,7 +6037,7 @@ pub fn add_entry_stub<E: Arch>(ctx: &mut Context<E>) {
 /// word dyld_stub_binder is handed, ld64 puts it in __DATA,__data) is
 /// synthesized. Once, on the first stub.
 fn ensure_stub_binder<E: Arch>(ctx: &mut Context<E>) {
-    if ctx.dyld_stub_binder.is_some() {
+    if ctx.stub_helper.dyld_stub_binder.is_some() {
         return;
     }
     let name = "dyld_stub_binder";
@@ -6119,7 +6054,7 @@ fn ensure_stub_binder<E: Arch>(ctx: &mut Context<E>) {
     }
     sym.set_is_used(true);
     add_got(ctx, id);
-    ctx.dyld_stub_binder = Some(id);
+    ctx.stub_helper.dyld_stub_binder = Some(id);
 
     let hdr: &'static MachSection = Box::leak(Box::new(MachSection {
         sectname: str_to_name("__data"),
@@ -6148,230 +6083,13 @@ fn ensure_stub_binder<E: Arch>(ctx: &mut Context<E>) {
     });
     let isec = (ctx.isecs.len() - 1) as u32;
     ctx.data_blobs.push(DataBlob { sect: "__data", isec, fields: vec![DataField::Bytes(vec![0; 8])] });
-    ctx.dyld_private_isec = isec;
+    ctx.stub_helper.dyld_private_isec = isec;
 }
 
 /// Copies all chunks to the output buffer and applies relocations. The
 /// code signature is computed last, over everything else.
 /// Copies one chunk's contents into its slice of the output buffer.
 /// The slice covers exactly [fileoff, fileoff + size).
-fn copy_chunk<E: Arch>(ctx: &Context<E>, chunk: &Chunk, buf: &mut [u8]) {
-    match &chunk.kind {
-        ChunkKind::Output { isecs, thunks } => {
-            for thunk in thunks {
-                let off = thunk.offset as usize;
-                let end = off + thunk.syms.len() * E::THUNK_SIZE as usize;
-                E::write_thunk(ctx, chunk.hdr.addr + thunk.offset, &thunk.syms, &mut buf[off..end]);
-            }
-            // Subsections copy and relocate in parallel, as in mold:
-            // each occupies a disjoint slice of the output section
-            // (relocations only ever write within their own
-            // subsection), so the work distributes freely. A pointer
-            // wrapper stands in for the aliasing split rayon can't
-            // express directly.
-            use rayon::prelude::*;
-            struct BufPtr(*mut u8);
-            unsafe impl Sync for BufPtr {}
-            let bufp = BufPtr(buf.as_mut_ptr());
-            let bufp = &bufp;
-            isecs.par_iter().for_each(|&id| {
-                let isec = &ctx.isecs[id];
-                if isec.data().is_empty() {
-                    return;
-                }
-                let off = isec.offset as usize;
-                // SAFETY: subsections' [output_offset, +size) ranges
-                // are disjoint by layout, so each iteration touches
-                // its own slice.
-                let slice = unsafe {
-                    std::slice::from_raw_parts_mut(bufp.0.add(off), isec.data().len())
-                };
-                slice.copy_from_slice(isec.data());
-                let base = chunk.hdr.addr + isec.offset as u64;
-                E::apply_relocs(ctx, ctx.isec_relocs(id as usize), id as usize, base, slice);
-            });
-            // The linker-synthesized tail after the inputs.
-            let tail = &mut buf[chunk.tail_off as usize..];
-            match chunk.tail {
-                Tail::None => {}
-                Tail::ObjcMethname => {
-                    tail[..ctx.objc_methname_data.len()].copy_from_slice(&ctx.objc_methname_data);
-                }
-                Tail::DataBlobs => {
-                    for b in ctx
-                        .data_blobs
-                        .iter()
-                        .filter(|b| std::ptr::eq(&ctx.chunks[ctx.isecs[b.isec as usize].output_section as usize], chunk))
-                    {
-                        let mut at = ctx.isecs[b.isec as usize].offset as usize - chunk.tail_off as usize;
-                        for f in &b.fields {
-                            match f {
-                                DataField::Bytes(bytes) => {
-                                    tail[at..at + bytes.len()].copy_from_slice(bytes);
-                                    at += bytes.len();
-                                }
-                                DataField::Ptr(r) => {
-                                    tail[at..at + 8].copy_from_slice(&objc_ref_addr(ctx, *r).to_le_bytes());
-                                    at += 8;
-                                }
-                            }
-                        }
-                    }
-                }
-                Tail::ObjcSelrefs => {
-                    for i in 0..ctx.objc_stubs.len() {
-                        if ctx.objc_stub_reuses_selref(i) {
-                            continue;
-                        }
-                        let slot = ctx.objc_stub_tail[i] as usize;
-                        let val = ctx.objc_methname_addr(i);
-                        tail[slot * 8..slot * 8 + 8].copy_from_slice(&val.to_le_bytes());
-                    }
-                    let n = ctx.objc_tail_slots;
-                    for (j, &name) in ctx.objc_extra_selrefs.iter().enumerate() {
-                        let val = ctx.isec_addr(name as usize);
-                        tail[(n + j) * 8..(n + j) * 8 + 8].copy_from_slice(&val.to_le_bytes());
-                    }
-                }
-            }
-        }
-        ChunkKind::Stubs => E::write_stubs(ctx, chunk.hdr.addr, buf),
-        ChunkKind::ObjcMethlist => {
-            let addr_of = |r: ObjcRef| -> u64 {
-                match r {
-                    ObjcRef::Isec(isec, off) => ctx.isec_addr(isec as usize) + off,
-                    ObjcRef::Sym(id, addend) => (ctx.sym_addr(id) as i64 + addend) as u64,
-                    ObjcRef::TailSelref(n) => ctx.objc_selref_addr(n),
-                    ObjcRef::Null => 0,
-                }
-            };
-            for list in &ctx.objc_methlists {
-                let isec = &ctx.isecs[list.isec as usize];
-                let base = isec.offset as usize;
-                let addr = chunk.hdr.addr + base as u64;
-                let count = list.methods.len() as u32;
-                buf[base..base + 4].copy_from_slice(&(12u32 | 0x8000_0000).to_le_bytes());
-                buf[base + 4..base + 8].copy_from_slice(&count.to_le_bytes());
-                for (i, m) in list.methods.iter().enumerate() {
-                    let at = base + 8 + 12 * i;
-                    let field = addr + 8 + 12 * i as u64;
-                    for (k, r) in [m.name, m.types, m.imp].into_iter().enumerate() {
-                        let target = addr_of(r);
-                        let rel = if target == 0 { 0 } else { target.wrapping_sub(field + 4 * k as u64) as i64 };
-                        if rel != rel as i32 as i64 {
-                            fatal!("relative method list entry out of range");
-                        }
-                        buf[at + 4 * k..at + 4 * k + 4].copy_from_slice(&(rel as i32).to_le_bytes());
-                    }
-                }
-            }
-        }
-        ChunkKind::Got => {
-            // Slots for imported symbols stay zero; dyld fills them
-            // via the bind stream.
-            for (i, &id) in ctx.got_syms.iter().enumerate() {
-                if !ctx.symbols[id].is_imported() {
-                    buf[i * 8..i * 8 + 8].copy_from_slice(&ctx.sym_addr(id).to_le_bytes());
-                }
-            }
-        }
-        ChunkKind::ThreadPtrs => {
-            for (i, &id) in ctx.thread_ptr_syms.iter().enumerate() {
-                if !ctx.symbols[id].is_imported() {
-                    buf[i * 8..i * 8 + 8].copy_from_slice(&ctx.sym_addr(id).to_le_bytes());
-                }
-            }
-        }
-        ChunkKind::ObjcImageInfo => {
-            buf[..4].copy_from_slice(&0u32.to_le_bytes());
-            buf[4..8].copy_from_slice(&ctx.objc_image_info_flags.to_le_bytes());
-        }
-        ChunkKind::SectCreate { data } => buf[..data.len()].copy_from_slice(data),
-        ChunkKind::InitOffsets => {
-            for (i, &(isec, off)) in ctx.init_funcs.iter().enumerate() {
-                let val = (ctx.isec_addr(isec) + off - ctx.args.pagezero_size) as u32;
-                buf[i * 4..i * 4 + 4].copy_from_slice(&val.to_le_bytes());
-            }
-        }
-        ChunkKind::ObjcStubs => E::write_objc_stubs(ctx, chunk.hdr.addr, buf),
-        ChunkKind::UnwindInfo => {
-            let data = &ctx.unwind_info_data;
-            debug_assert_eq!(data.len() as u64, chunk.hdr.size);
-            buf[..data.len()].copy_from_slice(data);
-            // Patch the personality cells now the GOT has addresses;
-            // the header says where the array is (after the common
-            // encodings).
-            let base = ctx.args.pagezero_size;
-            let personality_off = u32::from_le_bytes(data[12..16].try_into().unwrap()) as usize;
-            for (i, &sym) in ctx.unwind_personalities.iter().enumerate() {
-                let off = personality_off + i * 4;
-                let val = ctx.sym_got_addr(sym).wrapping_sub(base) as u32;
-                buf[off..off + 4].copy_from_slice(&val.to_le_bytes());
-            }
-        }
-        ChunkKind::EhFrame => output_chunks::copy_eh_frame(ctx, buf),
-        ChunkKind::ChainedFixups => {
-            buf[..ctx.chained_data.len()].copy_from_slice(&ctx.chained_data)
-        }
-        ChunkKind::RebaseInfo => buf[..ctx.rebase_data.len()].copy_from_slice(&ctx.rebase_data),
-        ChunkKind::BindInfo => buf[..ctx.bind_data.len()].copy_from_slice(&ctx.bind_data),
-        ChunkKind::WeakBindInfo => buf[..ctx.weak_bind_data.len()].copy_from_slice(&ctx.weak_bind_data),
-        ChunkKind::LazyBindInfo => buf[..ctx.lazy_bind_data.len()].copy_from_slice(&ctx.lazy_bind_data),
-        ChunkKind::StubHelper => E::write_stub_helper(ctx, chunk.hdr.addr, buf),
-        ChunkKind::LazyPtrs => {
-            // Each lazy pointer starts at its stub helper entry.
-            let helper = ctx.chunks[ctx.stub_helper_chunk].hdr.addr + E::STUB_HELPER_HEADER_SIZE;
-            for i in 0..ctx.stub_syms.len() {
-                let val = helper + i as u64 * E::STUB_HELPER_ENTRY_SIZE;
-                buf[i * 8..i * 8 + 8].copy_from_slice(&val.to_le_bytes());
-            }
-        }
-        ChunkKind::ExportTrie => {
-            let data = &ctx.export_trie_data;
-            buf[..data.len()].copy_from_slice(data);
-        }
-        ChunkKind::FunctionStarts => {
-            buf[..ctx.function_starts_data.len()].copy_from_slice(&ctx.function_starts_data);
-        }
-        ChunkKind::DataInCode => {
-            let mut p = 0;
-            for &(off, len, kind) in &ctx.dice_data {
-                buf[p..p + 4].copy_from_slice(&off.to_le_bytes());
-                buf[p + 4..p + 6].copy_from_slice(&len.to_le_bytes());
-                buf[p + 6..p + 8].copy_from_slice(&kind.to_le_bytes());
-                p += 8;
-            }
-        }
-        ChunkKind::IndirectSymtab => {
-            let mut off = 0;
-            let lazy: &[crate::symbol::SymbolId] = if ctx.lazy_binding() { &ctx.stub_syms } else { &[] };
-            // A GOT slot holding a definition of this image that dyld
-            // never rebinds is INDIRECT_SYMBOL_LOCAL, as ld64 writes it,
-            // whatever the symbol's scope; a stub's or an imported (or
-            // weak-coalesced) symbol's slot names the symbol.
-            let entries = ctx
-                .stub_syms
-                .iter()
-                .map(|&id| (id, false))
-                .chain(ctx.got_syms.iter().map(|&id| (id, !ctx.binds_at_runtime(id))))
-                .chain(lazy.iter().map(|&id| (id, false)));
-            for (id, local) in entries {
-                let val = match ctx.symtab.output_sym_indices[id as usize] {
-                    _ if local => INDIRECT_SYMBOL_LOCAL,
-                    u32::MAX => INDIRECT_SYMBOL_LOCAL,
-                    idx => idx,
-                };
-                buf[off..off + 4].copy_from_slice(&val.to_le_bytes());
-                off += 4;
-            }
-        }
-        ChunkKind::MachHeader
-        | ChunkKind::Symtab
-        | ChunkKind::Strtab
-        | ChunkKind::CodeSignature => {}
-    }
-}
-
 /// Copies all chunks to the output buffer and applies relocations, in
 /// parallel: the buffer is carved into disjoint per-chunk slices, and
 /// every chunk writes only within its own. The mach header, symbol
@@ -6385,65 +6103,52 @@ fn copy_chunk<E: Arch>(ctx: &Context<E>, chunk: &Chunk, buf: &mut [u8]) {
 pub fn copy_chunks<E: Arch>(ctx: &Context<E>, buf: &mut [u8], out: &crate::output_file::OutputFile) {
     use rayon::prelude::*;
 
-    let mut jobs: Vec<(usize, usize, usize)> = ctx
+    let mut jobs: Vec<(ChunkId, usize, usize)> = ctx
         .chunks
         .iter()
-        .enumerate()
-        .filter(|(_, c)| {
+        .map(|&id| (id, ctx.chunk_header(id)))
+        .filter(|(id, hdr)| {
             !matches!(
-                c.kind,
-                ChunkKind::MachHeader
-                    | ChunkKind::Symtab
-                    | ChunkKind::Strtab
-                    | ChunkKind::CodeSignature
-            ) && !c.is_zerofill()
+                id,
+                ChunkId::MachHeader | ChunkId::Symtab | ChunkId::Strtab | ChunkId::CodeSignature
+            ) && !hdr.is_zerofill()
                 // An empty section (every subsection of a coverage
                 // section dead, say) shares its file offset with its
                 // neighbor; it has nothing to copy and would only
                 // upset the gap arithmetic below.
-                && c.hdr.size != 0
+                && hdr.size != 0
         })
-        .map(|(i, c)| (i, c.hdr.fileoff as usize, c.hdr.size as usize))
+        .map(|(id, hdr)| (id, hdr.fileoff as usize, hdr.size as usize))
         .collect();
     jobs.sort_by_key(|&(_, off, _)| off);
 
-    let mut slices: Vec<(usize, &mut [u8])> = Vec::with_capacity(jobs.len());
+    let mut slices: Vec<(ChunkId, &mut [u8])> = Vec::with_capacity(jobs.len());
     let mut tail = &mut *buf;
     let mut consumed = 0;
-    for &(idx, off, size) in &jobs {
+    for &(id, off, size) in &jobs {
         let (_gap, rest) = tail.split_at_mut(off - consumed);
         let (slice, rest) = rest.split_at_mut(size);
-        slices.push((idx, slice));
+        slices.push((id, slice));
         tail = rest;
         consumed = off + size;
     }
 
     t!("par-copy", slices
         .into_par_iter()
-        .for_each(|(idx, slice)| copy_chunk(ctx, &ctx.chunks[idx], slice)));
+        .for_each(|(id, slice)| output_chunks::copy_buf(ctx, id, slice)));
 
     if ctx.use_chained_fixups() {
         t!("write-chains", write_fixup_chains(ctx, buf));
     }
     t!("loh", E::apply_optimization_hints(ctx, buf));
 
-    let hdr_end = ctx.chunks[output_chunks::find_chunk(ctx, |k| {
-        matches!(k, ChunkKind::MachHeader)
-    })
-    .unwrap()]
-    .hdr
-    .size as usize;
-    let sig_start = output_chunks::find_chunk(ctx, |k| {
-        matches!(k, ChunkKind::CodeSignature)
-    })
-    .map_or(buf.len(), |idx| ctx.chunks[idx].hdr.fileoff as usize);
-    let symtab_start = ctx
-        .chunks
-        .iter()
-        .filter(|c| matches!(c.kind, ChunkKind::Symtab | ChunkKind::Strtab))
-        .map(|c| c.hdr.fileoff as usize)
-        .min()
-        .unwrap_or(sig_start);
+    let hdr_end = ctx.mach_header.hdr.size as usize;
+    let sig_start = if ctx.chunks.contains(&ChunkId::CodeSignature) {
+        ctx.code_signature.hdr.fileoff as usize
+    } else {
+        buf.len()
+    };
+    let symtab_start = (ctx.symtab.hdr.fileoff as usize).min(ctx.strtab.hdr.fileoff as usize);
 
     // Nothing below writes between the header and the symbol table.
     out.queue(hdr_end, symtab_start - hdr_end);
@@ -6477,13 +6182,7 @@ pub fn copy_chunks<E: Arch>(ctx: &Context<E>, buf: &mut [u8], out: &crate::outpu
             uuid[8] = (uuid[8] & 0x3f) | 0x80; // RFC 4122 variant
             *ctx.uuid.lock().unwrap() = uuid;
             output_chunks::copy_mach_header(ctx, buf);
-            let hdr_size = ctx.chunks[output_chunks::find_chunk(ctx, |k| {
-                matches!(k, ChunkKind::MachHeader)
-            })
-            .unwrap()]
-            .hdr
-            .size as usize;
-            output_chunks::rehash_pages(&buf[..sig_start], &mut hashes, 0..hdr_size);
+            output_chunks::rehash_pages(&buf[..sig_start], &mut hashes, 0..hdr_end);
         });
     }
     out.queue(0, hdr_end);

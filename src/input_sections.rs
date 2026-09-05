@@ -1,5 +1,7 @@
 //! Input sections.
 
+use crate::output_chunks::ChunkId;
+
 
 /// A subsection index, u32 as in mold-rust.
 pub type InputSectionId = u32;
@@ -164,8 +166,13 @@ pub struct InputSection {
     /// per subsection - a debug link has millions of relocations.
     pub rel_offset: u32,
     pub nrels: u32,
-    /// The output section chunk this section is appended to (u32 index;
-    /// `u32::MAX` until assigned).
+    /// The chunk this subsection is laid out in, as `ChunkId::pack`
+    /// encodes it, or `u32::MAX` until assigned: read through
+    /// `output_section()`. mold-rust's field of this name holds an
+    /// Option<OutputSectionId> (a word, thanks to the id's niche); a
+    /// Mach-O subsection may also be placed in the GOT (a folded
+    /// __objc_classrefs entry) or in __objc_methlist (a rewritten
+    /// method list), so the packed ChunkId keeps the struct at 56 bytes.
     pub output_section: u32,
     /// Offset from the start of the output section (u32::MAX marks a
     /// subsection not yet placed, during thunk layout). An output
@@ -213,6 +220,20 @@ impl InputSection {
     pub fn flags_placed() -> std::sync::atomic::AtomicU8 {
         std::sync::atomic::AtomicU8::new(IS_ALIVE | IS_PLACED)
     }
+    /// The chunk this subsection is laid out in, once assigned.
+    #[inline]
+    pub fn output_section(&self) -> Option<ChunkId> {
+        if self.output_section == u32::MAX {
+            None
+        } else {
+            Some(ChunkId::unpack(self.output_section))
+        }
+    }
+
+    pub fn set_output_section(&mut self, id: ChunkId) {
+        self.output_section = id.pack();
+    }
+
     #[inline]
     pub fn is_placed(&self) -> bool {
         self.flags.load(std::sync::atomic::Ordering::Relaxed) & IS_PLACED != 0

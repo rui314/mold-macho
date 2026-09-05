@@ -67,13 +67,13 @@ pub fn print_map<E: Arch>(ctx: &Context<E>) {
     let _ = writeln!(out, "# Sections:");
     let _ = writeln!(out, "# Address\tSize    \tSegment\tSection");
     for seg in &ctx.segments {
-        for &idx in &seg.chunks {
-            let chunk = &ctx.chunks[idx];
-            if chunk.hdr.is_sect {
+        for &id in &seg.chunks {
+            let hdr = ctx.chunk_header(id);
+            if hdr.is_sect {
                 let _ = writeln!(
                     out,
                     "0x{:08X}\t0x{:08X}\t{}\t{}",
-                    chunk.hdr.addr, chunk.hdr.size, chunk.hdr.segname, chunk.hdr.sectname
+                    hdr.addr, hdr.size, hdr.segname, hdr.sectname
                 );
             }
         }

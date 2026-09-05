@@ -84,7 +84,7 @@ pub trait Arch: Copy + Default + Send + Sync + 'static {
     /// relocation types.
     fn got_load_form(r_type: u8) -> Option<u8>;
 
-    /// Writes the __stubs section: for each symbol in `ctx.stub_syms`, a
+    /// Writes the __stubs section: for each symbol in `ctx.stubs.symbols`, a
     /// jump through the symbol's __got slot. `addr` is the section's
     /// address and `buf` its bytes in the output.
     fn write_stubs(ctx: &Context<Self>, addr: u64, buf: &mut [u8]);

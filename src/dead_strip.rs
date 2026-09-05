@@ -78,7 +78,7 @@ pub fn dead_strip<E: Arch>(ctx: &mut Context<E>) {
 
     // Initializers converted to __init_offsets are roots; their source
     // sections are gone.
-    for &(isec, _) in &ctx.init_funcs {
+    for &(isec, _) in &ctx.init_offsets.init_funcs {
         mark(ctx, &mut pred, &mut stack, isec, usize::MAX);
     }
 

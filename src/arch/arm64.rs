@@ -165,10 +165,10 @@ impl Arch for Arm64 {
                     if !isec.is_alive() || isec.offset == u32::MAX {
                         continue 'hint;
                     }
-                    let chunk = &ctx.chunks[isec.output_section as usize];
+                    let hdr = ctx.chunk_header(isec.output_section().unwrap());
                     locs.push((
-                        (chunk.hdr.fileoff + isec.offset as u64 + off) as usize,
-                        chunk.hdr.addr + isec.offset as u64 + off,
+                        (hdr.fileoff + isec.offset as u64 + off) as usize,
+                        hdr.addr + isec.offset as u64 + off,
                     ));
                 }
                 let insn =
@@ -279,7 +279,7 @@ impl Arch for Arm64 {
     }
 
     fn write_stubs(ctx: &Context<Self>, addr: u64, buf: &mut [u8]) {
-        for (i, &sym) in ctx.stub_syms.iter().enumerate() {
+        for (i, &sym) in ctx.stubs.symbols.iter().enumerate() {
             let ent = &mut buf[i * 12..];
             let ent_addr = addr + i as u64 * 12;
             let ptr_addr = ctx.stub_ptr_addr(i, sym);
@@ -299,8 +299,8 @@ impl Arch for Arm64 {
         //   adrp x16, dyld_stub_binder@GOTPAGE
         //   ldr  x16, [x16, dyld_stub_binder@GOTPAGEOFF]
         //   br   x16
-        let private = ctx.isec_addr(ctx.dyld_private_isec as usize);
-        let binder = ctx.sym_got_addr(ctx.dyld_stub_binder.unwrap());
+        let private = ctx.isec_addr(ctx.stub_helper.dyld_private_isec as usize);
+        let binder = ctx.sym_got_addr(ctx.stub_helper.dyld_stub_binder.unwrap());
         write32(&mut buf[0..], 0x9000_0011 | page_offset(private, addr));
         write32(&mut buf[4..], 0x9100_0231 | ((private as u32 & 0xfff) << 10));
         write32(&mut buf[8..], 0xa9bf_47f0);
@@ -309,20 +309,20 @@ impl Arch for Arm64 {
         write32(&mut buf[20..], 0xd61f_0200);
         // Each entry: ldr w16, #8 (the lazy-bind offset that follows);
         // b header; .long offset.
-        for i in 0..ctx.stub_syms.len() {
+        for i in 0..ctx.stubs.symbols.len() {
             let off = 24 + i * 12;
             let ent_addr = addr + off as u64;
             write32(&mut buf[off..], 0x1800_0050);
             let rel = addr.wrapping_sub(ent_addr + 4) as i64 >> 2;
             write32(&mut buf[off + 4..], 0x1400_0000 | (rel as u32 & 0x03ff_ffff));
-            write32(&mut buf[off + 8..], ctx.lazy_bind_offsets[i]);
+            write32(&mut buf[off + 8..], ctx.lazy_bind_info.offsets[i]);
         }
     }
 
     fn write_objc_stubs(ctx: &Context<Self>, addr: u64, buf: &mut [u8]) {
-        let msgsend_got = ctx.sym_got_addr(ctx.objc_msgsend_sym.unwrap());
+        let msgsend_got = ctx.sym_got_addr(ctx.objc_stubs.msgsend_sym.unwrap());
 
-        for i in 0..ctx.objc_stubs.len() {
+        for i in 0..ctx.objc_stubs.symbols.len() {
             let ent = &mut buf[i * 32..];
             let ent_addr = addr + i as u64 * 32;
             let sel_addr = ctx.objc_selref_addr(i);

@@ -22,7 +22,7 @@ use crate::error;
 use crate::fatal;
 use crate::input_sections::RelocTarget;
 use crate::macho::*;
-use crate::output_chunks::ChunkKind;
+use crate::output_chunks::{ChunkId, OutputSectionId};
 use crate::output_file;
 use crate::symbol::Origin;
 use crate::util::align_to;
@@ -118,7 +118,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
     let mut extras: Vec<ExtraSection> = Vec::new();
 
     // The merged __objc_imageinfo (create_output_sections folded the
-    // inputs' records into ctx.objc_image_info_flags). The record is
+    // inputs' records into ctx.objc_imageinfo.flags). The record is
     // what makes the Objective-C runtime look at an image at all:
     // without it, dyld never hands the image to the runtime, so no
     // class or category it defines is registered (a class referenced
@@ -129,7 +129,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
     if ctx.objs.iter().any(|o| o.is_alive && o.objc_image_info.is_some()) {
         let mut e = new_extra("__DATA", "__objc_imageinfo", 0, 2, 8);
         e.data = vec![0u8; 8];
-        e.data[4..8].copy_from_slice(&ctx.objc_image_info_flags.to_le_bytes());
+        e.data[4..8].copy_from_slice(&ctx.objc_imageinfo.flags.to_le_bytes());
         extras.push(e);
     }
 
@@ -211,17 +211,16 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
     // the merged ones).
     #[derive(Clone, Copy)]
     enum Sect {
-        Chunk(usize),
+        Chunk(OutputSectionId),
         Extra(usize),
     }
-    let mut sects: Vec<Sect> = (0..ctx.chunks.len())
-        .filter(|&idx| matches!(ctx.chunks[idx].kind, ChunkKind::Output { .. }))
-        .map(Sect::Chunk)
+    let mut sects: Vec<Sect> = (0..ctx.output_sections.len())
+        .map(|i| Sect::Chunk(OutputSectionId::new(i as u32)))
         .chain((0..extras.len()).map(Sect::Extra))
         .collect();
     sects.sort_by_key(|s| match *s {
         Sect::Chunk(i) => {
-            let h = &ctx.chunks[i].hdr;
+            let h = &ctx.output_section(i).hdr;
             section_rank(h.segname, &h.sectname, h.flags)
         }
         Sect::Extra(i) => section_rank(extras[i].segname, extras[i].sectname, extras[i].flags),
@@ -233,10 +232,10 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
     for &s in &sects {
         match s {
             Sect::Chunk(i) => {
-                let chunk = &mut ctx.chunks[i];
-                addr = align_to(addr, 1 << chunk.hdr.p2align);
-                chunk.hdr.addr = addr;
-                addr += chunk.hdr.size;
+                let hdr = &mut ctx.output_section_mut(i).hdr;
+                addr = align_to(addr, 1 << hdr.p2align);
+                hdr.addr = addr;
+                addr += hdr.size;
             }
             Sect::Extra(i) => {
                 addr = align_to(addr, 1 << extras[i].p2align);
@@ -246,7 +245,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
         }
     }
     let vmsize = addr;
-    let section_chunks: Vec<usize> = sects
+    let section_chunks: Vec<OutputSectionId> = sects
         .iter()
         .filter_map(|s| match *s {
             Sect::Chunk(i) => Some(i),
@@ -266,11 +265,10 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
 
     // Section ordinals are 1-based positions among the emitted
     // sections, synthetic ones included.
-    let mut ordinals = vec![0u8; ctx.chunks.len()];
     let mut extra_ordinals = vec![0u8; extras.len()];
     for (i, &s) in sects.iter().enumerate() {
         match s {
-            Sect::Chunk(idx) => ordinals[idx] = i as u8 + 1,
+            Sect::Chunk(id) => ctx.output_section_mut(id).hdr.n_sect = i as u8 + 1,
             Sect::Extra(e) => extra_ordinals[e] = i as u8 + 1,
         }
     }
@@ -282,7 +280,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
         match sym.isec() {
             Some(isec) => {
                 let isec = &ctx.isecs[ctx.resolve_isec(isec as usize)];
-                ctx.chunks[isec.output_section as usize].hdr.addr + isec.offset as u64 + sym.value
+                ctx.chunk_header(isec.output_section().unwrap()).addr + isec.offset as u64 + sym.value
             }
             None => sym.value,
         }
@@ -297,7 +295,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_default();
         for obj_idx in 0..ctx.objs.len() {
-            for (name, mut ent, sym) in crate::passes::plan_object_stabs(ctx, obj_idx, &ordinals, &cwd) {
+            for (name, mut ent, sym) in crate::passes::plan_object_stabs(ctx, obj_idx, &cwd) {
                 if let Some(id) = sym {
                     ent.n_value = sym_addr(ctx, id);
                 }
@@ -361,19 +359,16 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
     // (subsection, record index) -> entry in `locals`; and the record
     // size of each such output section.
     let mut renamed: HashMap<(usize, u64), usize> = HashMap::new();
-    let mut entsize_of: HashMap<usize, u64> = HashMap::new();
+    let mut entsize_of: HashMap<OutputSectionId, u64> = HashMap::new();
     for &chunk_idx in &section_chunks {
-        let chunk = &ctx.chunks[chunk_idx];
+        let chunk = ctx.output_section(chunk_idx);
         let Some((pext, entsize)) =
             rename_kind(chunk.hdr.flags, chunk.hdr.segname, &chunk.hdr.sectname)
         else {
             continue;
         };
         entsize_of.insert(chunk_idx, entsize);
-        let ChunkKind::Output { isecs, .. } = &chunk.kind else {
-            unreachable!()
-        };
-        for &id in isecs {
+        for &id in &chunk.members {
             let id = id as usize;
             let isec = &ctx.isecs[id];
             if !isec.is_alive() || isec.replacement != crate::input_sections::NO_REPLACEMENT {
@@ -390,7 +385,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
                     name: String::new(),
                     n_type: if pext { N_PEXT | N_SECT } else { N_SECT },
                     n_desc: 0,
-                    n_sect: ordinals[chunk_idx],
+                    n_sect: chunk.hdr.n_sect,
                     addr: chunk.hdr.addr + isec.offset as u64 + k * entsize,
                     rename: if entsize == 0 { Rename::Cstring } else { Rename::Anon },
                     syms: Vec::new(),
@@ -400,7 +395,10 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
     }
     // The atom a relocation into one of those sections lands in.
     let atom_target = |t: usize, addend: i64| -> Option<usize> {
-        let entsize = *entsize_of.get(&(ctx.isecs[t].output_section as usize))?;
+        let ChunkId::Output(osec) = ctx.isecs[t].output_section()? else {
+            return None;
+        };
+        let entsize = *entsize_of.get(&osec)?;
         let k = if entsize == 0 { 0 } else { addend as u64 / entsize };
         renamed.get(&(t, k)).copied()
     };
@@ -469,7 +467,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
                 name: sym.name().to_string(),
                 n_type: nlist.n_type,
                 n_desc: nlist.n_desc,
-                n_sect: ordinals[ctx.isecs[isec].output_section as usize],
+                n_sect: ctx.isec_n_sect(&ctx.isecs[isec]),
                 addr: sym_addr(ctx, sym_id),
                 rename: Rename::None,
                 syms: vec![sym_id],
@@ -507,7 +505,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
                     name: sym.name().to_string(),
                     n_type: N_PEXT | N_SECT,
                     n_desc: nlist.n_desc & (N_ALT_ENTRY | N_NO_DEAD_STRIP),
-                    n_sect: ordinals[ctx.isecs[isec].output_section as usize],
+                    n_sect: ctx.isec_n_sect(&ctx.isecs[isec]),
                     addr: sym_addr(ctx, sym_id),
                     rename: Rename::None,
                     syms: vec![sym_id],
@@ -612,7 +610,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
         let (n_type, n_sect) = match sym.isec() {
             Some(isec) => (
                 N_SECT | N_EXT | if sym.is_private_extern() { N_PEXT } else { 0 },
-                ordinals[ctx.isecs[ctx.resolve_isec(isec as usize)].output_section as usize],
+                ctx.isec_n_sect(&ctx.isecs[ctx.resolve_isec(isec as usize)]),
             ),
             None => (N_ABS | N_EXT, 0),
         };
@@ -692,13 +690,13 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
                 cu_relocs.push(MachRel { r_address: entry, bits: symnum | (3 << 25) | (1 << 27) });
             }
             None => {
-                let func_addr = ctx.chunks[isec.output_section as usize].hdr.addr
+                let func_addr = ctx.chunk_header(isec.output_section().unwrap()).addr
                     + isec.offset as u64
                     + rec.input_offset as u64;
                 cu_data.extend_from_slice(&func_addr.to_le_bytes());
                 cu_relocs.push(MachRel {
                     r_address: entry,
-                    bits: ordinals[isec.output_section as usize] as u32 | (3 << 25),
+                    bits: ctx.isec_n_sect(isec) as u32 | (3 << 25),
                 });
             }
         }
@@ -733,11 +731,11 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
                     None => {
                         let l = &ctx.isecs[lsda];
                         let lsda_addr =
-                            ctx.chunks[l.output_section as usize].hdr.addr + l.offset as u64 + off as u64;
+                            ctx.chunk_header(l.output_section().unwrap()).addr + l.offset as u64 + off as u64;
                         cu_data.extend_from_slice(&lsda_addr.to_le_bytes());
                         cu_relocs.push(MachRel {
                             r_address: entry + 24,
-                            bits: ordinals[l.output_section as usize] as u32 | (3 << 25),
+                            bits: ctx.isec_n_sect(l) as u32 | (3 << 25),
                         });
                     }
                 }
@@ -819,7 +817,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
                         }
                         None => {
                             let isec = &ctx.isecs[func_isec];
-                            let func_addr = ctx.chunks[isec.output_section as usize].hdr.addr
+                            let func_addr = ctx.chunk_header(isec.output_section().unwrap()).addr
                                 + isec.offset as u64
                                 + fde.func_offset as u64;
                             eh_patches.push((off + 8, func_addr, 8));
@@ -846,7 +844,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
                             }
                             None => {
                                 let l = &ctx.isecs[lsda];
-                                let lsda_addr = ctx.chunks[l.output_section as usize].hdr.addr
+                                let lsda_addr = ctx.chunk_header(l.output_section().unwrap()).addr
                                     + l.offset as u64
                                     + lsda_off as u64;
                                 eh_patches.push((off + pos as u32, lsda_addr, size));
@@ -867,9 +865,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
     // Regenerate each section's relocations against the merged tables.
     let mut sect_relocs: Vec<Vec<MachRel>> = Vec::new();
     for &chunk_idx in &section_chunks {
-        let ChunkKind::Output { isecs, .. } = &ctx.chunks[chunk_idx].kind else {
-            unreachable!()
-        };
+        let isecs = &ctx.output_section(chunk_idx).members;
         let mut rels: Vec<MachRel> = Vec::new();
         for &id in isecs {
             let isec = &ctx.isecs[id];
@@ -918,7 +914,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
                             continue;
                         }
                         let t = &ctx.isecs[target];
-                        let ord = ordinals[t.output_section as usize] as u32;
+                        let ord = ctx.isec_n_sect(t) as u32;
                         rels.push(MachRel {
                             r_address,
                             bits: ord
@@ -976,8 +972,8 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
     for &s in &sects {
         let (addr, size, zerofill) = match s {
             Sect::Chunk(i) => {
-                let c = &ctx.chunks[i];
-                (c.hdr.addr, c.hdr.size, c.is_zerofill())
+                let h = &ctx.output_section(i).hdr;
+                (h.addr, h.size, h.is_zerofill())
             }
             Sect::Extra(i) => (extras[i].addr, extras[i].size, false),
         };
@@ -994,7 +990,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
         let fileoff = seg_fileoff + addr - skipped;
         match s {
             Sect::Chunk(i) => {
-                ctx.chunks[i].hdr.fileoff = fileoff;
+                ctx.output_sections[i.index()].hdr.fileoff = fileoff;
                 sect_offsets.push(fileoff);
             }
             Sect::Extra(i) => extras[i].fileoff = fileoff,
@@ -1069,7 +1065,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
             Sect::Chunk(chunk_idx) => {
                 let i = ci;
                 ci += 1;
-                let chunk = &ctx.chunks[chunk_idx];
+                let chunk = ctx.output_section(chunk_idx);
                 MachSection {
                     sectname: str_to_name(&chunk.hdr.sectname),
                     segname: str_to_name(chunk.hdr.segname),
@@ -1162,9 +1158,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
     // Section contents: raw copies, with non-external targets' embedded
     // addresses rewritten into the merged address space.
     for (i, &chunk_idx) in section_chunks.iter().enumerate() {
-        let ChunkKind::Output { isecs, .. } = &ctx.chunks[chunk_idx].kind else {
-            unreachable!()
-        };
+        let isecs = &ctx.output_section(chunk_idx).members;
         if sect_offsets[i] == 0 {
             continue;
         }
@@ -1184,7 +1178,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
                 let target = ctx.resolve_isec(target as usize);
                 let t = &ctx.isecs[target];
                 let target_addr =
-                    ctx.chunks[t.output_section as usize].hdr.addr + t.offset as u64 + rel.addend as u64;
+                    ctx.chunk_header(t.output_section().unwrap()).addr + t.offset as u64 + rel.addend as u64;
                 let loc = dst + rel.offset as usize;
                 if let Some(e) = atom_target(target, rel.addend) {
                     // Now a relocation against the atom's symbol: the
@@ -1210,7 +1204,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
                     }
                 } else if rel.is_pcrel {
                     // Pcrel non-external fields embed target - (P + 4).
-                    let here = ctx.chunks[chunk_idx].hdr.addr
+                    let here = ctx.output_section(chunk_idx).hdr.addr
                         + isec.offset as u64
                         + rel.offset as u64;
                     let val = target_addr
