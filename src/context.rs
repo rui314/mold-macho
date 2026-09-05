@@ -374,14 +374,24 @@ impl<E: Arch> Context<E> {
     /// Mutable access to a symbol's slot indices, growing the side table
     /// to cover it. Called only from the serial slot-assignment passes.
     pub fn sym_aux_mut(&mut self, id: SymbolId) -> &mut crate::symbol::SymAux {
+        Self::sym_aux_mut_in(&mut self.symtab, &mut self.sym_aux, id)
+    }
+
+    /// `sym_aux_mut` over the two tables it touches, for callers that
+    /// hold another part of the context borrowed at the same time.
+    pub fn sym_aux_mut_in<'a>(
+        symtab: &mut crate::symbol::SymbolTable,
+        sym_aux: &'a mut Vec<crate::symbol::SymAux>,
+        id: SymbolId,
+    ) -> &'a mut crate::symbol::SymAux {
         // Allocate the symbol's entry on first use; the table holds only
         // the symbols that take a slot (mold-rust's sparse SymbolAux).
-        if self.symtab[id].aux_idx == crate::symbol::NONE {
-            self.symtab[id].aux_idx = self.sym_aux.len() as u32;
-            self.sym_aux.push(Default::default());
+        if symtab[id].aux_idx == crate::symbol::NONE {
+            symtab[id].aux_idx = sym_aux.len() as u32;
+            sym_aux.push(Default::default());
         }
-        let i = self.symtab[id].aux_idx as usize;
-        &mut self.sym_aux[i]
+        let i = symtab[id].aux_idx as usize;
+        &mut sym_aux[i]
     }
 
     /// A subsection's relocations, sliced from its object's reloc arena

@@ -233,20 +233,23 @@ fn scan_batch<E: Arch>(
 /// branch can pick the entry within reach. mold-rust's
 /// gather_thunk_addresses.
 pub fn gather_thunk_addresses<E: Arch>(ctx: &mut Context<E>, chunk_idxs: &[usize]) {
-    let mut entries: Vec<(SymbolId, u64)> = Vec::new();
+    // The chunks are read while the symbol tables are written, so the
+    // borrows are split and the addresses recorded as the thunks are
+    // walked, without a temporary list (mold-rust 94e2104).
+    let chunks = &ctx.chunks;
+    let symtab = &mut ctx.symtab;
+    let sym_aux = &mut ctx.sym_aux;
     for &ci in chunk_idxs {
-        let base = ctx.chunks[ci].hdr.addr;
-        let ChunkKind::Output { thunks, .. } = &ctx.chunks[ci].kind else {
+        let base = chunks[ci].hdr.addr;
+        let ChunkKind::Output { thunks, .. } = &chunks[ci].kind else {
             continue;
         };
         for thunk in thunks {
             for (i, &sym) in thunk.syms.iter().enumerate() {
-                entries.push((sym, base + thunk.offset + i as u64 * E::THUNK_SIZE));
+                let addr = base + thunk.offset + i as u64 * E::THUNK_SIZE;
+                Context::<E>::sym_aux_mut_in(symtab, sym_aux, sym).thunk_addrs.push(addr);
             }
         }
-    }
-    for (sym, addr) in entries {
-        ctx.sym_aux_mut(sym).thunk_addrs.push(addr);
     }
 }
 
