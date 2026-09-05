@@ -25,7 +25,7 @@ use std::num::NonZeroU32;
 use crate::arch::Arch;
 use crate::context::Context;
 use crate::macho::*;
-use crate::symbol::Origin;
+use crate::input_files::FileId;
 
 pub use output_section::{OutputSection, Tail, Thunk};
 
@@ -651,8 +651,8 @@ pub fn copy_mach_header<E: Arch>(ctx: &Context<E>, buf: &mut [u8]) {
     // definitions (dyld must then consider weak coalescing when it
     // binds). ld-prime sets it on an executable calling a dylib's
     // weak definition, and on any image with weak-lookup binds.
-    if ctx.symbols.syms.iter().any(|sym| match sym.origin() {
-        Origin::Dylib(idx) => {
+    if ctx.symbols.syms.iter().any(|sym| match sym.file() {
+        Some(FileId::Dylib(idx)) => {
             idx != u32::MAX && sym.is_used() && ctx.dylibs[idx as usize].weak_exports.contains(sym.name())
         }
         _ => false,

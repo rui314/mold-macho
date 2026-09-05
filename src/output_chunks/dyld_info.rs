@@ -7,7 +7,7 @@ use crate::context::Context;
 use crate::macho::*;
 use crate::output_chunks::ChunkHeader;
 use crate::passes::{objc_ref_addr, DataField};
-use crate::symbol::Origin;
+use crate::input_files::FileId;
 use crate::util::write_uleb;
 
 /// The rebase opcode stream: every pointer dyld slides.
@@ -272,7 +272,7 @@ pub fn build_lazy_bind_info<E: Arch>(ctx: &Context<E>) -> (Vec<u8>, Vec<u32>) {
         buf.push(BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB | seg as u8);
         write_uleb(&mut buf, off);
         let sym = &ctx.symbols[id];
-        let Origin::Dylib(dylib) = sym.origin() else {
+        let Some(FileId::Dylib(dylib)) = sym.file() else {
             unreachable!()
         };
         let ordinal = ctx.bind_ordinal(dylib);
@@ -354,7 +354,7 @@ pub fn build_bind_info<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
     let mut last_addend = 0i64;
     for (addr, id, addend) in binds {
         let sym = &ctx.symbols[id];
-        let Origin::Dylib(dylib) = sym.origin() else {
+        let Some(FileId::Dylib(dylib)) = sym.file() else {
             unreachable!()
         };
         let ordinal = ctx.bind_ordinal(dylib);

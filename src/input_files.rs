@@ -10,6 +10,16 @@ use crate::symbol::SymbolId;
 use crate::tapi;
 
 /// A relocatable object file.
+/// A file a symbol is owned by: an object or a dylib, by index in
+/// ctx.objs or ctx.dylibs. Dylib(u32::MAX) is an import resolved by
+/// dynamic lookup, which no dylib in the link provides. mold-rust's
+/// FileId.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FileId {
+    Obj(u32),
+    Dylib(u32),
+}
+
 #[derive(Debug)]
 pub struct ObjectFile {
     pub mf: &'static MappedFile,

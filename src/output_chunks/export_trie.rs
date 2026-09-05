@@ -4,7 +4,8 @@ use crate::arch::Arch;
 use crate::context::Context;
 use crate::macho::*;
 use crate::output_chunks::ChunkHeader;
-use crate::symbol::{Origin, SymbolId};
+use crate::input_files::FileId;
+use crate::symbol::SymbolId;
 
 #[derive(Debug)]
 pub struct ExportTrieSection {
@@ -153,7 +154,7 @@ pub fn encode_export_trie<E: Arch>(
                 return None;
             }
             if let Some(&(_, target)) = ctx.indirect_aliases.iter().find(|&&(a, _)| a == id) {
-                let Origin::Dylib(dylib) = ctx.symbols[target].origin() else {
+                let Some(FileId::Dylib(dylib)) = ctx.symbols[target].file() else {
                     return None;
                 };
                 let ordinal = ctx.bind_ordinal(dylib) as u32;

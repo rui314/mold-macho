@@ -9,7 +9,8 @@ use crate::fatal;
 use crate::passes::file_display;
 use crate::macho::*;
 use crate::output_chunks::ChunkHeader;
-use crate::symbol::{Origin, SymbolId};
+use crate::input_files::FileId;
+use crate::symbol::SymbolId;
 
 #[derive(Debug)]
 pub struct ChainedFixupsSection {
@@ -180,8 +181,8 @@ pub fn build_chained_fixups<E: Arch>(ctx: &Context<E>) -> ChainedFixups {
         // makes dyld search every loaded image for the coalesced
         // winner.
         let ordinal_bits = |bits: u32| -> u64 {
-            match s.origin() {
-                Origin::Dylib(dylib) if !ctx.binds_weak_lookup(sym) => {
+            match s.file() {
+                Some(FileId::Dylib(dylib)) if !ctx.binds_weak_lookup(sym) => {
                     ctx.chained_import_ordinal(dylib, bits)
                 }
                 _ => (BIND_SPECIAL_DYLIB_WEAK_LOOKUP as i64 as u64) & ((1u64 << bits) - 1),

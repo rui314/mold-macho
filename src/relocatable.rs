@@ -24,7 +24,7 @@ use crate::input_sections::RelocTarget;
 use crate::macho::*;
 use crate::output_chunks::{ChunkId, OutputSectionId};
 use crate::output_file;
-use crate::symbol::Origin;
+use crate::input_files::FileId;
 use crate::util::align_to;
 
 /// ld64's section order in a -r output, measured with ld-prime:
@@ -492,7 +492,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
                 if nlist.is_stab()
                     || !nlist.is_extern()
                     || nlist.n_type & N_PEXT == 0
-                    || !matches!(sym.origin(), Origin::Obj(o) if o as usize == obj_idx)
+                    || !matches!(sym.file(), Some(FileId::Obj(o)) if o as usize == obj_idx)
                 {
                     continue;
                 }
@@ -585,7 +585,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
             if !nlist.is_stab()
                 && nlist.is_extern()
                 && nlist.n_type() != N_UNDF
-                && matches!(ctx.symbols[sym_id].origin(), Origin::Obj(o) if o as usize == obj_idx)
+                && matches!(ctx.symbols[sym_id].file(), Some(FileId::Obj(o)) if o as usize == obj_idx)
             {
                 desc_of.insert(sym_id, nlist.n_desc);
             }
@@ -598,7 +598,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
             let sym = &ctx.symbols[i];
             sym.is_extern()
                 && (keep_pext || !sym.is_private_extern())
-                && matches!(sym.origin(), Origin::Obj(_))
+                && matches!(sym.file(), Some(FileId::Obj(_)))
                 && sym
                     .input_section()
                     .is_none_or(|isec| ctx.isecs[ctx.resolve_isec(isec as usize)].is_alive())

@@ -21,7 +21,7 @@ use crate::arch::Arch;
 use crate::context::Context;
 use crate::input_sections::RelocTarget;
 use crate::macho::*;
-use crate::symbol::Origin;
+use crate::input_files::FileId;
 
 /// A stable identifier for what a relocation edge points at.
 #[derive(Hash, PartialEq, Eq, Clone, Copy)]
@@ -340,7 +340,7 @@ pub fn icf_sections<E: Arch>(ctx: &mut Context<E>) {
             RelocTarget::Sym(idx) => {
                 let sym_id = ctx.objs[obj].symbols[idx as usize];
                 let sym = &ctx.symbols[sym_id];
-                if let (Origin::Obj(_), Some(isec)) = (sym.origin(), sym.input_section()) {
+                if let (Some(FileId::Obj(_)), Some(isec)) = (sym.file(), sym.input_section()) {
                     let isec = ctx.resolve_isec(isec as usize);
                     if cand_index[isec] != usize::MAX {
                         return (Edge::Candidate(cand_index[isec]), addend + sym.value as i64);

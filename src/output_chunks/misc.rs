@@ -6,7 +6,7 @@ use crate::arch::Arch;
 use crate::context::Context;
 use crate::macho::*;
 use crate::output_chunks::ChunkHeader;
-use crate::symbol::Origin;
+use crate::input_files::FileId;
 use crate::util::{align_to, write_uleb};
 
 /// A section created from a file by -sectcreate, or an empty one for
@@ -296,7 +296,7 @@ pub fn build_function_starts<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
         .syms
         .par_iter()
         .filter_map(|sym| {
-            if !matches!(sym.origin(), Origin::Obj(_)) {
+            if !matches!(sym.file(), Some(FileId::Obj(_))) {
                 return None;
             }
             let isec = &ctx.isecs[ctx.resolve_isec(sym.input_section()? as usize)];

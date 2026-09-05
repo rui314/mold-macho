@@ -12,7 +12,7 @@ use crate::arch::Arch;
 use crate::context::Context;
 use crate::input_sections::RelocTarget;
 use crate::macho::*;
-use crate::symbol::Origin;
+use crate::input_files::FileId;
 
 /// Removes subsections that are not reachable from the roots: the entry
 /// point, exported symbols (for a dylib), and everything the format
@@ -309,7 +309,7 @@ fn print_why_live<E: Arch>(ctx: &Context<E>, pred: &[usize]) {
     // symbol defined at it, else any named local.
     let mut name_of: std::collections::HashMap<usize, &str> = std::collections::HashMap::new();
     for sym in &ctx.symbols.syms {
-        if !matches!(sym.origin(), Origin::Obj(_)) || sym.name().is_empty() {
+        if !matches!(sym.file(), Some(FileId::Obj(_))) || sym.name().is_empty() {
             continue;
         }
         let Some(isec) = sym.input_section().map(|i| i as usize) else { continue };
@@ -339,7 +339,7 @@ fn print_why_live<E: Arch>(ctx: &Context<E>, pred: &[usize]) {
     };
 
     for sym in &ctx.symbols.syms {
-        if !matches!(sym.origin(), Origin::Obj(_))
+        if !matches!(sym.file(), Some(FileId::Obj(_)))
             || !ctx.args.why_live.iter().any(|p| matches(p, sym.name()))
         {
             continue;

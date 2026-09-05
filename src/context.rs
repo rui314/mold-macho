@@ -6,7 +6,7 @@ use std::marker::PhantomData;
 use crate::arch::Arch;
 use crate::cmdline::Args;
 use crate::error;
-use crate::input_files::{DylibFile, ObjectFile};
+use crate::input_files::{DylibFile, FileId, ObjectFile};
 use crate::macho::{S_THREAD_LOCAL_REGULAR, S_THREAD_LOCAL_ZEROFILL};
 use crate::input_sections::{InputSection, Reloc, RelocTarget};
 use crate::output_chunks::chained_fixups::ChainedFixupsSection;
@@ -28,7 +28,7 @@ use crate::output_chunks::unwind_info::UnwindInfoSection;
 use crate::output_chunks::{
     ChunkHeader, ChunkId, OutputMachHeader, OutputSection, OutputSectionId, OutputSegment,
 };
-use crate::symbol::{Origin, SymbolId, SymbolTable};
+use crate::symbol::{SymbolId, SymbolTable};
 
 pub struct Context<E: Arch> {
     pub args: Args,
@@ -460,12 +460,12 @@ impl<E: Arch> Context<E> {
     /// Returns the output address of a symbol.
     pub fn sym_addr(&self, id: SymbolId) -> u64 {
         let sym = &self.symbols[id];
-        match sym.origin() {
-            Origin::Undef => {
+        match sym.file() {
+            None => {
                 error!("undefined symbol: {}", sym.name());
                 0
             }
-            Origin::Obj(_) => {
+            Some(FileId::Obj(_)) => {
                 if let Some(isec) = sym.input_section().map(|i| i as usize) {
                     self.isec_addr(isec) + sym.value
                 } else if self.sym_aux(id).objc_stub_idx != crate::symbol::NO_IDX {
@@ -478,7 +478,7 @@ impl<E: Arch> Context<E> {
             // A branch to a dylib symbol goes through its stub. Other
             // references to dylib symbols are filled in by dyld; the
             // relocation scan has already validated them.
-            Origin::Dylib(_) => {
+            Some(FileId::Dylib(_)) => {
                 if self.sym_aux(id).stub_idx != crate::symbol::NO_IDX {
                     self.sym_stub_addr(id)
                 } else {
@@ -526,7 +526,7 @@ impl<E: Arch> Context<E> {
             return false;
         }
         let sym = &self.symbols[id];
-        matches!(sym.origin(), Origin::Obj(_))
+        matches!(sym.file(), Some(FileId::Obj(_)))
             && sym.is_weak_def()
             && sym.is_extern()
             && !sym.is_private_extern()
@@ -546,7 +546,7 @@ impl<E: Arch> Context<E> {
     /// definition (ld64 does both).
     pub fn overrides_weak_export(&self, id: SymbolId) -> bool {
         let sym = &self.symbols[id];
-        matches!(sym.origin(), Origin::Obj(_))
+        matches!(sym.file(), Some(FileId::Obj(_)))
             && sym.is_extern()
             && !sym.is_private_extern()
             && !sym.is_weak_def()
@@ -565,8 +565,8 @@ impl<E: Arch> Context<E> {
             return true;
         }
         let sym = &self.symbols[id];
-        match sym.origin() {
-            Origin::Dylib(d) if d != u32::MAX => {
+        match sym.file() {
+            Some(FileId::Dylib(d)) if d != u32::MAX => {
                 self.dylibs[d as usize].weak_exports.contains(sym.name())
             }
             _ => false,

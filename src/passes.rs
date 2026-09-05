@@ -19,7 +19,7 @@ use crate::output_chunks::{
     mach_header_size,
 };
 use crate::arch::RelocClass;
-use crate::symbol::Origin;
+use crate::input_files::FileId;
 use crate::tapi;
 use crate::util::align_to;
 
@@ -545,7 +545,7 @@ pub fn claim_new_dylibs<E: Arch>(ctx: &mut Context<E>, first: usize) {
         }
         for (dylib_idx, dylib) in dylibs.iter().enumerate().skip(first) {
             if dylib.exports.contains(sym.name()) {
-                sym.set_origin(Origin::Dylib((dylib_idx) as u32));
+                sym.set_file(FileId::Dylib((dylib_idx) as u32));
                 sym.set_is_imported(true);
                 sym.set_is_extern(true);
                 sym.set_input_section(None);
@@ -606,7 +606,7 @@ fn claim_locals<E: Arch>(ctx: &mut Context<E>) {
             let sym = unsafe { &mut *ptr.0.add(obj.symbols[i] as usize) };
             match nlist.n_type() {
                 N_ABS => {
-                    sym.set_origin(Origin::Obj((obj_idx) as u32));
+                    sym.set_file(FileId::Obj((obj_idx) as u32));
                     sym.set_input_section(None);
                     sym.value = nlist.n_value;
                 }
@@ -614,7 +614,7 @@ fn claim_locals<E: Arch>(ctx: &mut Context<E>) {
                     if let Some((isec, off)) =
                         crate::input_files::find_subsec(isecs, &obj.subsecs, nlist.n_value)
                     {
-                        sym.set_origin(Origin::Obj((obj_idx) as u32));
+                        sym.set_file(FileId::Obj((obj_idx) as u32));
                         sym.set_input_section(Some(isec as u32));
                         sym.value = off;
                         sym.set_no_dead_strip(nlist.n_desc & (N_NO_DEAD_STRIP | REFERENCED_DYNAMICALLY) != 0);
@@ -629,8 +629,8 @@ fn claim_locals<E: Arch>(ctx: &mut Context<E>) {
 fn clear_claims<E: Arch>(ctx: &mut Context<E>) {
     use rayon::prelude::*;
     ctx.symbols.syms.par_iter_mut().for_each(|sym| {
-        if matches!(sym.origin(), Origin::Obj(_) | Origin::Dylib(_)) || sym.is_common() {
-            sym.set_origin(Origin::Undef);
+        if matches!(sym.file(), Some(FileId::Obj(_)) | Some(FileId::Dylib(_))) || sym.is_common() {
+            sym.clear_file();
             sym.set_input_section(None);
             sym.value = 0;
             sym.set_is_weak_def(false);
@@ -786,12 +786,12 @@ fn do_resolve<E: Arch>(ctx: &mut Context<E>, only_alive: bool) {
 
                 match nlist.n_type() {
                     N_ABS => {
-                        sym.set_origin(Origin::Obj((obj_idx) as u32));
+                        sym.set_file(FileId::Obj((obj_idx) as u32));
                         sym.set_input_section(None);
                         sym.value = nlist.n_value;
                     }
                     N_SECT => {
-                        sym.set_origin(Origin::Obj((obj_idx) as u32));
+                        sym.set_file(FileId::Obj((obj_idx) as u32));
                         match crate::input_files::find_subsec(
                             isecs,
                             &obj.subsecs,
@@ -804,14 +804,14 @@ fn do_resolve<E: Arch>(ctx: &mut Context<E>, only_alive: bool) {
                             None => {
                                 // A symbol in a discarded (debug)
                                 // section resolves as if undefined.
-                                sym.set_origin(Origin::Undef);
+                                sym.clear_file();
                                 best[sym_id as usize].store(u64::MAX, Ordering::Relaxed);
                             }
                         }
                     }
                     N_UNDF => {
                         // A common symbol takes a tentative claim.
-                        sym.set_origin(Origin::Undef);
+                        sym.clear_file();
                         sym.set_is_common(true);
                         sym.value = nlist.n_value;
                         sym.common_p2align = ((nlist.n_desc >> 8) & 0xf) as u8;
@@ -888,7 +888,7 @@ fn do_resolve<E: Arch>(ctx: &mut Context<E>, only_alive: bool) {
             let rank = (2u64 << 32) | dylib.priority as u64;
             if rank < best[i].load(Ordering::Relaxed) && dylib.exports.contains(sym.name()) {
                 best[i].store(rank, Ordering::Relaxed);
-                sym.set_origin(Origin::Dylib((dylib_idx) as u32));
+                sym.set_file(FileId::Dylib((dylib_idx) as u32));
                 sym.set_is_imported(true);
                 sym.set_is_extern(true);
                 sym.set_input_section(None);
@@ -919,7 +919,7 @@ fn mark_live_objects<E: Arch>(ctx: &mut Context<E>) {
     root_syms.extend(ctx.args.forced_undefined.iter().map(String::as_str));
     for name in root_syms {
         if let Some(id) = ctx.symbols.get(name) {
-            if let Origin::Obj(owner) = ctx.symbols[id].origin() {
+            if let Some(FileId::Obj(owner)) = ctx.symbols[id].file() {
                 let owner = owner as usize;
                 if !ctx.objs[owner].is_alive {
                     ctx.objs[owner].is_alive = true;
@@ -937,7 +937,7 @@ fn mark_live_objects<E: Arch>(ctx: &mut Context<E>) {
                 continue;
             }
             let sym_id = ctx.objs[obj_idx].symbols[i];
-            if let Origin::Obj(owner) = ctx.symbols[sym_id].origin() {
+            if let Some(FileId::Obj(owner)) = ctx.symbols[sym_id].file() {
                 let owner = owner as usize;
                 if !ctx.objs[owner].is_alive {
                     ctx.objs[owner].is_alive = true;
@@ -982,7 +982,7 @@ pub fn do_lto<E: Arch>(ctx: &mut Context<E>) -> bool {
         let executable = ctx.args.output_type == MH_EXECUTE;
         let mut preserve: Vec<std::ffi::CString> = Vec::new();
         for sym in &ctx.symbols.syms {
-            if let Origin::Obj(idx) = sym.origin() {
+            if let Some(FileId::Obj(idx)) = sym.file() {
                 if ctx.objs[idx as usize].lto_module.is_some() && sym.is_extern() {
                     if executable
                         && !ctx.args.export_dynamic
@@ -1037,8 +1037,8 @@ pub fn do_lto<E: Arch>(ctx: &mut Context<E>) -> bool {
         let ids = ctx.objs[obj_idx].symbols.clone();
         for id in ids {
             let sym = &mut ctx.symbols[id];
-            if sym.origin() == Origin::Obj((obj_idx) as u32) {
-                sym.set_origin(Origin::Undef);
+            if sym.file() == Some(FileId::Obj(obj_idx as u32)) {
+                sym.clear_file();
                 sym.set_input_section(None);
                 sym.value = 0;
                 sym.set_is_weak_def(false);
@@ -1096,7 +1096,7 @@ pub fn convert_common_symbols<E: Arch>(ctx: &mut Context<E>) {
         });
 
         let sym = &mut ctx.symbols[i];
-        sym.set_origin(Origin::Obj(internal));
+        sym.set_file(FileId::Obj(internal));
         sym.set_input_section(Some((ctx.isecs.len() - 1) as u32));
         sym.value = 0;
         sym.set_is_common(false);
@@ -1408,7 +1408,7 @@ pub fn create_objc_msgsend_stubs<E: Arch>(ctx: &mut Context<E>) {
         };
         let sel = sel.to_string();
         let idx = ctx.objc_stubs.symbols.len() as u32;
-        ctx.symbols[i].set_origin(Origin::Obj(internal));
+        ctx.symbols[i].set_file(FileId::Obj(internal));
         ctx.sym_aux_mut(i as u32).objc_stub_idx = idx;
         ctx.objc_stubs.symbols.push((i as u32, sel));
     }
@@ -1427,7 +1427,7 @@ pub fn create_objc_msgsend_stubs<E: Arch>(ctx: &mut Context<E>) {
                 .position(|d| d.exports.contains("_objc_msgSend"))
             {
                 let sym = &mut ctx.symbols[id];
-                sym.set_origin(Origin::Dylib((dylib) as u32));
+                sym.set_file(FileId::Dylib((dylib) as u32));
                 sym.set_is_imported(true);
                 sym.set_is_extern(true);
             }
@@ -1506,7 +1506,7 @@ pub fn auto_hide_weak_defs<E: Arch>(ctx: &mut Context<E>) {
                 && f & NOT_HIDABLE == 0
                 && sym.is_weak_def()
                 && sym.is_extern()
-                && matches!(sym.origin(), Origin::Obj(_))
+                && matches!(sym.file(), Some(FileId::Obj(_)))
                 && !exported.is_some_and(|list| list.iter().any(|n| n == sym.name()))
             {
                 sym.set_is_private_extern(true);
@@ -1565,7 +1565,7 @@ pub fn coalesce_weak_defs<E: Arch>(ctx: &mut Context<E>) {
                     continue;
                 }
                 let sym = &shared.symbols[sym_id];
-                let Origin::Obj(owner) = sym.origin() else { continue };
+                let Some(FileId::Obj(owner)) = sym.file() else { continue };
                 if owner as usize == obj_idx {
                     continue;
                 }
@@ -1654,8 +1654,8 @@ pub fn check_duplicate_symbols<E: Arch>(ctx: &Context<E>) {
                 {
                     return None;
                 }
-                match ctx.symbols[sym_id].origin() {
-                    Origin::Obj(owner) if owner as usize != obj_idx => Some((sym_id, obj_idx)),
+                match ctx.symbols[sym_id].file() {
+                    Some(FileId::Obj(owner)) if owner as usize != obj_idx => Some((sym_id, obj_idx)),
                     _ => None,
                 }
             })
@@ -1664,8 +1664,8 @@ pub fn check_duplicate_symbols<E: Arch>(ctx: &Context<E>) {
     duplicates.sort_by_key(|&(sym_id, obj_idx)| (ctx.symbols[sym_id].name(), obj_idx));
     duplicates.dedup();
     for (sym_id, obj_idx) in duplicates {
-        let prev = match ctx.symbols[sym_id].origin() {
-            Origin::Obj(idx) => file_display(&ctx.objs[idx as usize]),
+        let prev = match ctx.symbols[sym_id].file() {
+            Some(FileId::Obj(idx)) => file_display(&ctx.objs[idx as usize]),
             _ => "?".to_string(),
         };
         error!(
@@ -1713,7 +1713,7 @@ pub fn report_undef_errors<E: Arch>(ctx: &mut Context<E>) {
                     crate::warn!("undefined symbol: {}", ctx.symbols[i].name());
                 }
                 let sym = &mut ctx.symbols[i];
-                sym.set_origin(Origin::Dylib((usize::MAX) as u32));
+                sym.set_file(FileId::Dylib((usize::MAX) as u32));
                 sym.set_is_imported(true);
                 sym.set_is_extern(true);
             } else {
@@ -1743,15 +1743,15 @@ pub fn print_dependencies<E: Arch>(ctx: &Context<E>) {
                 continue;
             }
             let sym = &ctx.symbols[sym_id];
-            let provider = match sym.origin() {
-                Origin::Obj(idx) => {
+            let provider = match sym.file() {
+                Some(FileId::Obj(idx)) => {
                     let idx = idx as usize;
                     if !ctx.objs[idx].is_alive || std::ptr::eq(&ctx.objs[idx], obj) {
                         continue;
                     }
                     file_display(&ctx.objs[idx])
                 }
-                Origin::Dylib(idx) if idx != u32::MAX => {
+                Some(FileId::Dylib(idx)) if idx != u32::MAX => {
                     ctx.dylibs[idx as usize].install_name.clone()
                 }
                 _ => continue,
@@ -1836,7 +1836,7 @@ pub fn dead_strip_dylibs<E: Arch>(ctx: &mut Context<E>) {
     let mut bound = vec![0u32; ctx.dylibs.len()];
     let mut weak = vec![0u32; ctx.dylibs.len()];
     for sym in &ctx.symbols.syms {
-        if let Origin::Dylib(idx) = sym.origin() {
+        if let Some(FileId::Dylib(idx)) = sym.file() {
             if idx != u32::MAX {
                 used[idx as usize] = true;
                 if sym.is_used() {
@@ -1862,9 +1862,9 @@ pub fn dead_strip_dylibs<E: Arch>(ctx: &mut Context<E>) {
     }
 
     for sym in &mut ctx.symbols.syms {
-        if let Origin::Dylib(idx) = sym.origin() {
+        if let Some(FileId::Dylib(idx)) = sym.file() {
             if idx != u32::MAX {
-                sym.set_origin(Origin::Dylib(remap[idx as usize] as u32));
+                sym.set_file(FileId::Dylib(remap[idx as usize] as u32));
             }
         }
     }
@@ -1975,11 +1975,11 @@ pub fn scan_relocations<E: Arch>(ctx: &mut Context<E>) {
 /// thread-local. Symbols left to runtime lookup pass as either.
 pub fn is_thread_local_sym<E: Arch>(ctx: &Context<E>, id: crate::symbol::SymbolId) -> bool {
     let sym = &ctx.symbols[id];
-    match sym.origin() {
-        crate::symbol::Origin::Obj(_) => sym.input_section().map(|i| i as usize).is_some_and(|isec| {
+    match sym.file() {
+        Some(FileId::Obj(_)) => sym.input_section().map(|i| i as usize).is_some_and(|isec| {
             ctx.hdr_of(&ctx.isecs[isec]).flags & SECTION_TYPE == S_THREAD_LOCAL_VARIABLES
         }),
-        crate::symbol::Origin::Dylib(idx) => {
+        Some(FileId::Dylib(idx)) => {
             idx != u32::MAX && ctx.dylibs[idx as usize].tlv_exports.contains(sym.name())
         }
         _ => false,
@@ -3244,7 +3244,7 @@ pub fn add_synthetic_symbols<E: Arch>(ctx: &mut Context<E>) {
         let id = ctx.symbols.intern("__mh_execute_header");
         let sym = &mut ctx.symbols[id];
         if !sym.is_defined() {
-            sym.set_origin(Origin::Obj(internal));
+            sym.set_file(FileId::Obj(internal));
             sym.value = ctx.args.pagezero_size;
             sym.set_is_extern(true);
         }
@@ -3256,7 +3256,7 @@ pub fn add_synthetic_symbols<E: Arch>(ctx: &mut Context<E>) {
     let id = ctx.symbols.intern("___dso_handle");
     let sym = &mut ctx.symbols[id];
     if !sym.is_defined() {
-        sym.set_origin(Origin::Obj(internal));
+        sym.set_file(FileId::Obj(internal));
         sym.value = ctx.args.pagezero_size;
         sym.set_is_extern(false);
     }
@@ -3285,7 +3285,7 @@ pub fn add_synthetic_symbols<E: Arch>(ctx: &mut Context<E>) {
             // `-alias _NSExtensionMain ___debug_main_executable_dylib_entry_point`.
             if !ctx.symbols[dst].is_defined() {
                 let sym = &mut ctx.symbols[dst];
-                sym.set_origin(Origin::Obj(internal));
+                sym.set_file(FileId::Obj(internal));
                 sym.set_input_section(None);
                 sym.value = 0;
                 sym.set_is_extern(true);
@@ -3294,12 +3294,12 @@ pub fn add_synthetic_symbols<E: Arch>(ctx: &mut Context<E>) {
             continue;
         }
         if !ctx.symbols[dst].is_defined() {
-            let (origin, isec, value) = {
+            let (file, isec, value) = {
                 let s = &ctx.symbols[src];
-                (s.origin(), s.input_section(), s.value)
+                (s.file(), s.input_section(), s.value)
             };
             let sym = &mut ctx.symbols[dst];
-            sym.set_origin(origin);
+            sym.set_file(file.expect("alias of a defined symbol"));
             sym.set_input_section(isec);
             sym.value = value;
             sym.set_is_extern(true);
@@ -3334,7 +3334,7 @@ pub fn add_synthetic_symbols<E: Arch>(ctx: &mut Context<E>) {
             continue;
         };
         let sym = &mut ctx.symbols[id];
-        sym.set_origin(Origin::Obj(internal));
+        sym.set_file(FileId::Obj(internal));
         sym.set_is_extern(false);
         ctx.boundary_syms.push((id as u32, is_start, seg, sect));
     }
@@ -4305,7 +4305,7 @@ pub fn plan_object_stabs<E: Arch>(
     for (nlist, &sym_id) in obj.nlists.iter().zip(&obj.symbols) {
         let sym = &ctx.symbols[sym_id];
         if nlist.is_stab()
-            || !matches!(sym.origin(), Origin::Obj(o) if o as usize == obj_idx)
+            || !matches!(sym.file(), Some(FileId::Obj(o)) if o as usize == obj_idx)
             || (!nlist.is_extern() && !keep_local_symbol_in(ctx, sym.name(), sym.input_section()))
         {
             continue;
@@ -4533,7 +4533,7 @@ pub fn create_output_symtab<E: Arch>(
                     }
                     let Some(isec) = sym.input_section().map(|i| i as usize) else { continue };
                     let isec = ctx_ref.resolve_isec(isec);
-                    if !matches!(sym.origin(), Origin::Obj(_)) || !ctx_ref.isecs[isec].is_alive() {
+                    if !matches!(sym.file(), Some(FileId::Obj(_))) || !ctx_ref.isecs[isec].is_alive() {
                         continue;
                     }
                     let ent = NList {
@@ -4613,12 +4613,12 @@ pub fn create_output_symtab<E: Arch>(
             .into_par_iter()
             .map(|i| {
                 let sym = &ctx.symbols[i];
-                if matches!(sym.origin(), Origin::Dylib(_)) {
+                if matches!(sym.file(), Some(FileId::Dylib(_))) {
                     return Class::Undef;
                 }
                 if sym.is_extern()
                     && sym.is_private_extern()
-                    && matches!(sym.origin(), Origin::Obj(_))
+                    && matches!(sym.file(), Some(FileId::Obj(_)))
                     && sym
                         .input_section()
                         .is_some_and(|isec| ctx.isecs[ctx.resolve_isec(isec as usize)].is_alive())
@@ -4664,7 +4664,7 @@ pub fn create_output_symtab<E: Arch>(
         let sym = &ctx.symbols[i];
         let n_strx = 0;
         names.push(sym.name());
-        let (n_type, n_sect, mut n_desc) = match (sym.origin(), sym.input_section()) {
+        let (n_type, n_sect, mut n_desc) = match (sym.file(), sym.input_section()) {
             (_, Some(isec)) => (
                 N_SECT | N_EXT,
                 ctx.isec_n_sect(&ctx.isecs[ctx.resolve_isec(isec as usize)]),
@@ -4672,7 +4672,7 @@ pub fn create_output_symtab<E: Arch>(
             ),
             // A synthesized symbol with no section (__mh_execute_header)
             // sits in the first section: the mach header.
-            (Origin::Obj(o), None) if ctx.is_internal(o as usize) => {
+            (Some(FileId::Obj(o)), None) if ctx.is_internal(o as usize) => {
                 (N_SECT | N_EXT, 1, REFERENCED_DYNAMICALLY)
             }
             (_, None) => (N_ABS | N_EXT, 0, 0),
@@ -4703,7 +4703,7 @@ pub fn create_output_symtab<E: Arch>(
 
     for &i in &undefs {
         let sym = &ctx.symbols[i];
-        let Origin::Dylib(dylib) = sym.origin() else {
+        let Some(FileId::Dylib(dylib)) = sym.file() else {
             unreachable!()
         };
         let n_strx = 0;
@@ -4931,7 +4931,7 @@ pub fn set_osec_offsets<E: Arch>(ctx: &mut Context<E>) {
                         let sym = &shared.symbols[i];
                         sym.is_extern()
                             && !sym.is_private_extern()
-                            && matches!(sym.origin(), Origin::Obj(_))
+                            && matches!(sym.file(), Some(FileId::Obj(_)))
                             && sym.input_section().map(|i| i as usize).is_none_or(|isec| {
                                 shared.isecs[shared.resolve_isec(isec)].is_alive()
                             })
@@ -5194,7 +5194,7 @@ fn order_file_ranks<E: Arch>(ctx: &Context<E>) -> Option<Vec<u64>> {
 
     let mut ranks = vec![u64::MAX; ctx.isecs.len()];
     for sym in &ctx.symbols.syms {
-        let Origin::Obj(obj) = sym.origin() else {
+        let Some(FileId::Obj(obj)) = sym.file() else {
             continue;
         };
         let obj = obj as usize;
@@ -5267,7 +5267,7 @@ fn ensure_stub_binder<E: Arch>(ctx: &mut Context<E>) {
     let id = ctx.symbols.intern(name);
     let sym = &mut ctx.symbols[id];
     if !sym.is_defined() {
-        sym.set_origin(Origin::Dylib(dylib as u32));
+        sym.set_file(FileId::Dylib(dylib as u32));
         sym.set_is_imported(true);
         sym.set_is_extern(true);
         sym.set_input_section(None);

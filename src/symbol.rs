@@ -1,20 +1,54 @@
 //! Symbols and the global symbol table.
 
+use crate::input_files::FileId;
+
 
 
 /// A symbol index, u32 as in mold-rust: every per-symbol and
 /// per-nlist vector of ids is half the size of a usize one.
 pub type SymbolId = u32;
 
-/// Where a symbol's definition comes from.
+/// A symbol's owning file in one u32 - none, an object index, or a
+/// dylib index with the DYLIB bit - mold-rust's SymbolFile. The
+/// dynamic-lookup import (FileId::Dylib(u32::MAX): a dylib index
+/// naming no dylib) packs as the one value the bit and NONE leave.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Origin {
-    /// Not defined by any input file (yet).
-    Undef,
-    /// Defined by an object file (index; u32 to keep Symbol small).
-    Obj(u32),
-    /// Exported by a dylib (index).
-    Dylib(u32),
+struct SymbolFile(u32);
+
+impl SymbolFile {
+    const DYLIB: u32 = 1 << 31;
+    const NONE: u32 = u32::MAX;
+    const DYNAMIC_LOOKUP: u32 = u32::MAX - 1;
+
+    #[inline]
+    fn none() -> SymbolFile {
+        SymbolFile(Self::NONE)
+    }
+
+    #[inline]
+    fn some(file: FileId) -> SymbolFile {
+        SymbolFile(match file {
+            FileId::Obj(i) => {
+                debug_assert!(i < Self::DYLIB);
+                i
+            }
+            FileId::Dylib(u32::MAX) => Self::DYNAMIC_LOOKUP,
+            FileId::Dylib(i) => {
+                debug_assert!(i < Self::DYLIB - 1);
+                i | Self::DYLIB
+            }
+        })
+    }
+
+    #[inline]
+    fn get(self) -> Option<FileId> {
+        match self.0 {
+            Self::NONE => None,
+            Self::DYNAMIC_LOOKUP => Some(FileId::Dylib(u32::MAX)),
+            raw if raw & Self::DYLIB != 0 => Some(FileId::Dylib(raw & !Self::DYLIB)),
+            raw => Some(FileId::Obj(raw)),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -23,8 +57,9 @@ pub struct Symbol {
     /// &str - mold-rust's name_ptr/name_len. Read through name().
     name_ptr: usize,
     name_len: u32,
-    /// The defining object or dylib index (see `kind`), or NONE.
-    file: u32,
+    /// The owning file - the object or dylib that defines the symbol -
+    /// or none while it is undefined. Read through file().
+    file: SymbolFile,
     /// The defining subsection for an `N_SECT` symbol, or NONE. Read
     /// through isec(); index ctx.isecs with `as usize`.
     isec: u32,
@@ -41,10 +76,6 @@ pub struct Symbol {
     /// the MARK bit that parallel passes set with a compare-and-swap
     /// (thunk creation dedups its entries that way, in the scan itself).
     flags: std::sync::atomic::AtomicU16,
-    /// Which of `Origin`'s variants this is (KIND_*); with `file` it
-    /// reconstructs the enum, which as a field was 8 bytes plus 8 more
-    /// for the Option<u32> section.
-    kind: u8,
     pub common_p2align: u8,
 }
 
@@ -53,12 +84,8 @@ pub struct Symbol {
 // a symbol index); ours packs the same way and lands at 40.
 const _: () = assert!(std::mem::size_of::<Symbol>() == 40);
 
-/// "No index" for `file`, `isec` and `aux_idx`.
+/// "No index" for `isec` and `aux_idx`.
 pub const NONE: u32 = u32::MAX;
-
-const KIND_UNDEF: u8 = 0;
-const KIND_OBJ: u8 = 1;
-const KIND_DYLIB: u8 = 2;
 
 impl Symbol {
     #[inline]
@@ -73,24 +100,21 @@ impl Symbol {
         }
     }
 
+    /// The file that owns the symbol: the object or dylib whose
+    /// definition won resolution, or None while it is undefined.
     #[inline]
-    pub fn origin(&self) -> Origin {
-        match self.kind {
-            KIND_OBJ => Origin::Obj(self.file),
-            KIND_DYLIB => Origin::Dylib(self.file),
-            _ => Origin::Undef,
-        }
+    pub fn file(&self) -> Option<FileId> {
+        self.file.get()
     }
 
     #[inline]
-    pub fn set_origin(&mut self, o: Origin) {
-        let (kind, file) = match o {
-            Origin::Undef => (KIND_UNDEF, NONE),
-            Origin::Obj(i) => (KIND_OBJ, i),
-            Origin::Dylib(i) => (KIND_DYLIB, i),
-        };
-        self.kind = kind;
-        self.file = file;
+    pub fn set_file(&mut self, file: FileId) {
+        self.file = SymbolFile::some(file);
+    }
+
+    #[inline]
+    pub fn clear_file(&mut self) {
+        self.file = SymbolFile::none();
     }
 
     #[inline]
@@ -185,7 +209,6 @@ impl Clone for Symbol {
             flags: std::sync::atomic::AtomicU16::new(
                 self.flags.load(std::sync::atomic::Ordering::Relaxed),
             ),
-            kind: self.kind,
             common_p2align: self.common_p2align,
         }
     }
@@ -236,18 +259,17 @@ impl Symbol {
         Symbol {
             name_ptr: name.as_ptr() as usize,
             name_len: u32::try_from(name.len()).expect("symbol name is larger than 4 GiB"),
-            file: NONE,
+            file: SymbolFile::none(),
             isec: NONE,
             value: 0,
             aux_idx: NONE,
             flags: std::sync::atomic::AtomicU16::new(0),
-            kind: KIND_UNDEF,
             common_p2align: 0,
         }
     }
 
     pub fn is_defined(&self) -> bool {
-        self.origin() != Origin::Undef
+        self.file.get().is_some()
     }
 }
 

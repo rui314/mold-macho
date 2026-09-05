@@ -6,7 +6,7 @@ use std::io::Write;
 use crate::arch::Arch;
 use crate::context::Context;
 use crate::fatal;
-use crate::symbol::Origin;
+use crate::input_files::FileId;
 
 /// Writes the -dependency_info file: Xcode's incremental build system
 /// reads it to learn which files the link actually consumed. The
@@ -88,7 +88,7 @@ pub fn print_map<E: Arch>(ctx: &Context<E>) {
     let mut syms: Vec<(u64, usize, &str, usize, u64)> = Vec::new();
     for i in 0..ctx.symbols.syms.len() {
         let sym = &ctx.symbols[i];
-        let Origin::Obj(obj) = sym.origin() else {
+        let Some(FileId::Obj(obj)) = sym.file() else {
             continue;
         };
         let obj = obj as usize;
@@ -125,7 +125,7 @@ pub fn print_map<E: Arch>(ctx: &Context<E>) {
     if ctx.args.dead_strip {
         for i in 0..ctx.symbols.syms.len() {
             let sym = &ctx.symbols[i];
-            let Origin::Obj(obj) = sym.origin() else {
+            let Some(FileId::Obj(obj)) = sym.file() else {
                 continue;
             };
             let obj = obj as usize;
