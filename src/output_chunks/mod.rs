@@ -669,7 +669,7 @@ pub fn copy_mach_header<E: Arch>(ctx: &Context<E>, buf: &mut [u8]) {
         sym.is_weak_def()
             && sym.is_extern()
             && !sym.is_private_extern()
-            && sym.isec().map(|i| i as usize).is_some_and(|isec| ctx.isecs[isec].is_alive())
+            && sym.input_section().map(|i| i as usize).is_some_and(|isec| ctx.isecs[isec].is_alive())
     }) || (0..ctx.symbols.syms.len()).any(|i| ctx.overrides_weak_export(i as u32))
     {
         hdr.flags |= MH_WEAK_DEFINES;

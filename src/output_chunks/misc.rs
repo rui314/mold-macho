@@ -299,7 +299,7 @@ pub fn build_function_starts<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
             if !matches!(sym.origin(), Origin::Obj(_)) {
                 return None;
             }
-            let isec = &ctx.isecs[ctx.resolve_isec(sym.isec()? as usize)];
+            let isec = &ctx.isecs[ctx.resolve_isec(sym.input_section()? as usize)];
             if isec.is_alive()
                 && ctx.hdr_of(isec).segname() == "__TEXT"
                 && ctx.hdr_of(isec).sectname() == "__text"

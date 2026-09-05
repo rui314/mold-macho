@@ -457,7 +457,7 @@ impl<E: Arch> Context<E> {
                 0
             }
             Origin::Obj(_) | Origin::Synthetic => {
-                if let Some(isec) = sym.isec().map(|i| i as usize) {
+                if let Some(isec) = sym.input_section().map(|i| i as usize) {
                     self.isec_addr(isec) + sym.value
                 } else if self.sym_aux(id).objc_stub_idx != crate::symbol::NO_IDX {
                     self.objc_stubs.hdr.addr
@@ -595,7 +595,7 @@ impl<E: Arch> Context<E> {
     /// Returns the input section a relocation's target lives in, if any.
     pub fn reloc_target_isec(&self, obj: usize, rel: &Reloc) -> Option<usize> {
         match rel.target() {
-            RelocTarget::Sym(idx) => self.symbols[self.objs[obj].symbols[idx as usize]].isec().map(|i| i as usize),
+            RelocTarget::Sym(idx) => self.symbols[self.objs[obj].symbols[idx as usize]].input_section().map(|i| i as usize),
             RelocTarget::Section(idx) => Some(idx as usize),
         }
     }

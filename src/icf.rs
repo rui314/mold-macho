@@ -283,7 +283,7 @@ pub fn icf_sections<E: Arch>(ctx: &mut Context<E>) {
             if !nlist.is_extern() && (sym.name().starts_with('l') || sym.name().starts_with('L')) {
                 continue;
             }
-            let Some(isec) = sym.isec().map(|i| i as usize) else {
+            let Some(isec) = sym.input_section().map(|i| i as usize) else {
                 continue;
             };
             if nlist.n_desc & N_WEAK_DEF != 0 {
@@ -340,7 +340,7 @@ pub fn icf_sections<E: Arch>(ctx: &mut Context<E>) {
             RelocTarget::Sym(idx) => {
                 let sym_id = ctx.objs[obj].symbols[idx as usize];
                 let sym = &ctx.symbols[sym_id];
-                if let (Origin::Obj(_), Some(isec)) = (sym.origin(), sym.isec()) {
+                if let (Origin::Obj(_), Some(isec)) = (sym.origin(), sym.input_section()) {
                     let isec = ctx.resolve_isec(isec as usize);
                     if cand_index[isec] != usize::MAX {
                         return (Edge::Candidate(cand_index[isec]), addend + sym.value as i64);

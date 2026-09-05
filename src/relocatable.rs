@@ -277,7 +277,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
 
     let sym_addr = |ctx: &Context<E>, id: crate::symbol::SymbolId| -> u64 {
         let sym = &ctx.symbols[id];
-        match sym.isec() {
+        match sym.input_section() {
             Some(isec) => {
                 let isec = &ctx.isecs[ctx.resolve_isec(isec as usize)];
                 ctx.chunk_header(isec.output_section().unwrap()).addr + isec.offset as u64 + sym.value
@@ -441,7 +441,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
                 continue;
             }
             let sym = &ctx.symbols[sym_id];
-            let Some(isec) = sym.isec().map(|i| i as usize) else { continue };
+            let Some(isec) = sym.input_section().map(|i| i as usize) else { continue };
             let isec = ctx.resolve_isec(isec);
             if !ctx.isecs[isec].is_alive() || sym.name().is_empty() {
                 continue;
@@ -496,7 +496,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
                 {
                     continue;
                 }
-                let Some(isec) = sym.isec().map(|i| i as usize) else { continue };
+                let Some(isec) = sym.input_section().map(|i| i as usize) else { continue };
                 let isec = ctx.resolve_isec(isec);
                 if !ctx.isecs[isec].is_alive() {
                     continue;
@@ -600,14 +600,14 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
                 && (keep_pext || !sym.is_private_extern())
                 && matches!(sym.origin(), Origin::Obj(_))
                 && sym
-                    .isec()
+                    .input_section()
                     .is_none_or(|isec| ctx.isecs[ctx.resolve_isec(isec as usize)].is_alive())
         })
         .collect();
     globals.sort_by_key(|&i| ctx.symbols[i].name());
     for &i in &globals {
         let sym = &ctx.symbols[i];
-        let (n_type, n_sect) = match sym.isec() {
+        let (n_type, n_sect) = match sym.input_section() {
             Some(isec) => (
                 N_SECT | N_EXT | if sym.is_private_extern() { N_PEXT } else { 0 },
                 ctx.isec_n_sect(&ctx.isecs[ctx.resolve_isec(isec as usize)]),
@@ -674,7 +674,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
     let mut sym_at: HashMap<(usize, u64), u32> = HashMap::new();
     for (&sym_id, &symnum) in &index_of_sym {
         let sym = &ctx.symbols[sym_id];
-        if let Some(isec) = sym.isec() {
+        if let Some(isec) = sym.input_section() {
             sym_at.entry((ctx.resolve_isec(isec as usize), sym.value)).or_insert(symnum);
         }
     }

@@ -99,12 +99,12 @@ impl Symbol {
     }
 
     #[inline]
-    pub fn isec(&self) -> Option<u32> {
+    pub fn input_section(&self) -> Option<u32> {
         (self.isec != NONE).then_some(self.isec)
     }
 
     #[inline]
-    pub fn set_isec(&mut self, isec: Option<u32>) {
+    pub fn set_input_section(&mut self, isec: Option<u32>) {
         self.isec = isec.unwrap_or(NONE);
     }
 }

@@ -548,7 +548,7 @@ pub fn claim_new_dylibs<E: Arch>(ctx: &mut Context<E>, first: usize) {
                 sym.set_origin(Origin::Dylib((dylib_idx) as u32));
                 sym.set_is_imported(true);
                 sym.set_is_extern(true);
-                sym.set_isec(None);
+                sym.set_input_section(None);
                 sym.set_is_common(false);
                 break;
             }
@@ -595,7 +595,7 @@ fn claim_locals<E: Arch>(ctx: &mut Context<E>) {
             match nlist.n_type() {
                 N_ABS => {
                     sym.set_origin(Origin::Obj((obj_idx) as u32));
-                    sym.set_isec(None);
+                    sym.set_input_section(None);
                     sym.value = nlist.n_value;
                 }
                 N_SECT => {
@@ -603,7 +603,7 @@ fn claim_locals<E: Arch>(ctx: &mut Context<E>) {
                         crate::input_files::find_subsec(isecs, &obj.subsecs, nlist.n_value)
                     {
                         sym.set_origin(Origin::Obj((obj_idx) as u32));
-                        sym.set_isec(Some(isec as u32));
+                        sym.set_input_section(Some(isec as u32));
                         sym.value = off;
                         sym.set_no_dead_strip(nlist.n_desc & (N_NO_DEAD_STRIP | REFERENCED_DYNAMICALLY) != 0);
                     }
@@ -619,7 +619,7 @@ fn clear_claims<E: Arch>(ctx: &mut Context<E>) {
     ctx.symbols.syms.par_iter_mut().for_each(|sym| {
         if matches!(sym.origin(), Origin::Obj(_) | Origin::Dylib(_)) || sym.is_common() {
             sym.set_origin(Origin::Undef);
-            sym.set_isec(None);
+            sym.set_input_section(None);
             sym.value = 0;
             sym.set_is_weak_def(false);
             sym.set_is_private_extern(false);
@@ -775,7 +775,7 @@ fn do_resolve<E: Arch>(ctx: &mut Context<E>, only_alive: bool) {
                 match nlist.n_type() {
                     N_ABS => {
                         sym.set_origin(Origin::Obj((obj_idx) as u32));
-                        sym.set_isec(None);
+                        sym.set_input_section(None);
                         sym.value = nlist.n_value;
                     }
                     N_SECT => {
@@ -786,7 +786,7 @@ fn do_resolve<E: Arch>(ctx: &mut Context<E>, only_alive: bool) {
                             nlist.n_value,
                         ) {
                             Some((isec, off)) => {
-                                sym.set_isec(Some(isec as u32));
+                                sym.set_input_section(Some(isec as u32));
                                 sym.value = off;
                             }
                             None => {
@@ -879,7 +879,7 @@ fn do_resolve<E: Arch>(ctx: &mut Context<E>, only_alive: bool) {
                 sym.set_origin(Origin::Dylib((dylib_idx) as u32));
                 sym.set_is_imported(true);
                 sym.set_is_extern(true);
-                sym.set_isec(None);
+                sym.set_input_section(None);
                 sym.set_is_common(false);
                 break;
             }
@@ -1027,7 +1027,7 @@ pub fn do_lto<E: Arch>(ctx: &mut Context<E>) -> bool {
             let sym = &mut ctx.symbols[id];
             if sym.origin() == Origin::Obj((obj_idx) as u32) {
                 sym.set_origin(Origin::Undef);
-                sym.set_isec(None);
+                sym.set_input_section(None);
                 sym.value = 0;
                 sym.set_is_weak_def(false);
             }
@@ -1085,7 +1085,7 @@ pub fn convert_common_symbols<E: Arch>(ctx: &mut Context<E>) {
 
         let sym = &mut ctx.symbols[i];
         sym.set_origin(Origin::Synthetic);
-        sym.set_isec(Some((ctx.isecs.len() - 1) as u32));
+        sym.set_input_section(Some((ctx.isecs.len() - 1) as u32));
         sym.value = 0;
         sym.set_is_common(false);
         sym.set_is_extern(true);
@@ -1116,7 +1116,7 @@ pub fn convert_init_offsets<E: Arch>(ctx: &mut Context<E>) {
             let target = match ctx.reloc_target_sym(obj, &rel) {
                 Some(id) => {
                     let sym = &ctx.symbols[id];
-                    match sym.isec() {
+                    match sym.input_section() {
                         Some(isec) => (ctx.resolve_isec(isec as usize), sym.value),
                         None => continue,
                     }
@@ -1260,13 +1260,13 @@ fn redirect_symbols_to_replacements<E: Arch>(ctx: &mut Context<E>) {
     use rayon::prelude::*;
     let isecs = &ctx.isecs;
     ctx.symbols.syms.par_iter_mut().for_each(|sym| {
-        if let Some(i) = sym.isec() {
+        if let Some(i) = sym.input_section() {
             let mut r = i as usize;
             while isecs[r].replacement != crate::input_sections::NO_REPLACEMENT {
                 r = isecs[r].replacement as usize;
             }
             if r != i as usize {
-                sym.set_isec(Some(r as u32));
+                sym.set_input_section(Some(r as u32));
             }
         }
     });
@@ -1302,7 +1302,7 @@ pub fn coalesce_objc_refs<E: Arch>(ctx: &mut Context<E>) {
             RelocTarget::Sym(idx) => {
                 let sym_id = ctx.objs[obj].symbols[idx as usize];
                 let sym = &ctx.symbols[sym_id];
-                match sym.isec() {
+                match sym.input_section() {
                     Some(isec) => Target::At(ctx.resolve_isec(isec as usize), sym.value as i64 + rel.addend),
                     None => Target::Sym(sym_id, rel.addend),
                 }
@@ -1556,7 +1556,7 @@ pub fn coalesce_weak_defs<E: Arch>(ctx: &mut Context<E>) {
                 if owner as usize == obj_idx {
                     continue;
                 }
-                let Some(winner) = sym.isec().map(|i| i as usize) else { continue };
+                let Some(winner) = sym.input_section().map(|i| i as usize) else { continue };
                 let Some((loser, off)) = crate::input_files::find_subsec(
                     &shared.isecs,
                     &obj.subsecs,
@@ -1963,7 +1963,7 @@ pub fn scan_relocations<E: Arch>(ctx: &mut Context<E>) {
 pub fn is_thread_local_sym<E: Arch>(ctx: &Context<E>, id: crate::symbol::SymbolId) -> bool {
     let sym = &ctx.symbols[id];
     match sym.origin() {
-        crate::symbol::Origin::Obj(_) => sym.isec().map(|i| i as usize).is_some_and(|isec| {
+        crate::symbol::Origin::Obj(_) => sym.input_section().map(|i| i as usize).is_some_and(|isec| {
             ctx.hdr_of(&ctx.isecs[isec]).flags & SECTION_TYPE == S_THREAD_LOCAL_VARIABLES
         }),
         crate::symbol::Origin::Dylib(idx) => {
@@ -2135,7 +2135,7 @@ pub fn fold_objc_classrefs<E: Arch>(ctx: &mut Context<E>) {
                     RelocTarget::Section(t) if rel.addend == 0 => t,
                     RelocTarget::Sym(idx) => {
                         let sym = &ctx.symbols[ctx.objs[obj_idx].symbols[idx as usize]];
-                        match sym.isec() {
+                        match sym.input_section() {
                             Some(t) if sym.value == 0 && rel.addend == 0 => t,
                             _ => continue,
                         }
@@ -2289,7 +2289,7 @@ fn objc_ref_location<E: Arch>(ctx: &Context<E>, r: ObjcRef) -> Option<(u32, u64)
         ObjcRef::Isec(isec, off) => (isec, off),
         ObjcRef::Sym(id, addend) => {
             let sym = &ctx.symbols[id];
-            let isec = sym.isec()?;
+            let isec = sym.input_section()?;
             (isec, (sym.value as i64 + addend) as u64)
         }
         _ => return None,
@@ -2514,9 +2514,9 @@ pub fn convert_objc_method_lists<E: Arch>(ctx: &mut Context<E>) {
     // The lists' own symbols (__OBJC_$_INSTANCE_METHODS_Foo ...) follow
     // them into __objc_methlist.
     for id in 0..ctx.symbols.syms.len() {
-        if let Some(isec) = ctx.symbols[id].isec() {
+        if let Some(isec) = ctx.symbols[id].input_section() {
             if let Some(&synth) = repoint.get(&isec) {
-                ctx.symbols[id].set_isec(Some(synth));
+                ctx.symbols[id].set_input_section(Some(synth));
             }
         }
     }
@@ -2762,7 +2762,7 @@ pub fn merge_objc_categories<E: Arch>(ctx: &mut Context<E>) {
     let local = |ctx: &Context<E>, r: ObjcRef| -> bool {
         match r {
             ObjcRef::Null | ObjcRef::Isec(..) | ObjcRef::TailSelref(_) => true,
-            ObjcRef::Sym(id, _) => !ctx.symbols[id].is_imported() && ctx.symbols[id].isec().is_some(),
+            ObjcRef::Sym(id, _) => !ctx.symbols[id].is_imported() && ctx.symbols[id].input_section().is_some(),
         }
     };
 
@@ -3282,7 +3282,7 @@ pub fn add_synthetic_symbols<E: Arch>(ctx: &mut Context<E>) {
             if !ctx.symbols[dst].is_defined() {
                 let sym = &mut ctx.symbols[dst];
                 sym.set_origin(Origin::Synthetic);
-                sym.set_isec(None);
+                sym.set_input_section(None);
                 sym.value = 0;
                 sym.set_is_extern(true);
                 ctx.indirect_aliases.push((dst, src));
@@ -3292,11 +3292,11 @@ pub fn add_synthetic_symbols<E: Arch>(ctx: &mut Context<E>) {
         if !ctx.symbols[dst].is_defined() {
             let (origin, isec, value) = {
                 let s = &ctx.symbols[src];
-                (s.origin(), s.isec(), s.value)
+                (s.origin(), s.input_section(), s.value)
             };
             let sym = &mut ctx.symbols[dst];
             sym.set_origin(origin);
-            sym.set_isec(isec);
+            sym.set_input_section(isec);
             sym.value = value;
             sym.set_is_extern(true);
         }
@@ -3681,7 +3681,7 @@ pub fn create_output_sections<E: Arch>(ctx: &mut Context<E>) {
                 if nlist.is_stab() || nlist.n_type() != N_SECT || nlist.n_desc & N_COLD_FUNC == 0 {
                     continue;
                 }
-                if let Some(isec) = ctx.symbols[sym_id].isec() {
+                if let Some(isec) = ctx.symbols[sym_id].input_section() {
                     cold[isec as usize] = true;
                     any = true;
                 }
@@ -3896,7 +3896,7 @@ pub fn create_output_sections<E: Arch>(ctx: &mut Context<E>) {
         // their first placement.
         let mut name_of: hashbrown::HashMap<u32, &'static str> = hashbrown::HashMap::new();
         for sym in ctx.symbols.syms.iter() {
-            if let Some(isec) = sym.isec() {
+            if let Some(isec) = sym.input_section() {
                 let r = ctx.resolve_isec(isec as usize) as u32;
                 let e = name_of.entry(r).or_insert(sym.name());
                 if sym.name() < *e {
@@ -4299,11 +4299,11 @@ pub fn plan_object_stabs<E: Arch>(
         let sym = &ctx.symbols[sym_id];
         if nlist.is_stab()
             || !matches!(sym.origin(), Origin::Obj(o) if o as usize == obj_idx)
-            || (!nlist.is_extern() && !keep_local_symbol_in(ctx, sym.name(), sym.isec()))
+            || (!nlist.is_extern() && !keep_local_symbol_in(ctx, sym.name(), sym.input_section()))
         {
             continue;
         }
-        let Some(isec) = sym.isec().map(|i| i as usize) else { continue };
+        let Some(isec) = sym.input_section().map(|i| i as usize) else { continue };
         let isec_id = ctx.resolve_isec(isec as usize);
         let isec = &ctx.isecs[isec_id];
         if !isec.is_alive() {
@@ -4506,7 +4506,7 @@ pub fn create_output_symtab<E: Arch>(
                 let r = obj.local_range();
                 for (nlist, &sym_id) in obj.nlists[r.clone()].iter().zip(&obj.symbols[r]) {
                     let sym = &ctx_ref.symbols[sym_id];
-                    if nlist.is_stab() || nlist.is_extern() || !keep_local_symbol_in(ctx_ref, sym.name(), sym.isec()) {
+                    if nlist.is_stab() || nlist.is_extern() || !keep_local_symbol_in(ctx_ref, sym.name(), sym.input_section()) {
                         continue;
                     }
                     // -non_global_symbols_keep_list / _strip_list
@@ -4524,7 +4524,7 @@ pub fn create_output_symtab<E: Arch>(
                     {
                         continue;
                     }
-                    let Some(isec) = sym.isec().map(|i| i as usize) else { continue };
+                    let Some(isec) = sym.input_section().map(|i| i as usize) else { continue };
                     let isec = ctx_ref.resolve_isec(isec);
                     if !matches!(sym.origin(), Origin::Obj(_)) || !ctx_ref.isecs[isec].is_alive() {
                         continue;
@@ -4613,7 +4613,7 @@ pub fn create_output_symtab<E: Arch>(
                     && sym.is_private_extern()
                     && matches!(sym.origin(), Origin::Obj(_))
                     && sym
-                        .isec()
+                        .input_section()
                         .is_some_and(|isec| ctx.isecs[ctx.resolve_isec(isec as usize)].is_alive())
                 {
                     // A private external becomes a local, and a label
@@ -4637,7 +4637,7 @@ pub fn create_output_symtab<E: Arch>(
             continue;
         }
         let sym = &ctx.symbols[i];
-        let isec = ctx.resolve_isec(sym.isec().unwrap() as usize);
+        let isec = ctx.resolve_isec(sym.input_section().unwrap() as usize);
         names.push(sym.name());
         let ent = NList {
             n_strx: 0,
@@ -4657,7 +4657,7 @@ pub fn create_output_symtab<E: Arch>(
         let sym = &ctx.symbols[i];
         let n_strx = 0;
         names.push(sym.name());
-        let (n_type, n_sect, mut n_desc) = match (sym.origin(), sym.isec()) {
+        let (n_type, n_sect, mut n_desc) = match (sym.origin(), sym.input_section()) {
             (_, Some(isec)) => (
                 N_SECT | N_EXT,
                 ctx.isec_n_sect(&ctx.isecs[ctx.resolve_isec(isec as usize)]),
@@ -4921,7 +4921,7 @@ pub fn set_osec_offsets<E: Arch>(ctx: &mut Context<E>) {
                         sym.is_extern()
                             && !sym.is_private_extern()
                             && matches!(sym.origin(), Origin::Obj(_) | Origin::Synthetic)
-                            && sym.isec().map(|i| i as usize).is_none_or(|isec| {
+                            && sym.input_section().map(|i| i as usize).is_none_or(|isec| {
                                 shared.isecs[shared.resolve_isec(isec)].is_alive()
                             })
                     })
@@ -5187,7 +5187,7 @@ fn order_file_ranks<E: Arch>(ctx: &Context<E>) -> Option<Vec<u64>> {
             continue;
         };
         let obj = obj as usize;
-        let Some(isec) = sym.isec().map(|i| i as usize) else { continue };
+        let Some(isec) = sym.input_section().map(|i| i as usize) else { continue };
         let Some(entries) = rank_of.get(sym.name()) else {
             continue;
         };
@@ -5259,7 +5259,7 @@ fn ensure_stub_binder<E: Arch>(ctx: &mut Context<E>) {
         sym.set_origin(Origin::Dylib(dylib as u32));
         sym.set_is_imported(true);
         sym.set_is_extern(true);
-        sym.set_isec(None);
+        sym.set_input_section(None);
     }
     sym.set_is_used(true);
     add_got(ctx, id);
