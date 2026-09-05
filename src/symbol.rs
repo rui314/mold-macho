@@ -240,7 +240,7 @@ impl Symbol {
     pub(crate) fn new(name: &'static str) -> Symbol {
         Symbol {
             name_ptr: name.as_ptr() as usize,
-            name_len: name.len() as u32,
+            name_len: u32::try_from(name.len()).expect("symbol name is larger than 4 GiB"),
             file: NONE,
             isec: NONE,
             value: 0,
@@ -527,5 +527,21 @@ impl std::ops::IndexMut<usize> for SymbolTable {
     #[inline]
     fn index_mut(&mut self, id: usize) -> &mut Symbol {
         &mut self.syms[id]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// C++ template instantiations produce symbol names tens of
+    /// thousands of bytes long (ClickHouse's exceed 65535); the cached
+    /// length must hold them whole.
+    #[test]
+    fn accepts_long_symbol_name() {
+        let name: &'static str = String::leak("x".repeat(65536));
+        let symbol = Symbol::new(name);
+        assert_eq!(symbol.name().len(), 65536);
+        assert_eq!(symbol.name(), name);
     }
 }
