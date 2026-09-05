@@ -19,7 +19,7 @@ pub fn write_dependency_info<E: Arch>(ctx: &Context<E>) {
         return;
     };
     let Ok(file) = std::fs::File::create(path) else {
-        fatal!(ctx, "cannot open {path}: {}", errno_string());
+        fatal!("cannot open {path}: {}", errno_string());
     };
     let mut out = std::io::BufWriter::new(file);
     let mut emit = |op: u8, s: &str| {
@@ -47,7 +47,7 @@ pub fn write_dependency_info<E: Arch>(ctx: &Context<E>) {
 pub fn print_map<E: Arch>(ctx: &Context<E>) {
     let Some(path) = &ctx.args.map else { return };
     let Ok(file) = std::fs::File::create(path) else {
-        fatal!(ctx, "cannot open {path}: {}", errno_string());
+        fatal!("cannot open {path}: {}", errno_string());
     };
     let mut out = std::io::BufWriter::new(file);
 

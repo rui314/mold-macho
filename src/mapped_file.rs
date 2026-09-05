@@ -9,7 +9,7 @@
 
 use std::path::Path;
 
-use crate::error::{errno_string, Diagnostics};
+use crate::error::errno_string;
 use crate::fatal;
 
 /// An input file's contents, alive for the rest of the process.
@@ -26,7 +26,7 @@ impl MappedFile {
     /// memoized by path: a file named twice (a library on the command
     /// line and in a prefetch, an archive listed repeatedly) gets one
     /// mapping, which also lets downstream caches key by data address.
-    pub fn open(diag: &Diagnostics, path: &Path) -> Option<&'static MappedFile> {
+    pub fn open(path: &Path) -> Option<&'static MappedFile> {
         static CACHE: std::sync::Mutex<
             Option<std::collections::HashMap<std::path::PathBuf, &'static MappedFile>>,
         > = std::sync::Mutex::new(None);
@@ -42,7 +42,7 @@ impl MappedFile {
             return None;
         }
         let Ok(file) = std::fs::File::open(path) else {
-            fatal!(diag, "cannot open {}: {}", path.display(), errno_string());
+            fatal!("cannot open {}: {}", path.display(), errno_string());
         };
         // An empty file cannot be mapped; give it an empty slice.
         let len = file.metadata().map(|m| m.len()).unwrap_or(0);
@@ -59,7 +59,7 @@ impl MappedFile {
                     std::mem::forget(map);
                     slice
                 }
-                Err(_) => fatal!(diag, "cannot mmap {}: {}", path.display(), errno_string()),
+                Err(_) => fatal!("cannot mmap {}: {}", path.display(), errno_string()),
             }
         };
         let mf: &'static MappedFile = Box::leak(Box::new(MappedFile {
@@ -76,10 +76,10 @@ impl MappedFile {
     }
 
     /// Reads a file, failing if it doesn't exist.
-    pub fn must_open(diag: &Diagnostics, path: &Path) -> &'static MappedFile {
-        match MappedFile::open(diag, path) {
+    pub fn must_open(path: &Path) -> &'static MappedFile {
+        match MappedFile::open(path) {
             Some(mf) => mf,
-            None => fatal!(diag, "cannot open {}: no such file", path.display()),
+            None => fatal!("cannot open {}: no such file", path.display()),
         }
     }
 

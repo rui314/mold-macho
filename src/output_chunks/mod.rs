@@ -1161,7 +1161,7 @@ pub fn encode_unwind_info<E: Arch>(ctx: &Context<E>) -> (Vec<u8>, Vec<SymbolId>)
                 }
             };
             if idx >= 3 {
-                crate::fatal!(ctx, "too many personality functions");
+                crate::fatal!("too many personality functions");
             }
             rec.encoding |= ((idx + 1) as u32) << UNWIND_PERSONALITY_MASK.trailing_zeros();
         }

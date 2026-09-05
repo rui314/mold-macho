@@ -9,7 +9,6 @@
 
 use std::ffi::{c_char, c_void, CStr, CString};
 
-use crate::error::Diagnostics;
 use crate::fatal;
 
 // Symbol attribute bits from llvm-c/lto.h
@@ -58,15 +57,13 @@ impl Plugin {
 
 /// Loads libLTO from the given path (from -lto_library, with a plain
 /// "libLTO.dylib" fallback that relies on dyld's search).
-pub fn load_plugin(diag: &Diagnostics, path: Option<&str>) -> Plugin {
+pub fn load_plugin(path: Option<&str>) -> Plugin {
     let path = CString::new(path.unwrap_or("libLTO.dylib")).unwrap();
     // SAFETY: dlopen/dlsym with valid NUL-terminated strings.
     unsafe {
         let handle = libc::dlopen(path.as_ptr(), libc::RTLD_NOW | libc::RTLD_GLOBAL);
         if handle.is_null() {
-            fatal!(
-                diag,
-                "could not load the LTO library {}; is -lto_library missing?",
+            fatal!("could not load the LTO library {}; is -lto_library missing?",
                 path.to_string_lossy()
             );
         }
@@ -75,7 +72,7 @@ pub fn load_plugin(diag: &Diagnostics, path: Option<&str>) -> Plugin {
             ($name:literal) => {{
                 let sym = libc::dlsym(handle, concat!($name, "\0").as_ptr() as *const c_char);
                 if sym.is_null() {
-                    fatal!(diag, "libLTO does not provide {}", $name);
+                    fatal!("libLTO does not provide {}", $name);
                 }
                 std::mem::transmute(sym)
             }};
@@ -110,7 +107,6 @@ pub struct LtoSymbol {
 
 /// Creates a module from a bitcode buffer and lists its symbols.
 pub fn parse_module(
-    diag: &Diagnostics,
     plugin: &Plugin,
     data: &[u8],
     name: &str,
@@ -126,7 +122,7 @@ pub fn parse_module(
         )
     };
     if module.is_null() {
-        fatal!(diag, "{name}: lto_module_create failed: {}", plugin.error_message());
+        fatal!("{name}: lto_module_create failed: {}", plugin.error_message());
     }
 
     let mut syms = Vec::new();

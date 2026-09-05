@@ -178,10 +178,10 @@ fn collect_file<E: Arch>(
         // final link, so a dylib named on its command line is ignored
         // with ld64's warning.
         FileType::Tapi if ctx.args.relocatable => {
-            crate::warn!(ctx, "{}, ignoring unexpected dylib text stub file", mf.name);
+            crate::warn!("{}, ignoring unexpected dylib text stub file", mf.name);
         }
         FileType::Dylib if ctx.args.relocatable => {
-            crate::warn!(ctx, "{}, ignoring unexpected dylib file", mf.name);
+            crate::warn!("{}, ignoring unexpected dylib file", mf.name);
         }
         FileType::Tapi | FileType::Dylib => {
             let first = ctx.dylibs.len();
@@ -213,7 +213,7 @@ fn collect_file<E: Arch>(
             // -force_load make every member live up front; -ObjC does
             // so for members with Objective-C metadata, which register
             // classes by their mere presence.
-            let members = crate::archive_file::read_archive_members(ctx, mf);
+            let members = crate::archive_file::read_archive_members(mf);
             for member in members {
                 let alive = force_load
                     || ctx.args.all_load
@@ -235,14 +235,14 @@ fn collect_file<E: Arch>(
             }
         }
         FileType::Fat => {
-            let slice = input_files::get_fat_slice(ctx, mf);
+            let slice = input_files::get_fat_slice::<E>(mf);
             collect_file(ctx, slice, force_load, weak, reexport, hidden, out);
         }
         FileType::LlvmBitcode => {
             input_files::parse_bitcode(ctx, mf, true);
         }
         FileType::Empty => {}
-        _ => fatal!(ctx, "{}: unknown file type", mf.name),
+        _ => fatal!("{}: unknown file type", mf.name),
     }
 }
 
@@ -250,14 +250,11 @@ fn collect_file<E: Arch>(
 /// input order - the parallel front end of the mold design.
 fn load_pending<E: Arch>(ctx: &mut Context<E>, pending: Vec<PendingObject>) {
     use rayon::prelude::*;
-    let diag = ctx.diag.clone();
     let relocatable = ctx.args.relocatable;
     let staged: Vec<input_files::StagedObject> = t!("stage", pending
         .par_iter()
         .map(|p| {
-            input_files::stage_object::<E>(
-                &diag,
-                p.mf,
+            input_files::stage_object::<E>(p.mf,
                 p.alive,
                 p.hidden,
                 p.priority,
@@ -304,7 +301,7 @@ pub fn read_input_files<E: Arch>(ctx: &mut Context<E>) {
         for arg in &ctx.args.inputs {
             if let InputArg::Lib(name, _) = arg {
                 if !seen.insert(name.clone()) {
-                    crate::warn!(ctx, "ignoring duplicate libraries: '-l{name}'");
+                    crate::warn!("ignoring duplicate libraries: '-l{name}'");
                 }
             }
         }
@@ -319,7 +316,7 @@ pub fn read_input_files<E: Arch>(ctx: &mut Context<E>) {
     {
         let mut stubs: Vec<&'static MappedFile> = Vec::new();
         let consider = |path: &std::path::Path, stubs: &mut Vec<&'static MappedFile>| {
-            if let Some(mf) = MappedFile::open(&ctx.diag, path) {
+            if let Some(mf) = MappedFile::open(path) {
                 if get_file_type(mf) == FileType::Tapi {
                     stubs.push(mf);
                 }
@@ -343,7 +340,7 @@ pub fn read_input_files<E: Arch>(ctx: &mut Context<E>) {
                 _ => {}
             }
         }
-        let wave1 = tapi::prefetch(&ctx.diag, &stubs);
+        let wave1 = tapi::prefetch(&stubs);
         let mut deps: Vec<&'static MappedFile> = Vec::new();
         for tbd in &wave1 {
             for name in &tbd.external_reexports {
@@ -354,77 +351,77 @@ pub fn read_input_files<E: Arch>(ctx: &mut Context<E>) {
                 }
             }
         }
-        tapi::prefetch(&ctx.diag, &deps);
+        tapi::prefetch(&deps);
     }
 
     let mut queue: Vec<PendingObject> = Vec::new();
     for arg in &inputs {
         match arg {
             InputArg::File(path) => {
-                let mf = MappedFile::must_open(&ctx.diag, Path::new(path));
+                let mf = MappedFile::must_open(Path::new(path));
                 collect_file(ctx, mf, false, false, false, false, &mut queue);
             }
             InputArg::ForceLoad(path) => {
-                let mf = MappedFile::must_open(&ctx.diag, Path::new(path));
+                let mf = MappedFile::must_open(Path::new(path));
                 collect_file(ctx, mf, true, false, false, false, &mut queue);
             }
             InputArg::WeakFile(path) => {
-                let mf = MappedFile::must_open(&ctx.diag, Path::new(path));
+                let mf = MappedFile::must_open(Path::new(path));
                 collect_file(ctx, mf, false, true, false, false, &mut queue);
             }
             InputArg::ReexportFile(path) => {
-                let mf = MappedFile::must_open(&ctx.diag, Path::new(path));
+                let mf = MappedFile::must_open(Path::new(path));
                 collect_file(ctx, mf, false, false, true, false, &mut queue);
             }
             InputArg::ReexportLib(name) => match find_library(ctx, name) {
                 Some(path) => {
-                    let mf = MappedFile::must_open(&ctx.diag, &path);
+                    let mf = MappedFile::must_open(&path);
                     collect_file(ctx, mf, false, false, true, false, &mut queue);
                 }
-                None => error!(ctx, "library not found: -reexport-l{name}"),
+                None => error!("library not found: -reexport-l{name}"),
             },
             InputArg::HiddenLib(name) => match find_library(ctx, name) {
                 Some(path) => {
-                    let mf = MappedFile::must_open(&ctx.diag, &path);
+                    let mf = MappedFile::must_open(&path);
                     collect_file(ctx, mf, false, false, false, true, &mut queue);
                 }
-                None => error!(ctx, "library not found: -hidden-l{name}"),
+                None => error!("library not found: -hidden-l{name}"),
             },
             InputArg::NeededLib(name) => match find_library(ctx, name) {
                 Some(path) => {
-                    let mf = MappedFile::must_open(&ctx.diag, &path);
+                    let mf = MappedFile::must_open(&path);
                     let before = ctx.dylibs.len();
                     collect_file(ctx, mf, false, false, false, false, &mut queue);
                     for dylib in &mut ctx.dylibs[before..] {
                         dylib.is_needed = true;
                     }
                 }
-                None => error!(ctx, "library not found: -needed-l{name}"),
+                None => error!("library not found: -needed-l{name}"),
             },
             InputArg::NeededFramework(name) => match find_framework(ctx, name) {
                 Some(path) => {
-                    let mf = MappedFile::must_open(&ctx.diag, &path);
+                    let mf = MappedFile::must_open(&path);
                     let before = ctx.dylibs.len();
                     collect_file(ctx, mf, false, false, false, false, &mut queue);
                     for dylib in &mut ctx.dylibs[before..] {
                         dylib.is_needed = true;
                     }
                 }
-                None => error!(ctx, "framework not found: {name}"),
+                None => error!("framework not found: {name}"),
             },
             InputArg::Lib(name, weak) => match find_library(ctx, name) {
                 Some(path) => {
-                    let mf = MappedFile::must_open(&ctx.diag, &path);
+                    let mf = MappedFile::must_open(&path);
                     collect_file(ctx, mf, false, *weak, false, false, &mut queue);
                 }
-                None => error!(ctx, "library not found: -l{name}"),
+                None => error!("library not found: -l{name}"),
             },
             InputArg::Framework(name, weak) => match find_framework(ctx, name) {
                 Some(path) => {
-                    let mf = MappedFile::must_open(&ctx.diag, &path);
+                    let mf = MappedFile::must_open(&path);
                     collect_file(ctx, mf, false, *weak, false, false, &mut queue);
                 }
-                None => error!(ctx, "framework not found: {name}"),
+                None => error!("framework not found: {name}"),
             },
         }
     }
@@ -436,9 +433,9 @@ pub fn read_input_files<E: Arch>(ctx: &mut Context<E>) {
     // app are linked this way).
     if let Some(path) = ctx.args.bundle_loader.clone() {
         if ctx.args.output_type != MH_BUNDLE {
-            fatal!(ctx, "-bundle_loader can only be used with -bundle");
+            fatal!("-bundle_loader can only be used with -bundle");
         }
-        let mf = MappedFile::must_open(&ctx.diag, Path::new(&path));
+        let mf = MappedFile::must_open(Path::new(&path));
         crate::input_files::parse_bundle_loader(ctx, mf);
     }
     t!("load_pending", load_pending(ctx, queue));
@@ -504,12 +501,12 @@ pub fn load_autolink_deps<E: Arch>(ctx: &mut Context<E>) -> Autolinked {
             [flag] if flag.starts_with("-l") => find_library(ctx, &flag[2..]),
             ["-framework", name] => find_framework(ctx, name),
             _ => {
-                crate::warn!(ctx, "unknown auto-link option: {:?}", opt);
+                crate::warn!("unknown auto-link option: {:?}", opt);
                 None
             }
         };
         if let Some(path) = path {
-            if let Some(mf) = MappedFile::open(&ctx.diag, &path) {
+            if let Some(mf) = MappedFile::open(&path) {
                 collect_file(ctx, mf, false, false, false, false, &mut queue);
             }
         }
@@ -855,9 +852,7 @@ fn do_resolve<E: Arch>(ctx: &mut Context<E>, only_alive: bool) {
             Origin::Obj(idx) => file_display(&ctx.objs[idx as usize]),
             _ => "?".to_string(),
         };
-        error!(
-            ctx,
-            "duplicate symbol: {}: {}: {}",
+        error!("duplicate symbol: {}: {}: {}",
             file_display(&ctx.objs[obj_idx]),
             prev,
             ctx.symtab[sym_id].name()
@@ -975,13 +970,13 @@ pub fn run_lto<E: Arch>(ctx: &mut Context<E>) -> bool {
     let data = unsafe {
         let cg = (plugin.codegen_create)();
         if cg.is_null() {
-            fatal!(ctx, "lto_codegen_create failed: {}", plugin.error_message());
+            fatal!("lto_codegen_create failed: {}", plugin.error_message());
         }
         (plugin.codegen_set_pic_model)(cg, crate::lto::LTO_CODEGEN_PIC_MODEL_DYNAMIC);
 
         for &(_, module) in &ctx.lto_modules {
             if (plugin.codegen_add_module)(cg, module as *mut _) {
-                fatal!(ctx, "lto_codegen_add_module failed: {}", plugin.error_message());
+                fatal!("lto_codegen_add_module failed: {}", plugin.error_message());
             }
         }
 
@@ -1027,7 +1022,7 @@ pub fn run_lto<E: Arch>(ctx: &mut Context<E>) -> bool {
         let mut size = 0usize;
         let ptr = (plugin.codegen_compile)(cg, &mut size);
         if ptr.is_null() {
-            fatal!(ctx, "lto_codegen_compile failed: {}", plugin.error_message());
+            fatal!("lto_codegen_compile failed: {}", plugin.error_message());
         }
         std::slice::from_raw_parts(ptr as *const u8, size).to_vec()
     };
@@ -1039,7 +1034,7 @@ pub fn run_lto<E: Arch>(ctx: &mut Context<E>) -> bool {
     // dSYM staging directory so dsymutil can find it afterwards.
     if let Some(path) = &ctx.args.object_path_lto {
         if std::fs::write(path, &data).is_err() {
-            fatal!(ctx, "-object_path_lto: cannot write {path}");
+            fatal!("-object_path_lto: cannot write {path}");
         }
     }
 
@@ -1677,7 +1672,7 @@ pub fn check_undefined_symbols<E: Arch>(ctx: &mut Context<E>) {
                 || ctx.args.allowed_undefined.iter().any(|n| n == sym.name());
             if allowed {
                 if ctx.args.undefined_warning {
-                    crate::warn!(ctx, "undefined symbol: {}", ctx.symtab[i].name());
+                    crate::warn!("undefined symbol: {}", ctx.symtab[i].name());
                 }
                 let sym = &mut ctx.symtab[i];
                 sym.set_origin(Origin::Dylib((usize::MAX) as u32));
@@ -1685,7 +1680,7 @@ pub fn check_undefined_symbols<E: Arch>(ctx: &mut Context<E>) {
                 sym.set_is_extern(true);
             } else {
                 let file = who_wants(ctx, i as u32);
-                error!(ctx, "undefined symbol: {}: {}", file, ctx.symtab[i].name());
+                error!("undefined symbol: {}: {}", file, ctx.symtab[i].name());
             }
         }
     }
@@ -1902,9 +1897,7 @@ pub fn scan_relocations<E: Arch>(ctx: &mut Context<E>) {
         // descriptor, and an ordinary load of a TLV would read the
         // descriptor as data. ld64 rejects both directions.
         if is_thread_local_sym(ctx, id) != matches!(class, RelocClass::Tlv) {
-            fatal!(
-                ctx,
-                "illegal thread local variable reference to regular symbol `{}`",
+            fatal!("illegal thread local variable reference to regular symbol `{}`",
                 sym.name()
             );
         }
@@ -3247,11 +3240,11 @@ pub fn add_synthetic_symbols<E: Arch>(ctx: &mut Context<E>) {
     let aliases = std::mem::take(&mut ctx.args.aliases);
     for (existing, new) in &aliases {
         let Some(src) = ctx.symtab.get(existing) else {
-            error!(ctx, "-alias: undefined base symbol: {existing}");
+            error!("-alias: undefined base symbol: {existing}");
             continue;
         };
         if !ctx.symtab[src].is_defined() {
-            error!(ctx, "-alias: undefined base symbol: {existing}");
+            error!("-alias: undefined base symbol: {existing}");
             continue;
         }
         let dst = ctx.symtab.intern(String::leak(new.clone()));
@@ -3330,7 +3323,7 @@ pub fn fix_synthetic_symbols<E: Arch>(ctx: &mut Context<E>) {
                     .iter()
                     .find(|c| c.hdr.is_sect && c.hdr.segname == seg && c.hdr.sectname == *sect)
                 else {
-                    fatal!(ctx, "no section for boundary symbol: {}", ctx.symtab[id].name());
+                    fatal!("no section for boundary symbol: {}", ctx.symtab[id].name());
                 };
                 if is_start {
                     chunk.hdr.addr
@@ -3340,7 +3333,7 @@ pub fn fix_synthetic_symbols<E: Arch>(ctx: &mut Context<E>) {
             }
             None => {
                 let Some(segment) = ctx.segments.iter().find(|s| s.name == seg) else {
-                    fatal!(ctx, "no segment for boundary symbol: {}", ctx.symtab[id].name());
+                    fatal!("no segment for boundary symbol: {}", ctx.symtab[id].name());
                 };
                 if is_start {
                     segment.cmd.vmaddr
@@ -3957,7 +3950,7 @@ pub fn create_output_sections<E: Arch>(ctx: &mut Context<E>) {
     let sectcreate = std::mem::take(&mut ctx.args.sectcreate);
     for (seg, sect, path) in &sectcreate {
         let Ok(data) = std::fs::read(path) else {
-            fatal!(ctx, "-sectcreate: cannot read {path}");
+            fatal!("-sectcreate: cannot read {path}");
         };
         let segname: &'static str = String::leak(seg.clone());
         let mut chunk = Chunk::new(
@@ -4019,7 +4012,7 @@ pub fn create_output_sections<E: Arch>(ctx: &mut Context<E>) {
             if swift_version == 0 {
                 swift_version = v;
             } else if v != 0 && v != swift_version {
-                error!(ctx, "incompatible __objc_imageinfo swift versions");
+                error!("incompatible __objc_imageinfo swift versions");
             }
         }
         let lang = infos.iter().map(|f| f >> 16).max().unwrap();
@@ -5528,9 +5521,7 @@ fn collect_fixups<E: Arch>(ctx: &Context<E>) -> Vec<(u64, Option<crate::symbol::
                 // unaligned address is unrepresentable. ld64 diagnoses
                 // the offending input section rather than the output.
                 if addr % 4 != 0 {
-                    fatal!(
-                        ctx,
-                        "{}({},{}): unaligned base relocation",
+                    fatal!("{}({},{}): unaligned base relocation",
                         file_display(&ctx.objs[isec.obj as usize]),
                         ctx.hdr_of(isec).segname(),
                         ctx.hdr_of(isec).sectname()
@@ -5856,7 +5847,7 @@ fn write_fixup_chains<E: Arch>(ctx: &Context<E>, buf: &mut [u8]) {
                 _ => 0,
             };
             if addr % 4 != 0 {
-                fatal!(ctx, "unaligned fixup; re-link with -no_fixup_chains");
+                fatal!("unaligned fixup; re-link with -no_fixup_chains");
             }
 
             let off = (seg.cmd.fileoff + (addr - seg.cmd.vmaddr)) as usize;
@@ -5887,9 +5878,7 @@ fn write_fixup_chains<E: Arch>(ctx: &Context<E>, buf: &mut [u8]) {
                             .find(|c| c.hdr.addr <= addr && addr < c.hdr.addr + c.hdr.size)
                             .map(|c| format!("{},{}", c.hdr.segname, c.hdr.sectname))
                             .unwrap_or_default();
-                        fatal!(
-                            ctx,
-                            "rebase target unencodable at {addr:#x} in {sect} (value {val:#x}); re-link with -no_fixup_chains"
+                        fatal!("rebase target unencodable at {addr:#x} in {sect} (value {val:#x}); re-link with -no_fixup_chains"
                         );
                     }
                     let target = val & 0xf_ffff_ffff;
@@ -5926,7 +5915,7 @@ fn order_file_ranks<E: Arch>(ctx: &Context<E>) -> Option<Vec<u64>> {
     let mut next = 0u64;
     for path in &ctx.args.order_files {
         let Ok(text) = std::fs::read_to_string(path) else {
-            fatal!(ctx, "-order_file: cannot read {path}");
+            fatal!("-order_file: cannot read {path}");
         };
         for line in text.lines() {
             let mut line = line.split('#').next().unwrap_or("").trim();
@@ -6061,7 +6050,7 @@ pub fn resolve_entry<E: Arch>(ctx: &mut Context<E>) {
         // names the symbol's stub, as ld64 does.
         Some(id) if ctx.symtab[id].is_imported() => ctx.entry_addr = ctx.sym_stub_addr(id),
         Some(id) if ctx.symtab[id].is_defined() => ctx.entry_addr = ctx.sym_addr(id),
-        _ => error!(ctx, "undefined symbol for entry point: {}", ctx.args.entry),
+        _ => error!("undefined symbol for entry point: {}", ctx.args.entry),
     }
 }
 
@@ -6095,7 +6084,7 @@ fn ensure_stub_binder<E: Arch>(ctx: &mut Context<E>) {
     }
     let name = "dyld_stub_binder";
     let Some(dylib) = ctx.dylibs.iter().position(|d| d.exports.contains(name)) else {
-        fatal!(ctx, "lazy binding needs dyld_stub_binder, which no loaded dylib exports");
+        fatal!("lazy binding needs dyld_stub_binder, which no loaded dylib exports");
     };
     let id = ctx.symtab.intern(name);
     let sym = &mut ctx.symtab[id];
@@ -6247,7 +6236,7 @@ fn copy_chunk<E: Arch>(ctx: &Context<E>, chunk: &Chunk, buf: &mut [u8]) {
                         let target = addr_of(r);
                         let rel = if target == 0 { 0 } else { target.wrapping_sub(field + 4 * k as u64) as i64 };
                         if rel != rel as i32 as i64 {
-                            fatal!(ctx, "relative method list entry out of range");
+                            fatal!("relative method list entry out of range");
                         }
                         buf[at + 4 * k..at + 4 * k + 4].copy_from_slice(&(rel as i32).to_le_bytes());
                     }

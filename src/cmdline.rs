@@ -3,7 +3,6 @@
 //! The command line is compatible with Apple's ld64: options are single-dash
 //! long names, and input files and `-l` options are position-dependent.
 
-use crate::error::Diagnostics;
 use crate::fatal;
 use crate::macho::*;
 
@@ -319,13 +318,13 @@ impl Default for Args {
 }
 
 /// Parses an X.Y.Z version string.
-fn parse_version(diag: &Diagnostics, arg: &str) -> u32 {
+fn parse_version(arg: &str) -> u32 {
     let mut it = arg.split('.');
     let mut next = |what| match it.next() {
         None => 0,
         Some(s) => match s.parse() {
             Ok(num) => num,
-            Err(_) => fatal!(diag, "malformed version number: {what}: {arg}"),
+            Err(_) => fatal!("malformed version number: {what}: {arg}"),
         },
     };
     let major = next("major");
@@ -336,20 +335,20 @@ fn parse_version(diag: &Diagnostics, arg: &str) -> u32 {
 
 /// ld64 takes the platform by name or by its PLATFORM_* number; Xcode
 /// passes the number for some prelink steps (`-platform_version 1 11.0`).
-fn parse_platform(diag: &Diagnostics, arg: &str) -> u32 {
+fn parse_platform(arg: &str) -> u32 {
     match arg {
         "macos" | "macosx" | "1" => PLATFORM_MACOS,
-        _ => fatal!(diag, "unsupported platform: {arg}"),
+        _ => fatal!("unsupported platform: {arg}"),
     }
 }
 
 /// Parses a symbol list file: one symbol per line, '#' starts a
 /// comment.
 /// Reads a symbol-list file for an option, fatal on I/O error.
-fn read_symbol_list(diag: &Diagnostics, path: &str) -> Vec<String> {
+fn read_symbol_list(path: &str) -> Vec<String> {
     match std::fs::read_to_string(path) {
         Ok(text) => symbol_list(&text),
-        Err(_) => fatal!(diag, "cannot read symbol list: {path}"),
+        Err(_) => fatal!("cannot read symbol list: {path}"),
     }
 }
 
@@ -363,16 +362,16 @@ fn symbol_list(text: &str) -> Vec<String> {
 
 /// ld64 numeric option arguments are hexadecimal, with or without a
 /// 0x prefix.
-fn parse_hex(diag: &Diagnostics, opt: &str, val: &str) -> u64 {
+fn parse_hex(opt: &str, val: &str) -> u64 {
     match u64::from_str_radix(val.trim_start_matches("0x"), 16) {
         Ok(num) => num,
-        Err(_) => fatal!(diag, "malformed {opt}: {val}"),
+        Err(_) => fatal!("malformed {opt}: {val}"),
     }
 }
 
 /// Expands @file response-file arguments, splitting the file's contents
 /// on whitespace with simple quote handling.
-pub fn expand_response_files(_diag: &Diagnostics, argv: &[String]) -> Vec<String> {
+pub fn expand_response_files(argv: &[String]) -> Vec<String> {
     let mut out = Vec::with_capacity(argv.len());
     for arg in argv {
         if let Some(path) = arg.strip_prefix('@') {
@@ -407,7 +406,7 @@ pub fn expand_response_files(_diag: &Diagnostics, argv: &[String]) -> Vec<String
     out
 }
 
-pub fn parse_args(diag: &Diagnostics, cmdline: &[String]) -> Args {
+pub fn parse_args(cmdline: &[String]) -> Args {
     let mut args = Args::default();
     let mut i = 1;
     let mut version_shown = false;
@@ -416,7 +415,7 @@ pub fn parse_args(diag: &Diagnostics, cmdline: &[String]) -> Args {
         *i += 1;
         match cmdline.get(*i) {
             Some(val) => val,
-            None => fatal!(diag, "option {}: argument missing", cmdline[*i - 1]),
+            None => fatal!("option {}: argument missing", cmdline[*i - 1]),
         }
     };
 
@@ -427,9 +426,9 @@ pub fn parse_args(diag: &Diagnostics, cmdline: &[String]) -> Args {
             "-arch" => args.arch = Some(next_arg(&mut i).to_string()),
             "-e" => args.entry = next_arg(&mut i).to_string(),
             "-platform_version" => {
-                args.platform = parse_platform(diag, next_arg(&mut i));
-                args.platform_minos = parse_version(diag, next_arg(&mut i));
-                args.platform_sdk = parse_version(diag, next_arg(&mut i));
+                args.platform = parse_platform(next_arg(&mut i));
+                args.platform_minos = parse_version(next_arg(&mut i));
+                args.platform_sdk = parse_version(next_arg(&mut i));
             }
             "-syslibroot" => args.syslibroot.push(next_arg(&mut i).to_string()),
             "-L" => args.library_paths.push(next_arg(&mut i).to_string()),
@@ -470,7 +469,7 @@ pub fn parse_args(diag: &Diagnostics, cmdline: &[String]) -> Args {
                             }
                         }
                     }
-                    Err(_) => fatal!(diag, "cannot read -filelist file: {path}"),
+                    Err(_) => fatal!("cannot read -filelist file: {path}"),
                 }
             }
             "-F" => args.framework_paths.push(next_arg(&mut i).to_string()),
@@ -489,12 +488,12 @@ pub fn parse_args(diag: &Diagnostics, cmdline: &[String]) -> Args {
             "-adhoc_codesign" => args.adhoc_codesign = true,
             "-no_adhoc_codesign" => args.adhoc_codesign = false,
             "-dynamic" => args.dynamic = true,
-            "-headerpad" => args.headerpad = parse_hex(diag, opt, next_arg(&mut i)),
+            "-headerpad" => args.headerpad = parse_hex(opt, next_arg(&mut i)),
             "-pagezero_size" => {
-                args.pagezero_size = parse_hex(diag, opt, next_arg(&mut i));
+                args.pagezero_size = parse_hex(opt, next_arg(&mut i));
                 args.explicit_pagezero = true;
             }
-            "-stack_size" => args.stack_size = parse_hex(diag, opt, next_arg(&mut i)),
+            "-stack_size" => args.stack_size = parse_hex(opt, next_arg(&mut i)),
             "-sectcreate" => {
                 let seg = next_arg(&mut i).to_string();
                 let sect = next_arg(&mut i).to_string();
@@ -519,7 +518,7 @@ pub fn parse_args(diag: &Diagnostics, cmdline: &[String]) -> Args {
                     args.undefined_warning = true;
                     args.undefined_is_warning = t == "warning";
                 }
-                treatment => fatal!(diag, "-undefined: unsupported treatment: {treatment}"),
+                treatment => fatal!("-undefined: unsupported treatment: {treatment}"),
             },
             "-U" => args
                 .allowed_undefined
@@ -552,7 +551,7 @@ pub fn parse_args(diag: &Diagnostics, cmdline: &[String]) -> Args {
                 let list = args.exported_symbols.get_or_insert_with(Vec::new);
                 match std::fs::read_to_string(&path) {
                     Ok(text) => list.extend(symbol_list(&text)),
-                    Err(_) => fatal!(diag, "cannot read -exported_symbols_list: {path}"),
+                    Err(_) => fatal!("cannot read -exported_symbols_list: {path}"),
                 }
             }
             "-unexported_symbol" => args
@@ -562,16 +561,16 @@ pub fn parse_args(diag: &Diagnostics, cmdline: &[String]) -> Args {
                 let path = next_arg(&mut i).to_string();
                 match std::fs::read_to_string(&path) {
                     Ok(text) => args.unexported_symbols.extend(symbol_list(&text)),
-                    Err(_) => fatal!(diag, "cannot read -unexported_symbols_list: {path}"),
+                    Err(_) => fatal!("cannot read -unexported_symbols_list: {path}"),
                 }
             }
             // The -dylib_ spellings are the older names ld64 still
             // accepts; Xcode passes -dylib_compatibility_version.
             "-current_version" | "-dylib_current_version" => {
-                args.current_version = parse_version(diag, next_arg(&mut i))
+                args.current_version = parse_version(next_arg(&mut i))
             }
             "-compatibility_version" | "-dylib_compatibility_version" => {
-                args.compatibility_version = parse_version(diag, next_arg(&mut i))
+                args.compatibility_version = parse_version(next_arg(&mut i))
             }
             // ld64 prints its version banner to stdout and continues
             // with the link.
@@ -626,21 +625,21 @@ pub fn parse_args(diag: &Diagnostics, cmdline: &[String]) -> Args {
             "-no_warn_duplicate_libraries" => args.warn_duplicate_libraries = false,
             "-non_global_symbols_strip_list" => {
                 let path = next_arg(&mut i);
-                args.local_strip_list.extend(read_symbol_list(diag, path));
+                args.local_strip_list.extend(read_symbol_list(path));
             }
             "-non_global_symbols_keep_list" => {
                 let path = next_arg(&mut i);
                 args.local_keep_list
                     .get_or_insert_with(Vec::new)
-                    .extend(read_symbol_list(diag, path));
+                    .extend(read_symbol_list(path));
             }
             "-sectalign" => {
                 let seg = next_arg(&mut i).to_string();
                 let sect = next_arg(&mut i).to_string();
                 let val = next_arg(&mut i);
-                let align = parse_hex(diag, "-sectalign", val);
+                let align = parse_hex("-sectalign", val);
                 if !align.is_power_of_two() {
-                    fatal!(diag, "-sectalign: alignment not a power of two: {val}");
+                    fatal!("-sectalign: alignment not a power of two: {val}");
                 }
                 args.sectalign.push((seg, sect, align.trailing_zeros() as u8));
             }
@@ -652,7 +651,7 @@ pub fn parse_args(diag: &Diagnostics, cmdline: &[String]) -> Args {
             "-alias_list" => {
                 let path = next_arg(&mut i);
                 let Ok(text) = std::fs::read_to_string(path) else {
-                    fatal!(diag, "cannot read -alias_list: {path}");
+                    fatal!("cannot read -alias_list: {path}");
                 };
                 for line in text.lines() {
                     let line = line.split('#').next().unwrap_or("").trim();
@@ -664,7 +663,7 @@ pub fn parse_args(diag: &Diagnostics, cmdline: &[String]) -> Args {
                         (Some(existing), Some(new)) => {
                             args.aliases.push((existing.to_string(), new.to_string()))
                         }
-                        _ => fatal!(diag, "malformed -alias_list line: {line}"),
+                        _ => fatal!("malformed -alias_list line: {line}"),
                     }
                 }
             }
@@ -701,7 +700,7 @@ pub fn parse_args(diag: &Diagnostics, cmdline: &[String]) -> Args {
             // it isn't told.
             "-macos_version_min" | "-macosx_version_min" => {
                 args.platform = PLATFORM_MACOS;
-                args.platform_minos = parse_version(diag, next_arg(&mut i));
+                args.platform_minos = parse_version(next_arg(&mut i));
             }
 
             // Ignored options. ld64 takes -O<n> as a linker
@@ -745,7 +744,7 @@ pub fn parse_args(diag: &Diagnostics, cmdline: &[String]) -> Args {
                 } else if let Some(path) = opt.strip_prefix("-F") {
                     args.framework_paths.push(path.to_string());
                 } else if opt.starts_with('-') {
-                    fatal!(diag, "unknown command line option: {opt}");
+                    fatal!("unknown command line option: {opt}");
                 } else {
                     args.inputs.push(InputArg::File(opt.to_string()));
                 }
@@ -765,9 +764,7 @@ pub fn parse_args(diag: &Diagnostics, cmdline: &[String]) -> Args {
     // reserves the low 4 GiB against NULL dereferences.
     if args.output_type != MH_EXECUTE {
         if args.explicit_pagezero {
-            fatal!(
-                diag,
-                "-pagezero_size option can only be used when linking a main executable"
+            fatal!("-pagezero_size option can only be used when linking a main executable"
             );
         }
         args.pagezero_size = 0;

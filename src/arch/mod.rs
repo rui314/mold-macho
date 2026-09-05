@@ -11,7 +11,6 @@ pub use arm64::Arm64;
 pub use x86_64::X86_64;
 
 use crate::context::Context;
-use crate::error::Diagnostics;
 use crate::input_sections::Reloc;
 use crate::macho::{MachRel, MachSection};
 
@@ -110,7 +109,6 @@ pub trait Arch: Copy + Default + Send + Sync + 'static {
     /// [`Reloc`]s. Mach-O encodes addends target-dependently: some are
     /// embedded in the relocated field, some are separate records.
     fn read_relocs(
-        diag: &Diagnostics,
         file_name: &str,
         sections: &[MachSection],
         hdr: &MachSection,

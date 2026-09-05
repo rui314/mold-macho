@@ -259,7 +259,6 @@ fn first_global_of(nlists: &[NList], dysym: Option<&DysymtabCommand>) -> Option<
 }
 
 pub fn stage_object<E: Arch>(
-    diag: &crate::error::Diagnostics,
     mf: &'static MappedFile,
     alive: bool,
     hidden: bool,
@@ -270,9 +269,7 @@ pub fn stage_object<E: Arch>(
     let hdr = MachHeader::read_from(data);
 
     if hdr.cputype != E::CPUTYPE {
-        fatal!(
-            diag,
-            "{}: incompatible CPU type: expected {}",
+        fatal!("{}: incompatible CPU type: expected {}",
             mf.name,
             E::NAME
         );
@@ -440,7 +437,7 @@ pub fn stage_object<E: Arch>(
                             libc::memchr(rest.as_ptr() as *const _, 0, rest.len())
                         };
                         if p.is_null() {
-                            fatal!(diag, "{}: malformed __cstring section", mf.name);
+                            fatal!("{}: malformed __cstring section", mf.name);
                         }
                         start += (p as usize - rest.as_ptr() as usize) + 1;
                     }
@@ -510,7 +507,7 @@ pub fn stage_object<E: Arch>(
             continue;
         }
         let raw: Vec<MachRel> = read_array(data, sect.reloff as usize, sect.nreloc as usize);
-        let mut rels = E::read_relocs(diag, &mf.name, sect_hdrs, sect, data, &raw);
+        let mut rels = E::read_relocs(&mf.name, sect_hdrs, sect, data, &raw);
         // The sort must be stable: a SUBTRACTOR and the UNSIGNED it
         // pairs with share one offset and their order is the pairing
         // (Swift's relative pointers are all such pairs). An unstable
@@ -532,7 +529,7 @@ pub fn stage_object<E: Arch>(
                     Some((last as usize, isecs[last as usize].size as u64))
                 });
                 let Some((tsub, toff)) = found else {
-                    fatal!(diag, "{}: relocation against a discarded section", mf.name);
+                    fatal!("{}: relocation against a discarded section", mf.name);
                 };
                 rel.set_target(crate::input_sections::RelocTarget::Section(tsub as u32));
                 rel.addend = toff as i64;
@@ -554,7 +551,7 @@ pub fn stage_object<E: Arch>(
             isecs[sub].nrels = (obj_relocs.len() - start) as u32;
         }
         if pos < rels.len() {
-            fatal!(diag, "{}: relocation outside its section", mf.name);
+            fatal!("{}: relocation outside its section", mf.name);
         }
     }
 
@@ -571,15 +568,14 @@ pub fn stage_object<E: Arch>(
         .iter()
         .find(|s| s.segname() == "__LD" && s.sectname() == "__compact_unwind")
     {
-        parse_compact_unwind::<E>(diag, hdr, &isecs, &subsecs, &nlists, data, &mf.name, &mut unwind);
+        parse_compact_unwind::<E>(hdr, &isecs, &subsecs, &nlists, data, &mf.name, &mut unwind);
     }
 
     if let Some(hdr) = sect_hdrs
         .iter()
         .find(|s| s.segname() == "__TEXT" && s.sectname() == "__eh_frame")
     {
-        parse_eh_frame::<E>(
-            diag, hdr, &isecs, &subsecs, &nlists, data, &mf.name, &mut unwind, &mut cies,
+        parse_eh_frame::<E>(hdr, &isecs, &subsecs, &nlists, data, &mf.name, &mut unwind, &mut cies,
             &mut fdes, keep_all_fdes,
         );
     }
@@ -975,17 +971,14 @@ pub fn integrate_object_with<E: Arch>(
 /// Parses one object and adds it to the link immediately.
 pub fn parse_object<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile, alive: bool) -> usize {
     let priority = ctx.next_priority();
-    let diag = ctx.diag.clone();
-    let staged = stage_object::<E>(&diag, mf, alive, false, priority, ctx.args.relocatable);
+    let staged = stage_object::<E>(mf, alive, false, priority, ctx.args.relocatable);
     integrate_object(ctx, staged)
 }
 
 /// Loads the LTO plugin on first use.
 pub fn ensure_lto_plugin<E: Arch>(ctx: &mut Context<E>) -> crate::lto::Plugin {
     if ctx.lto_plugin.is_none() {
-        ctx.lto_plugin = Some(crate::lto::load_plugin(
-            &ctx.diag,
-            ctx.args.lto_library.as_deref(),
+        ctx.lto_plugin = Some(crate::lto::load_plugin(ctx.args.lto_library.as_deref(),
         ));
     }
     ctx.lto_plugin.unwrap()
@@ -996,7 +989,7 @@ pub fn ensure_lto_plugin<E: Arch>(ctx: &mut Context<E>) -> crate::lto::Plugin {
 /// all inputs are known.
 pub fn parse_bitcode<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile, alive: bool) -> usize {
     let plugin = ensure_lto_plugin(ctx);
-    let (module, lsyms) = crate::lto::parse_module(&ctx.diag, &plugin, mf.data, &mf.name);
+    let (module, lsyms) = crate::lto::parse_module(&plugin, mf.data, &mf.name);
 
     let obj_idx = ctx.objs.len();
     let mut syms = Vec::new();
@@ -1136,7 +1129,6 @@ impl UnwindRecord {
 /// relocations.
 #[allow(clippy::too_many_arguments)]
 fn parse_compact_unwind<E: Arch>(
-    diag: &crate::error::Diagnostics,
     hdr: &MachSection,
     isecs: &[InputSection],
     subsecs: &[crate::input_sections::InputSectionId],
@@ -1163,7 +1155,7 @@ fn parse_compact_unwind<E: Arch>(
     };
     const ENTRY_SIZE: usize = 32;
     if hdr.size % ENTRY_SIZE as u64 != 0 {
-        fatal!(diag, "{file_name}: invalid __compact_unwind section size");
+        fatal!("{file_name}: invalid __compact_unwind section size");
     }
 
     let read_u64 = |off: u64| {
@@ -1194,7 +1186,7 @@ fn parse_compact_unwind<E: Arch>(
     let rels: Vec<MachRel> = read_array(data, hdr.reloff as usize, hdr.nreloc as usize);
     for r in &rels {
         if r.r_address as u64 >= hdr.size || r.r_length() != 3 {
-            fatal!(diag, "{file_name}: __compact_unwind: unsupported relocation");
+            fatal!("{file_name}: __compact_unwind: unsupported relocation");
         }
         let idx = r.r_address as usize / ENTRY_SIZE;
         let value = read_u64(r.r_address as u64);
@@ -1210,7 +1202,7 @@ fn parse_compact_unwind<E: Arch>(
                     value
                 };
                 let Some((isec, off)) = find_subsec(addr) else {
-                    fatal!(diag, "{file_name}: __compact_unwind: bad function reference");
+                    fatal!("{file_name}: __compact_unwind: bad function reference");
                 };
                 records[idx].isec = isec as u32;
                 records[idx].input_offset = off;
@@ -1228,7 +1220,7 @@ fn parse_compact_unwind<E: Arch>(
                         .position(|n| n.is_extern() && n.n_value == value)
                 };
                 let Some(sym) = sym else {
-                    fatal!(diag, "{file_name}: __compact_unwind: unsupported personality");
+                    fatal!("{file_name}: __compact_unwind: unsupported personality");
                 };
                 records[idx].personality_sym = sym as u32;
             }
@@ -1240,11 +1232,11 @@ fn parse_compact_unwind<E: Arch>(
                     value
                 };
                 let Some(lsda) = find_subsec(addr) else {
-                    fatal!(diag, "{file_name}: __compact_unwind: bad LSDA reference");
+                    fatal!("{file_name}: __compact_unwind: bad LSDA reference");
                 };
                 records[idx].lsda_isec = lsda.0 as u32; records[idx].lsda_off = lsda.1;
             }
-            _ => fatal!(diag, "{file_name}: __compact_unwind: unsupported relocation"),
+            _ => fatal!("{file_name}: __compact_unwind: unsupported relocation"),
         }
     }
 
@@ -1319,7 +1311,6 @@ pub fn read_uleb_at(data: &[u8], pos: &mut usize) -> u64 {
 /// personality cell to be GOT-relative, and dropping the rest.
 #[allow(clippy::too_many_arguments)]
 fn parse_eh_frame<E: Arch>(
-    diag: &crate::error::Diagnostics,
     hdr: &MachSection,
     isecs: &[InputSection],
     subsecs: &[crate::input_sections::InputSectionId],
@@ -1364,7 +1355,7 @@ fn parse_eh_frame<E: Arch>(
             let r2 = rels[i + 1];
             i += 2;
             if r2.r_type() != E::RELOC_UNSIGNED || !r1.is_extern() || !r2.is_extern() {
-                fatal!(diag, "{file_name}: __eh_frame: unsupported relocation pair");
+                fatal!("{file_name}: __eh_frame: unsupported relocation pair");
             }
             let target1 = nlists[r1.r_symbolnum() as usize].n_value;
             let target2 = nlists[r2.r_symbolnum() as usize].n_value;
@@ -1380,12 +1371,12 @@ fn parse_eh_frame<E: Arch>(
                     let add = delta as u32 as i32 as i64 as u64;
                     loc[..8].copy_from_slice(&val.wrapping_add(add).to_le_bytes());
                 }
-                _ => fatal!(diag, "{file_name}: __eh_frame: invalid relocation size"),
+                _ => fatal!("{file_name}: __eh_frame: invalid relocation size"),
             }
         } else if r1.r_type() == E::RELOC_GOTPC {
             i += 1;
         } else {
-            fatal!(diag, "{file_name}: __eh_frame: unknown relocation type");
+            fatal!("{file_name}: __eh_frame: unknown relocation type");
         }
     }
 
@@ -1399,14 +1390,14 @@ fn parse_eh_frame<E: Arch>(
     let contents: &'static [u8] = Vec::leak(contents);
     while pos < contents.len() {
         if pos + 4 > contents.len() {
-            fatal!(diag, "{file_name}: malformed __eh_frame section: truncated CFI length");
+            fatal!("{file_name}: malformed __eh_frame section: truncated CFI length");
         }
         let len = u32::from_le_bytes(contents[pos..pos + 4].try_into().unwrap()) as usize;
         if len == 0xffff_ffff {
-            fatal!(diag, "{file_name}: __eh_frame: extended length is not supported");
+            fatal!("{file_name}: __eh_frame: extended length is not supported");
         }
         if len < 4 || pos + 4 + len > contents.len() {
-            fatal!(diag, "{file_name}: malformed __eh_frame section: CFI length too long");
+            fatal!("{file_name}: malformed __eh_frame section: CFI length too long");
         }
         let rec: &'static [u8] = &contents[pos..pos + 4 + len];
         let id = u32::from_le_bytes(rec[4..8].try_into().unwrap());
@@ -1448,9 +1439,7 @@ fn parse_eh_frame<E: Arch>(
                         0x3 => 4,  // DW_EH_PE_sdata4... actually udata4
                         0xb => 4,  // DW_EH_PE_sdata4
                         0x0 => 8,  // DW_EH_PE_absptr
-                        enc => fatal!(
-                            diag,
-                            "{file_name}: __eh_frame: unknown LSDA encoding: {enc:#x}"
+                        enc => fatal!("{file_name}: __eh_frame: unknown LSDA encoding: {enc:#x}"
                         ),
                     };
                     pos += 1;
@@ -1458,16 +1447,14 @@ fn parse_eh_frame<E: Arch>(
                 b'P' => {
                     // DW_EH_PE_indirect | DW_EH_PE_pcrel | DW_EH_PE_sdata4
                     if data[pos] != 0x9b {
-                        fatal!(
-                            diag,
-                            "{file_name}: __eh_frame: unknown personality encoding: {:#x}",
+                        fatal!("{file_name}: __eh_frame: unknown personality encoding: {:#x}",
                             data[pos]
                         );
                     }
                     pos += 5;
                 }
                 b'R' => pos += 1,
-                _ => fatal!(diag, "{file_name}: __eh_frame: unknown augmentation"),
+                _ => fatal!("{file_name}: __eh_frame: unknown augmentation"),
             }
         }
     }
@@ -1482,10 +1469,10 @@ fn parse_eh_frame<E: Arch>(
         let Some(cie) = out_cies.iter_mut().find(|c| {
             c.input_addr <= addr && addr < c.input_addr + c.data.len() as u32
         }) else {
-            fatal!(diag, "{file_name}: __eh_frame: stray personality relocation");
+            fatal!("{file_name}: __eh_frame: stray personality relocation");
         };
         if !r.is_extern() {
-            fatal!(diag, "{file_name}: __eh_frame: unsupported personality reference");
+            fatal!("{file_name}: __eh_frame: unsupported personality reference");
         }
         // A local symbol index, mapped to a symbol at integration.
         cie.personality = Some(r.r_symbolnum());
@@ -1509,7 +1496,7 @@ fn parse_eh_frame<E: Arch>(
         let cie_off = u32::from_le_bytes(rec[4..8].try_into().unwrap());
         let cie_addr = input_addr + 4 - cie_off;
         let Some(cie) = out_cies.iter().position(|c| c.input_addr == cie_addr) else {
-            fatal!(diag, "{file_name}: __eh_frame: FDE with an invalid CIE pointer");
+            fatal!("{file_name}: __eh_frame: FDE with an invalid CIE pointer");
         };
 
         // The function address: the pre-applied pc_begin field is
@@ -1519,7 +1506,7 @@ fn parse_eh_frame<E: Arch>(
         let code_len = u64::from_le_bytes(rec[16..24].try_into().unwrap()) as u32;
 
         let Some((isec, func_offset)) = find_local(func_addr) else {
-            fatal!(diag, "{file_name}: __eh_frame: FDE with an invalid function");
+            fatal!("{file_name}: __eh_frame: FDE with an invalid function");
         };
 
         let is_covered = covered.contains(&(isec, func_offset));
@@ -1536,7 +1523,7 @@ fn parse_eh_frame<E: Arch>(
             let cell = i32::from_le_bytes(rec[pos..pos + 4].try_into().unwrap());
             let lsda_addr = (input_addr as u64 + pos as u64).wrapping_add_signed(cell as i64);
             let Some((lsda_isec, lsda_off)) = find_local(lsda_addr) else {
-                fatal!(diag, "{file_name}: __eh_frame: FDE with an invalid LSDA");
+                fatal!("{file_name}: __eh_frame: FDE with an invalid LSDA");
             };
             lsda = Some((lsda_isec, lsda_off));
         }
@@ -1652,10 +1639,7 @@ pub fn defined_symbol_names(mf: &MappedFile) -> Vec<&'static str> {
 
 /// Returns the slice of a fat (universal) file matching the target's CPU
 /// type. Fat headers are big-endian.
-pub fn get_fat_slice<E: Arch>(
-    ctx: &Context<E>,
-    mf: &'static MappedFile,
-) -> &'static MappedFile {
+pub fn get_fat_slice<E: Arch>(mf: &'static MappedFile) -> &'static MappedFile {
     let data = mf.data;
     let read_be32 =
         |off: usize| u32::from_be_bytes(data[off..off + 4].try_into().unwrap());
@@ -1670,7 +1654,7 @@ pub fn get_fat_slice<E: Arch>(
             return mf.slice(name, &data[obj_off..obj_off + obj_size]);
         }
     }
-    fatal!(ctx, "{}: fat file does not contain {}", mf.name, E::NAME);
+    fatal!("{}: fat file does not contain {}", mf.name, E::NAME);
 }
 
 /// Parses a Mach-O dylib binary: its identity from LC_ID_DYLIB and its
@@ -1733,7 +1717,7 @@ fn load_reexports<E: Arch>(
             continue;
         }
         let Some(dep) = resolve_dylib_ref(ctx, &name, &loader_dir, &loader_rpaths) else {
-            crate::warn!(ctx, "{}: reexported library not found: {}", parent, name);
+            crate::warn!("{}: reexported library not found: {}", parent, name);
             continue;
         };
         match crate::filetype::get_file_type(dep) {
@@ -1743,7 +1727,7 @@ fn load_reexports<E: Arch>(
                     ctx.dylibs[idx].is_implicit = true;
                     continue;
                 }
-                let mut dep_tbd = tapi::parse_cached(&ctx.diag, dep);
+                let mut dep_tbd = tapi::parse_cached(dep);
                 interpret_ld_symbols(ctx, &mut dep_tbd);
                 tlv_exports.extend(dep_tbd.tlv_exports.iter().copied());
                 exports.extend(dep_tbd.tlv_exports);
@@ -1761,7 +1745,7 @@ fn load_reexports<E: Arch>(
                     continue;
                 }
                 let (dep_exports, dep_tlvs, dep_reexports, dep_rpaths) =
-                    dylib_binary_exports(&ctx.diag, dep);
+                    dylib_binary_exports(dep);
                 exports.extend(dep_exports);
                 tlv_exports.extend(dep_tlvs);
                 for dep_name in dep_reexports {
@@ -1769,21 +1753,21 @@ fn load_reexports<E: Arch>(
                 }
             }
             crate::filetype::FileType::Fat => {
-                let slice = get_fat_slice(ctx, dep);
+                let slice = get_fat_slice::<E>(dep);
                 if public {
                     let idx = parse_dylib_binary(ctx, slice);
                     ctx.dylibs[idx].is_implicit = true;
                     continue;
                 }
                 let (dep_exports, dep_tlvs, dep_reexports, dep_rpaths) =
-                    dylib_binary_exports(&ctx.diag, slice);
+                    dylib_binary_exports(slice);
                 exports.extend(dep_exports);
                 tlv_exports.extend(dep_tlvs);
                 for dep_name in dep_reexports {
                     queue.push((dep_name, dir_of(&dep.name), dep_rpaths.clone()));
                 }
             }
-            _ => crate::warn!(ctx, "{}: unsupported reexported library: {}", parent, name),
+            _ => crate::warn!("{}: unsupported reexported library: {}", parent, name),
         }
     }
 }
@@ -1849,7 +1833,7 @@ pub fn parse_dylib_binary<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile
     }
 
     if install_name.is_empty() {
-        fatal!(ctx, "{}: dylib has no LC_ID_DYLIB", mf.name);
+        fatal!("{}: dylib has no LC_ID_DYLIB", mf.name);
     }
 
     let mut exports: hashbrown::HashSet<&'static str> = hashbrown::HashSet::new();
@@ -2046,7 +2030,7 @@ pub fn parse_bundle_loader<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFil
     let data = mf.data;
     let hdr = MachHeader::read_from(data);
     if hdr.magic != MH_MAGIC_64 || hdr.filetype != MH_EXECUTE {
-        fatal!(ctx, "{}: -bundle_loader is not an executable", mf.name);
+        fatal!("{}: -bundle_loader is not an executable", mf.name);
     }
 
     let mut symtab_cmd = None;
@@ -2126,7 +2110,6 @@ pub fn parse_bundle_loader<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFil
 /// Reads a dylib binary's exported symbols and reexported install
 /// names, for following reexport chains.
 fn dylib_binary_exports(
-    _diag: &crate::error::Diagnostics,
     mf: &'static MappedFile,
 ) -> (Vec<&'static str>, Vec<&'static str>, Vec<String>, Vec<String>) {
     let data = mf.data;
@@ -2265,11 +2248,11 @@ pub fn find_reexport_file<E: Arch>(
         candidates.push(std::path::PathBuf::from(format!("{}.tbd", base.display())));
         candidates.push(base);
         for path in candidates {
-            if let Some(mf) = MappedFile::open(&ctx.diag, &path) {
+            if let Some(mf) = MappedFile::open(&path) {
                 // A universal binary (Xcode's XCTestCore, re-exported
                 // by XCTest): the target's slice.
                 if crate::filetype::get_file_type(mf) == crate::filetype::FileType::Fat {
-                    return Some(get_fat_slice(ctx, mf));
+                    return Some(get_fat_slice::<E>(mf));
                 }
                 return Some(mf);
             }
@@ -2299,7 +2282,7 @@ fn interpret_ld_symbols<E: Arch>(ctx: &Context<E>, tbd: &mut tapi::TbdFile) {
         if let Some(rest) = name.strip_prefix("$ld$previous$") {
             let f: Vec<&str> = rest.split('$').collect();
             if f.len() < 6 {
-                crate::warn!(ctx, "malformed linker directive: {name}");
+                crate::warn!("malformed linker directive: {name}");
             } else if f[5].is_empty()
                 && f[2].parse::<u32>() == Ok(ctx.args.platform)
                 && tapi::parse_version(f[3]) <= minos
@@ -2338,7 +2321,7 @@ fn interpret_ld_symbols<E: Arch>(ctx: &Context<E>, tbd: &mut tapi::TbdFile) {
 }
 
 pub fn parse_dylib<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile) -> usize {
-    let mut tbd = tapi::parse_cached(&ctx.diag, mf);
+    let mut tbd = tapi::parse_cached(mf);
     interpret_ld_symbols(ctx, &mut tbd);
     let mut exports: hashbrown::HashSet<&'static str> =
         tbd.exports.into_iter().collect();
@@ -2393,9 +2376,7 @@ fn add_dylib<E: Arch>(ctx: &mut Context<E>, dylib: DylibFile) -> usize {
     // a .tbd omits not_app_extension_safe) before extension code may
     // link it. ld64 warns rather than errs, and -w silences it.
     if ctx.args.application_extension && !dylib.is_app_extension_safe {
-        crate::warn!(
-            ctx,
-            "linking against a dylib which is not safe for use in application extensions: {}",
+        crate::warn!("linking against a dylib which is not safe for use in application extensions: {}",
             dylib.install_name
         );
     }
@@ -2415,9 +2396,7 @@ fn add_dylib<E: Arch>(ctx: &mut Context<E>, dylib: DylibFile) -> usize {
         };
         let ours = ctx.args.umbrella.as_deref() == Some(umbrella.as_str());
         if !ours && client != *umbrella && !dylib.sub_clients.contains(&client) {
-            crate::error!(
-                ctx,
-                "cannot link directly with {}: not an allowed client of umbrella framework {}",
+            crate::error!("cannot link directly with {}: not an allowed client of umbrella framework {}",
                 dylib.install_name,
                 umbrella
             );

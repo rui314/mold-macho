@@ -28,7 +28,7 @@ use std::sync::mpsc::{channel, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
-use crate::error::{errno_string, Diagnostics};
+use crate::error::errno_string;
 use crate::fatal;
 
 /// The output path of the in-progress link, removed on a fatal error so
@@ -93,7 +93,7 @@ impl OutputFile {
     /// Creates the output file for the `len`-byte buffer at `buf` and
     /// starts the writers. The buffer must outlive the OutputFile, and a
     /// range must not be modified after it has been queued.
-    pub fn create(diag: &Diagnostics, path: &str, buf: *const u8, len: usize) -> OutputFile {
+    pub fn create(path: &str, buf: *const u8, len: usize) -> OutputFile {
         // Remove an existing file first. Overwriting a running
         // executable is an error on some systems, and on macOS the
         // kernel caches code signature state per vnode, so a fresh file
@@ -103,7 +103,7 @@ impl OutputFile {
 
         let file = match std::fs::File::create(path) {
             Ok(f) => f,
-            Err(_) => fatal!(diag, "cannot write {path}: {}", errno_string()),
+            Err(_) => fatal!("cannot write {path}: {}", errno_string()),
         };
         let _ = file.set_len(len as u64);
         let file = Arc::new(file);
@@ -156,17 +156,17 @@ impl OutputFile {
 
     /// Waits for every queued range to reach the file and makes it
     /// executable.
-    pub fn finish(mut self, diag: &Diagnostics) {
+    pub fn finish(mut self) {
         drop(self.tx.take());
         for thread in self.threads.drain(..) {
             match thread.join() {
                 Ok(Ok(())) => {}
-                Ok(Err(e)) => fatal!(diag, "cannot write {}: {e}", self.path),
-                Err(_) => fatal!(diag, "cannot write {}: writer thread panicked", self.path),
+                Ok(Err(e)) => fatal!("cannot write {}: {e}", self.path),
+                Err(_) => fatal!("cannot write {}: writer thread panicked", self.path),
             }
         }
         if std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(0o755)).is_err() {
-            fatal!(diag, "cannot chmod {}: {}", self.path, errno_string());
+            fatal!("cannot chmod {}: {}", self.path, errno_string());
         }
         *OUTPUT_PATH.lock().unwrap() = None;
     }
@@ -174,8 +174,8 @@ impl OutputFile {
 
 /// Writes a complete buffer: for output that is built in full before
 /// anything can be written (-r).
-pub fn write(diag: &Diagnostics, path: &str, buf: &[u8]) {
-    let out = OutputFile::create(diag, path, buf.as_ptr(), buf.len());
+pub fn write(path: &str, buf: &[u8]) {
+    let out = OutputFile::create(path, buf.as_ptr(), buf.len());
     out.queue(0, buf.len());
-    out.finish(diag);
+    out.finish();
 }

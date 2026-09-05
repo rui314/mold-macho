@@ -7,18 +7,13 @@
 //! index member, which a linker that parses every member eagerly can
 //! simply skip.
 
-use crate::arch::Arch;
-use crate::context::Context;
 use crate::fatal;
 use crate::mapped_file::MappedFile;
 
 /// Splits an archive into its members. Members use the BSD convention:
 /// a name of "#1/<len>" means the real name is the first <len> bytes of
 /// the member data.
-pub fn read_archive_members<E: Arch>(
-    ctx: &Context<E>,
-    mf: &'static MappedFile,
-) -> Vec<&'static MappedFile> {
+pub fn read_archive_members(mf: &'static MappedFile) -> Vec<&'static MappedFile> {
     let data = mf.data;
     let mut members = Vec::new();
     let mut off = 8;
@@ -33,14 +28,14 @@ pub fn read_archive_members<E: Arch>(
         };
         let name = field(0..16);
         let Ok(size) = field(48..58).parse::<usize>() else {
-            fatal!(ctx, "{}: malformed archive member header", mf.name);
+            fatal!("{}: malformed archive member header", mf.name);
         };
 
         let mut body = off + 60;
         let mut body_size = size;
         let name = if let Some(len) = name.strip_prefix("#1/") {
             let Ok(len) = len.parse::<usize>() else {
-                fatal!(ctx, "{}: malformed archive member name", mf.name);
+                fatal!("{}: malformed archive member name", mf.name);
             };
             let raw = &data[body..body + len];
             body += len;

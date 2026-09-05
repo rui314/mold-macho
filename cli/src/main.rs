@@ -3,7 +3,6 @@
 //! its own so that the compiler can build them in parallel, and a feature
 //! per target decides which of them are built in.
 
-use mold_macho::error::Diagnostics;
 
 // mold uses mimalloc on every platform (the C++ tree enables it by
 // default, mold-rust sets it as the global allocator): a linker
@@ -13,14 +12,14 @@ use mold_macho::error::Diagnostics;
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-fn link_for_target(target: &str, cmdline: &[String], diag: &Diagnostics) -> Result<i32, String> {
+fn link_for_target(target: &str, cmdline: &[String]) -> Result<i32, String> {
     match target {
         #[cfg(feature = "arm64")]
-        "arm64" => mold_macho_target_arm64::link(cmdline, diag),
+        "arm64" => mold_macho_target_arm64::link(cmdline),
         #[cfg(feature = "x86_64")]
-        "x86_64" => mold_macho_target_x86_64::link(cmdline, diag),
+        "x86_64" => mold_macho_target_x86_64::link(cmdline),
         _ => {
-            diag.fatal(format_args!("unsupported target: {target}"));
+            mold_macho::error::fatal(format_args!("unsupported target: {target}"));
         }
     }
 }

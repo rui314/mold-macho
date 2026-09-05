@@ -2,7 +2,6 @@
 
 use crate::arch::Arch;
 use crate::context::Context;
-use crate::error::Diagnostics;
 use crate::fatal;
 use crate::input_sections::{Reloc, RelocTarget};
 use crate::macho::*;
@@ -149,7 +148,6 @@ impl Arch for X86_64 {
     }
 
     fn read_relocs(
-        diag: &Diagnostics,
         file_name: &str,
         sections: &[MachSection],
         hdr: &MachSection,
@@ -165,7 +163,7 @@ impl Arch for X86_64 {
             let embedded = match 1 << r.r_length() {
                 4 => i32::from_le_bytes(file_data[off..off + 4].try_into().unwrap()) as i64,
                 8 => i64::from_le_bytes(file_data[off..off + 8].try_into().unwrap()),
-                _ => fatal!(diag, "{file_name}: bad relocation size"),
+                _ => fatal!("{file_name}: bad relocation size"),
             };
             let addend = embedded + reloc_bias(r.r_type());
             let is_subtracted =
@@ -187,7 +185,7 @@ impl Arch for X86_64 {
                     .position(|sec| sec.addr <= addr && addr < sec.addr + sec.size)
                     .or_else(|| sections.iter().position(|sec| addr == sec.addr + sec.size))
                 else {
-                    fatal!(diag, "{file_name}: bad relocation: {}", r.r_address);
+                    fatal!("{file_name}: bad relocation: {}", r.r_address);
                 };
                 (RelocTarget::Section(idx as u32), (addr - sections[idx].addr) as i64)
             };
@@ -250,9 +248,7 @@ impl Arch for X86_64 {
                         // rejects one that does not fit.
                         let val = s.wrapping_add_signed(a);
                         if val > u32::MAX as u64 {
-                            fatal!(
-                                ctx,
-                                "{}: 32-bit absolute address out of range ({val:#x})",
+                            fatal!("{}: 32-bit absolute address out of range ({val:#x})",
                                 ctx.objs[obj].mf.name
                             );
                         }
@@ -271,7 +267,7 @@ impl Arch for X86_64 {
                     match r.size {
                         4 => write32(loc, val as u32),
                         8 => write64(loc, val),
-                        _ => fatal!(ctx, "bad SUBTRACTOR relocation size"),
+                        _ => fatal!("bad SUBTRACTOR relocation size"),
                     }
                 }
                 X86_64_RELOC_BRANCH => {
@@ -317,7 +313,7 @@ impl Arch for X86_64 {
                     let val = t.wrapping_add_signed(a).wrapping_sub(p + 4);
                     write32(loc, val as u32);
                 }
-                _ => fatal!(ctx, "unsupported relocation type: {}", r.r_type),
+                _ => fatal!("unsupported relocation type: {}", r.r_type),
             }
             i += 1;
         }

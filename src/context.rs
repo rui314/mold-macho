@@ -2,12 +2,10 @@
 //! to output chunks.
 
 use std::marker::PhantomData;
-use std::sync::Arc;
 
 use crate::arch::Arch;
 use crate::cmdline::Args;
 use crate::error;
-use crate::error::{Diagnostics, HasDiagnostics};
 use crate::input_files::{DylibFile, ObjectFile};
 use crate::macho::{S_THREAD_LOCAL_REGULAR, S_THREAD_LOCAL_ZEROFILL};
 use crate::input_sections::{InputSection, Reloc, RelocTarget};
@@ -15,7 +13,6 @@ use crate::output_chunks::{Chunk, OutputSegment, SymtabData};
 use crate::symbol::{Origin, SymbolId, SymbolTable};
 
 pub struct Context<E: Arch> {
-    pub diag: Arc<Diagnostics>,
     pub args: Args,
     pub objs: Vec<ObjectFile>,
     pub dylibs: Vec<DylibFile>,
@@ -175,16 +172,9 @@ pub struct Context<E: Arch> {
     _marker: PhantomData<E>,
 }
 
-impl<E: Arch> HasDiagnostics for Context<E> {
-    fn diagnostics(&self) -> &Diagnostics {
-        &self.diag
-    }
-}
-
 impl<E: Arch> Context<E> {
-    pub fn new(args: Args, diag: Diagnostics) -> Context<E> {
+    pub fn new(args: Args) -> Context<E> {
         Context {
-            diag: Arc::new(diag),
             args,
             objs: Vec::new(),
             dylibs: Vec::new(),
@@ -432,7 +422,7 @@ impl<E: Arch> Context<E> {
         let sym = &self.symtab[id];
         match sym.origin() {
             Origin::Undef => {
-                error!(self, "undefined symbol: {}", sym.name());
+                error!("undefined symbol: {}", sym.name());
                 0
             }
             Origin::Obj(_) | Origin::Synthetic => {

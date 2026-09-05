@@ -708,7 +708,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
         match rec.personality() {
             Some(p) => {
                 let Some(&symnum) = index_of_sym.get(&p) else {
-                    fatal!(ctx, "-r: unwind personality lost: {}", ctx.symtab[p].name());
+                    fatal!("-r: unwind personality lost: {}", ctx.symtab[p].name());
                 };
                 cu_data.extend_from_slice(&0u64.to_le_bytes());
                 cu_relocs.push(MachRel {
@@ -786,7 +786,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
                     eh_data.extend_from_slice(&cie.data);
                     if let Some(p) = cie.personality {
                         let Some(&symnum) = index_of_sym.get(&p) else {
-                            fatal!(ctx, "-r: unwind personality lost: {}", ctx.symtab[p].name());
+                            fatal!("-r: unwind personality lost: {}", ctx.symtab[p].name());
                         };
                         // The cell keeps the object's addend (4 on
                         // x86-64, where a pcrel field is relative to
@@ -881,9 +881,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
                     RelocTarget::Sym(idx) => {
                         let sym_id = ctx.objs[isec.obj as usize].syms[idx as usize];
                         let Some(&symnum) = index_of_sym.get(&sym_id) else {
-                            fatal!(
-                                ctx,
-                                "-r: cannot re-emit relocation against {}",
+                            fatal!("-r: cannot re-emit relocation against {}",
                                 ctx.symtab[sym_id].name()
                             );
                         };
@@ -1222,7 +1220,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
                         buf[loc..loc + 4].copy_from_slice(&val.to_le_bytes());
                     }
                 } else {
-                    error!(ctx, "-r: unsupported non-external relocation");
+                    error!("-r: unsupported non-external relocation");
                 }
             }
         }
@@ -1253,6 +1251,6 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
     }
     buf[stroff as usize..stroff as usize + strtab.len()].copy_from_slice(&strtab);
 
-    output_file::write(&ctx.diag, &ctx.args.output, &buf);
+    output_file::write(&ctx.args.output, &buf);
     crate::subprocess::notify_parent();
 }

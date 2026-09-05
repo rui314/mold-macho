@@ -10,7 +10,6 @@
 //! Since reexported symbols resolve through the top-level library, all
 //! documents' exports are merged.
 
-use crate::error::Diagnostics;
 use crate::fatal;
 use crate::mapped_file::MappedFile;
 
@@ -71,7 +70,6 @@ impl Json {
 }
 
 struct JsonParser<'a> {
-    diag: &'a Diagnostics,
     file: &'a str,
     text: &'static str,
     pos: usize,
@@ -79,7 +77,7 @@ struct JsonParser<'a> {
 
 impl JsonParser<'_> {
     fn fail(&self, what: &str) -> ! {
-        fatal!(self.diag, "{}: malformed .tbd JSON at byte {}: {what}", self.file, self.pos);
+        fatal!("{}: malformed .tbd JSON at byte {}: {what}", self.file, self.pos);
     }
 
     fn skip_ws(&mut self) {
@@ -228,8 +226,8 @@ impl JsonParser<'_> {
 /// of objects of the same shape. Symbols are listed per target group;
 /// as with the YAML formats, the groups are merged (the SDK's stubs
 /// describe the same library for every target).
-fn parse_json(diag: &Diagnostics, file: &str, text: &'static str) -> TbdFile {
-    let mut p = JsonParser { diag, file, text, pos: 0 };
+fn parse_json(file: &str, text: &'static str) -> TbdFile {
+    let mut p = JsonParser { file, text, pos: 0 };
     let root = p.value();
 
     let mut tbd = TbdFile {
@@ -267,7 +265,7 @@ fn parse_json(diag: &Diagnostics, file: &str, text: &'static str) -> TbdFile {
     };
 
     let Some(main) = root.get("main_library") else {
-        fatal!(diag, "{file}: no main_library in .tbd file");
+        fatal!("{file}: no main_library in .tbd file");
     };
     if let Some(name) = main.get("install_names").map(Json::arr).and_then(|a| a.first()) {
         if let Some(s) = name.get("name").and_then(Json::str) {
@@ -306,7 +304,7 @@ fn parse_json(diag: &Diagnostics, file: &str, text: &'static str) -> TbdFile {
     }
 
     if tbd.install_name.is_empty() {
-        fatal!(diag, "{file}: no install name in .tbd file");
+        fatal!("{file}: no install name in .tbd file");
     }
     tbd
 }
@@ -352,7 +350,7 @@ pub fn parse_version(val: &str) -> u32 {
 /// file, so results are cached by the file's address and the big SDK
 /// stubs (libSystem's tree, framework umbrellas) can be parsed once,
 /// in parallel, by prefetch() before the serial input loop needs them.
-pub fn parse_cached(diag: &Diagnostics, mf: &'static MappedFile) -> TbdFile {
+pub fn parse_cached(mf: &'static MappedFile) -> TbdFile {
     static CACHE: std::sync::Mutex<Option<hashbrown::HashMap<usize, TbdFile>>> =
         std::sync::Mutex::new(None);
     let key = mf.data.as_ptr() as usize;
@@ -364,7 +362,7 @@ pub fn parse_cached(diag: &Diagnostics, mf: &'static MappedFile) -> TbdFile {
     {
         return tbd.clone();
     }
-    let tbd = parse(diag, mf);
+    let tbd = parse(mf);
     CACHE
         .lock()
         .unwrap()
@@ -374,21 +372,21 @@ pub fn parse_cached(diag: &Diagnostics, mf: &'static MappedFile) -> TbdFile {
 }
 
 /// Warms the parse cache on all cores.
-pub fn prefetch(diag: &Diagnostics, mfs: &[&'static MappedFile]) -> Vec<TbdFile> {
+pub fn prefetch(mfs: &[&'static MappedFile]) -> Vec<TbdFile> {
     use rayon::prelude::*;
-    mfs.par_iter().map(|mf| parse_cached(diag, mf)).collect()
+    mfs.par_iter().map(|mf| parse_cached(mf)).collect()
 }
 
-pub fn parse(diag: &Diagnostics, mf: &MappedFile) -> TbdFile {
+pub fn parse(mf: &MappedFile) -> TbdFile {
     let Ok(text): Result<&'static str, _> = std::str::from_utf8(mf.data) else {
-        fatal!(diag, "{}: invalid UTF-8 in .tbd file", mf.name);
+        fatal!("{}: invalid UTF-8 in .tbd file", mf.name);
     };
 
     // TBD version 5 is JSON (tapi's current output, and what Xcode
     // writes for the "eager linking" stubs of frameworks built in the
     // same workspace); versions 1-4 are YAML.
     if text.trim_start().starts_with('{') {
-        return parse_json(diag, &mf.name, text);
+        return parse_json(&mf.name, text);
     }
 
     let mut tbd = TbdFile {
@@ -511,7 +509,7 @@ pub fn parse(diag: &Diagnostics, mf: &MappedFile) -> TbdFile {
         .collect();
 
     if tbd.install_name.is_empty() {
-        fatal!(diag, "{}: no install-name in .tbd file", mf.name);
+        fatal!("{}: no install-name in .tbd file", mf.name);
     }
     tbd
 }

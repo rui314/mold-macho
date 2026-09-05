@@ -4,7 +4,6 @@ use crate::arch::Arch;
 use crate::cmdline;
 use crate::dead_strip;
 use crate::context::Context;
-use crate::error::Diagnostics;
 use crate::output_file;
 use crate::passes;
 
@@ -15,9 +14,8 @@ use crate::passes;
 /// are instantiated in crates of their own.
 pub fn main(
     argv: Vec<String>,
-    link_for_target: impl Fn(&str, &[String], &Diagnostics) -> Result<i32, String>,
+    link_for_target: impl Fn(&str, &[String]) -> Result<i32, String>,
 ) -> i32 {
-    let diag = Diagnostics::new(false);
 
     // Guess the target from -arch, then from the first Mach-O input
     // file, falling back to the host. If the guess turns out wrong,
@@ -30,7 +28,7 @@ pub fn main(
         .unwrap_or_else(|| host_target().to_string());
 
     loop {
-        match link_for_target(&target, &argv, &diag) {
+        match link_for_target(&target, &argv) {
             Ok(status) => return status,
             Err(actual) => target = actual,
         }
@@ -70,9 +68,9 @@ fn host_target() -> &'static str {
 
 /// Links for the target `E`, or reports the target the inputs are
 /// actually for.
-pub fn link<E: Arch>(cmdline: &[String], diag: &Diagnostics) -> Result<i32, String> {
-    let cmdline = cmdline::expand_response_files(diag, cmdline);
-    let args = cmdline::parse_args(diag, &cmdline);
+pub fn link<E: Arch>(cmdline: &[String]) -> Result<i32, String> {
+    let cmdline = cmdline::expand_response_files(cmdline);
+    let args = cmdline::parse_args(&cmdline);
 
     if let Some(arch) = &args.arch {
         if arch != E::NAME {
@@ -87,8 +85,8 @@ pub fn link<E: Arch>(cmdline: &[String], diag: &Diagnostics) -> Result<i32, Stri
         crate::subprocess::fork_child();
     }
 
-    let mut ctx: Context<E> = Context::new(args, Diagnostics::new(false));
-    ctx.diag.set_suppress_warnings(ctx.args.suppress_warnings);
+    let mut ctx: Context<E> = Context::new(args);
+    crate::error::set_suppress_warnings(ctx.args.suppress_warnings);
 
     // -print_statistics phase timer, in the spirit of mold's --perf.
     let t0 = std::time::Instant::now();
@@ -104,7 +102,7 @@ pub fn link<E: Arch>(cmdline: &[String], diag: &Diagnostics) -> Result<i32, Stri
     // libraries or the LTO output adds inputs, so resolution repeats
     // until the input set is stable.
     passes::read_input_files(&mut ctx);
-    ctx.diag.checkpoint();
+    crate::error::checkpoint();
     lap(&mut phases, "parse");
     loop {
         passes::resolve_symbols(&mut ctx);
@@ -142,7 +140,7 @@ pub fn link<E: Arch>(cmdline: &[String], diag: &Diagnostics) -> Result<i32, Stri
         passes::coalesce_weak_defs(&mut ctx);
         passes::create_output_sections(&mut ctx);
         crate::relocatable::link(&mut ctx);
-        ctx.diag.checkpoint();
+        crate::error::checkpoint();
         // Xcode asks every link, its single-object prelinks included,
         // for -dependency_info and fails the build if the file is
         // missing.
@@ -173,7 +171,7 @@ pub fn link<E: Arch>(cmdline: &[String], diag: &Diagnostics) -> Result<i32, Stri
     passes::print_why_load(&ctx);
     passes::print_trace(&ctx);
     tp!("dead_strip_dylibs", passes::dead_strip_dylibs(&mut ctx));
-    ctx.diag.checkpoint();
+    crate::error::checkpoint();
     if ctx.args.dead_strip {
         let tt = std::time::Instant::now();
         dead_strip::dead_strip(&mut ctx);
@@ -217,7 +215,7 @@ pub fn link<E: Arch>(cmdline: &[String], diag: &Diagnostics) -> Result<i32, Stri
     }
     passes::fix_synthetic_symbols(&mut ctx);
     passes::resolve_entry(&mut ctx);
-    ctx.diag.checkpoint();
+    crate::error::checkpoint();
     crate::mapfile::print_map(&ctx);
     crate::mapfile::write_dependency_info(&ctx);
     lap(&mut phases, "layout");
@@ -226,12 +224,12 @@ pub fn link<E: Arch>(cmdline: &[String], diag: &Diagnostics) -> Result<i32, Stri
     // written from background threads as copy_chunks finishes them;
     // finish() waits for the last one.
     let mut buf = vec![0; ctx.output_size as usize];
-    let out = output_file::OutputFile::create(&ctx.diag, &ctx.args.output, buf.as_ptr(), buf.len());
+    let out = output_file::OutputFile::create(&ctx.args.output, buf.as_ptr(), buf.len());
     passes::copy_chunks(&ctx, &mut buf, &out);
-    ctx.diag.checkpoint();
+    crate::error::checkpoint();
     {
         let tt = std::time::Instant::now();
-        out.finish(&ctx.diag);
+        out.finish();
         if std::env::var_os("MOLD_TIMING").is_some() {
             eprintln!("    write-wait {:?}", tt.elapsed());
         }

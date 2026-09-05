@@ -2,7 +2,6 @@
 
 use crate::arch::Arch;
 use crate::context::Context;
-use crate::error::Diagnostics;
 use crate::error;
 use crate::fatal;
 use crate::input_sections::{Reloc, RelocTarget};
@@ -355,7 +354,6 @@ impl Arch for Arm64 {
     }
 
     fn read_relocs(
-        diag: &Diagnostics,
         file_name: &str,
         sections: &[MachSection],
         hdr: &MachSection,
@@ -384,7 +382,7 @@ impl Arch for Arm64 {
                             let val = &file_data[off..off + 8];
                             addend = i64::from_le_bytes(val.try_into().unwrap());
                         }
-                        _ => fatal!(diag, "{file_name}: bad relocation size"),
+                        _ => fatal!("{file_name}: bad relocation size"),
                     }
                 }
                 ARM64_RELOC_ADDEND => {
@@ -414,7 +412,7 @@ impl Arch for Arm64 {
                     .position(|sec| sec.addr <= addr && addr < sec.addr + sec.size)
                     .or_else(|| sections.iter().position(|sec| addr == sec.addr + sec.size))
                 else {
-                    fatal!(diag, "{file_name}: bad relocation: {}", r.r_address);
+                    fatal!("{file_name}: bad relocation: {}", r.r_address);
                 };
                 let target = RelocTarget::Section(idx as u32);
                 (target, (addr - sections[idx].addr) as i64)
@@ -469,9 +467,7 @@ impl Arch for Arm64 {
                         // rejects one that does not fit.
                         let val = s.wrapping_add_signed(a);
                         if val > u32::MAX as u64 {
-                            fatal!(
-                                ctx,
-                                "{}: 32-bit absolute address out of range ({val:#x})",
+                            fatal!("{}: 32-bit absolute address out of range ({val:#x})",
                                 ctx.objs[obj].mf.name
                             );
                         }
@@ -493,7 +489,7 @@ impl Arch for Arm64 {
                     match r.size {
                         4 => write32(loc, val as u32),
                         8 => write64(loc, val),
-                        _ => fatal!(ctx, "bad SUBTRACTOR relocation size"),
+                        _ => fatal!("bad SUBTRACTOR relocation size"),
                     }
                 }
                 ARM64_RELOC_BRANCH26 => {
@@ -511,7 +507,7 @@ impl Arch for Arm64 {
                         });
                         match thunk {
                             Some(t) => val = t.wrapping_sub(p) as i64,
-                            None => error!(ctx, "branch target out of range: {val:x}"),
+                            None => error!("branch target out of range: {val:x}"),
                         }
                     }
                     write32(loc, read32(loc) | bits(val as u64, 27, 2) as u32);
@@ -537,7 +533,7 @@ impl Arch for Arm64 {
                     } else {
                         let insn = read32(loc);
                         if insn & 0xffc0_0000 != 0xf940_0000 {
-                            fatal!(ctx, "unexpected instruction under TLVP_LOAD_PAGEOFF12");
+                            fatal!("unexpected instruction under TLVP_LOAD_PAGEOFF12");
                         }
                         let target = s.wrapping_add_signed(a);
                         let add = 0x9100_0000 | (insn & 0x3ff) | ((target as u32 & 0xfff) << 10);
@@ -573,7 +569,7 @@ impl Arch for Arm64 {
                     } else {
                         let insn = read32(loc);
                         if insn & 0xffc0_0000 != 0xf940_0000 {
-                            fatal!(ctx, "unexpected instruction under GOT_LOAD_PAGEOFF12");
+                            fatal!("unexpected instruction under GOT_LOAD_PAGEOFF12");
                         }
                         let target = s.wrapping_add_signed(a);
                         let add = 0x9100_0000 | (insn & 0x3ff) | ((target as u32 & 0xfff) << 10);
@@ -585,7 +581,7 @@ impl Arch for Arm64 {
                     debug_assert!(r.size == 4);
                     write32(loc, g.wrapping_add_signed(a).wrapping_sub(p) as u32);
                 }
-                _ => fatal!(ctx, "unsupported relocation type: {}", r.r_type),
+                _ => fatal!("unsupported relocation type: {}", r.r_type),
             }
             i += 1;
         }
