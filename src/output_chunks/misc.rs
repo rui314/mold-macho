@@ -6,7 +6,8 @@ use crate::arch::Arch;
 use crate::context::Context;
 use crate::macho::*;
 use crate::output_chunks::ChunkHeader;
-use crate::util::align_to;
+use crate::symbol::Origin;
+use crate::util::{align_to, write_uleb};
 
 /// A section created from a file by -sectcreate, or an empty one for
 /// -add_empty_section and for a section only a boundary symbol names.
@@ -251,4 +252,79 @@ pub fn write_code_signature<E: Arch>(
 
     debug_assert_eq!(sig.len() as u64, ctx.code_signature.hdr.size);
     buf[cs_off as usize..cs_off as usize + sig.len()].copy_from_slice(&sig);
+}
+
+/// Live data-in-code entries as (subsection, offset within it,
+/// length, kind). In an object, an entry's offset is an address in
+/// the object's own address space (sections there are laid out from
+/// zero), which find_subsec maps to the owning subsection - entries
+/// whose subsection was dead-stripped vanish with it.
+/// Builds the LC_DATA_IN_CODE entries. Runs when layout reaches
+/// __LINKEDIT: the __text file offsets the entries record are final by
+/// then, so the table is built exactly once (sold builds its contents
+/// in compute_size the same way) and copied out verbatim.
+pub fn build_data_in_code<E: Arch>(ctx: &Context<E>) -> Vec<(u32, u16, u16)> {
+    let mut out: Vec<(u32, u16, u16)> = Vec::new();
+    for obj in &ctx.objs {
+        if !obj.is_alive {
+            continue;
+        }
+        for &(off, len, kind) in &obj.dice {
+            let Some((isec, off_in)) =
+                crate::input_files::find_subsec(&ctx.isecs, &obj.subsecs, off as u64)
+            else {
+                continue;
+            };
+            let isec = &ctx.isecs[ctx.resolve_isec(isec as usize)];
+            if isec.is_alive() {
+                let fileoff = ctx.chunk_header(isec.output_section().unwrap()).fileoff + isec.offset as u64 + off_in;
+                out.push((fileoff as u32, len, kind));
+            }
+        }
+    }
+    out.sort_unstable();
+    out
+}
+
+pub fn build_function_starts<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
+    if !ctx.args.function_starts {
+        return Vec::new();
+    }
+    use rayon::prelude::*;
+    let mut addrs: Vec<u64> = ctx
+        .symbols
+        .syms
+        .par_iter()
+        .filter_map(|sym| {
+            if !matches!(sym.origin(), Origin::Obj(_)) {
+                return None;
+            }
+            let isec = &ctx.isecs[ctx.resolve_isec(sym.isec()? as usize)];
+            if isec.is_alive()
+                && ctx.hdr_of(isec).segname() == "__TEXT"
+                && ctx.hdr_of(isec).sectname() == "__text"
+            {
+                Some(ctx.chunk_header(isec.output_section().unwrap()).addr + isec.offset as u64 + sym.value)
+            } else {
+                None
+            }
+        })
+        .collect();
+    if addrs.is_empty() {
+        return Vec::new();
+    }
+    addrs.par_sort_unstable();
+    addrs.dedup();
+
+    let mut buf = Vec::new();
+    let mut last = ctx.args.pagezero_size;
+    for addr in addrs {
+        write_uleb(&mut buf, addr - last);
+        last = addr;
+    }
+    buf.push(0);
+    while buf.len() % 8 != 0 {
+        buf.push(0);
+    }
+    buf
 }
