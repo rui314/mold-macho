@@ -4939,7 +4939,7 @@ pub fn set_osec_offsets<E: Arch>(ctx: &mut Context<E>) {
                         || {
                             t!(
                                 "trie_encode",
-                                output_chunks::encode_export_trie(shared, sorted_globals)
+                                output_chunks::export_trie::encode_export_trie(shared, sorted_globals)
                             )
                         },
                     )
