@@ -2169,7 +2169,14 @@ pub fn fold_objc_classrefs<E: Arch>(ctx: &mut Context<E>) {
             }
         }
 
-        for (&slot, &(_, class)) in &slots {
+        // In input order: the GOT slots the classes get (and with
+        // them the slot addresses every load encodes) follow the
+        // object's class-reference order, not the hash map's, which
+        // hashbrown seeds afresh for every process.
+        let mut ordered: Vec<(u32, crate::symbol::SymbolId)> =
+            slots.iter().map(|(&slot, &(_, class))| (slot, class)).collect();
+        ordered.sort_unstable_by_key(|&(slot, _)| slot);
+        for (slot, class) in ordered {
             if ctx.symbols[class].is_imported() || keep.contains(&slot) {
                 add_got(ctx, class);
             }
