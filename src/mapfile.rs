@@ -85,8 +85,8 @@ pub fn print_map<E: Arch>(ctx: &Context<E>) {
     // atom size ld64 reports. Compiler temp labels (l/L prefixes)
     // are not atoms and are skipped.
     let mut syms: Vec<(u64, usize, &str, usize, u64)> = Vec::new();
-    for i in 0..ctx.symtab.syms.len() {
-        let sym = &ctx.symtab[i];
+    for i in 0..ctx.symbols.syms.len() {
+        let sym = &ctx.symbols[i];
         let Origin::Obj(obj) = sym.origin() else {
             continue;
         };
@@ -122,8 +122,8 @@ pub fn print_map<E: Arch>(ctx: &Context<E>) {
     // them; sizes are the atom extents they would have had.
     let mut dead: Vec<(usize, u64, usize, &str)> = Vec::new();
     if ctx.args.dead_strip {
-        for i in 0..ctx.symtab.syms.len() {
-            let sym = &ctx.symtab[i];
+        for i in 0..ctx.symbols.syms.len() {
+            let sym = &ctx.symbols[i];
             let Origin::Obj(obj) = sym.origin() else {
                 continue;
             };

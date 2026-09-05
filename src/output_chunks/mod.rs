@@ -366,7 +366,7 @@ fn create_symtab_cmd<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
         cmd: LC_SYMTAB,
         cmdsize: size_of::<SymtabCommand>() as u32,
         symoff: symtab.hdr.fileoff as u32,
-        nsyms: ctx.symtab_data.entries.len() as u32,
+        nsyms: ctx.symtab.entries.len() as u32,
         stroff: strtab.hdr.fileoff as u32,
         strsize: strtab.hdr.size as u32,
     };
@@ -374,7 +374,7 @@ fn create_symtab_cmd<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
 }
 
 fn create_dysymtab_cmd<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
-    let data = &ctx.symtab_data;
+    let data = &ctx.symtab;
     let mut cmd = DysymtabCommand {
         cmd: LC_DYSYMTAB,
         cmdsize: size_of::<DysymtabCommand>() as u32,
@@ -679,7 +679,7 @@ pub fn copy_mach_header<E: Arch>(ctx: &Context<E>, buf: &mut [u8]) {
     // definitions (dyld must then consider weak coalescing when it
     // binds). ld-prime sets it on an executable calling a dylib's
     // weak definition, and on any image with weak-lookup binds.
-    if ctx.symtab.syms.iter().any(|sym| match sym.origin() {
+    if ctx.symbols.syms.iter().any(|sym| match sym.origin() {
         Origin::Dylib(idx) => {
             idx != u32::MAX && sym.is_used() && ctx.dylibs[idx as usize].weak_exports.contains(sym.name())
         }
@@ -693,12 +693,12 @@ pub fn copy_mach_header<E: Arch>(ctx: &Context<E>, buf: &mut [u8]) {
     // private-extern weak definitions don't count, since no other
     // image can coalesce against them) and strong definitions that
     // override a dylib's weak export, which dyld must let win.
-    if ctx.symtab.syms.iter().any(|sym| {
+    if ctx.symbols.syms.iter().any(|sym| {
         sym.is_weak_def()
             && sym.is_extern()
             && !sym.is_private_extern()
             && sym.isec().map(|i| i as usize).is_some_and(|isec| ctx.isecs[isec].is_alive())
-    }) || (0..ctx.symtab.syms.len()).any(|i| ctx.overrides_weak_export(i as u32))
+    }) || (0..ctx.symbols.syms.len()).any(|i| ctx.overrides_weak_export(i as u32))
     {
         hdr.flags |= MH_WEAK_DEFINES;
     }
@@ -728,7 +728,7 @@ pub fn copy_symtab<E: Arch>(ctx: &Context<E>, buf: &mut [u8]) {
     use rayon::prelude::*;
     let chunk = &ctx.chunks[find_chunk(ctx, |k| matches!(k, ChunkKind::Symtab)).unwrap()];
     let off = chunk.hdr.fileoff as usize;
-    let entries = &ctx.symtab_data.entries;
+    let entries = &ctx.symtab.entries;
     // Millions of entries, each wanting a sym_addr lookup for its
     // n_value: emit them in parallel blocks.
     const BLOCK: usize = 4096;
@@ -751,13 +751,13 @@ pub fn copy_symtab<E: Arch>(ctx: &Context<E>, buf: &mut [u8]) {
     // at its offset, on all cores; each string owns a disjoint range.
     let chunk = &ctx.chunks[find_chunk(ctx, |k| matches!(k, ChunkKind::Strtab)).unwrap()];
     let off = chunk.hdr.fileoff as usize;
-    let strtab = &mut buf[off..off + ctx.symtab_data.strtab_size];
+    let strtab = &mut buf[off..off + ctx.symtab.strtab_size];
     strtab[..4].copy_from_slice(b" \0-\0");
     struct BufPtr(*mut u8);
     unsafe impl Sync for BufPtr {}
     let base = BufPtr(strtab.as_mut_ptr());
     let base = &base;
-    ctx.symtab_data.strtab_uniques.par_iter().for_each(|&(o, name)| {
+    ctx.symtab.strtab_uniques.par_iter().for_each(|&(o, name)| {
         let o = o as usize;
         // SAFETY: strings occupy disjoint [o, o+len+1) ranges within
         // the string table; the trailing NUL is already zero in buf.
@@ -885,7 +885,7 @@ pub fn encode_export_trie<E: Arch>(
     let exports: Vec<(&'static str, Export)> = sorted_globals
         .par_iter()
         .filter_map(|&id| {
-            let sym = &ctx.symtab[id];
+            let sym = &ctx.symbols[id];
             if let Some(exported) = &ctx.args.exported_symbols {
                 if !exported.iter().any(|pat| pat == sym.name()) {
                     return None;
@@ -895,11 +895,11 @@ pub fn encode_export_trie<E: Arch>(
                 return None;
             }
             if let Some(&(_, target)) = ctx.indirect_aliases.iter().find(|&&(a, _)| a == id) {
-                let Origin::Dylib(dylib) = ctx.symtab[target].origin() else {
+                let Origin::Dylib(dylib) = ctx.symbols[target].origin() else {
                     return None;
                 };
                 let ordinal = ctx.bind_ordinal(dylib) as u32;
-                return Some((sym.name(), Export::Reexport { ordinal, name: ctx.symtab[target].name() }));
+                return Some((sym.name(), Export::Reexport { ordinal, name: ctx.symbols[target].name() }));
             }
             // The kind bits tell a client linker (and dyld) that the
             // export is a TLV descriptor; ld64 sets them, and a

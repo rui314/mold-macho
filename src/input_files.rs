@@ -656,7 +656,7 @@ pub fn integrate_objects<E: Arch>(
     let mut cie_base = ctx.cies.len();
     let mut fde_base = ctx.fdes.len();
     let mut unwind_base = ctx.unwind_records.len();
-    let mut locals_base = ctx.symtab.syms.len();
+    let mut locals_base = ctx.symbols.syms.len();
     let mut id_base = 0usize;
 
     struct Bases {
@@ -784,12 +784,12 @@ pub fn integrate_objects<E: Arch>(
     // sum assigned, and init writes every slot in it.
     {
         use rayon::prelude::*;
-        let total_locals = locals_base - ctx.symtab.syms.len();
-        let old_len = ctx.symtab.syms.len();
-        ctx.symtab.syms.reserve(total_locals);
+        let total_locals = locals_base - ctx.symbols.syms.len();
+        let old_len = ctx.symbols.syms.len();
+        ctx.symbols.syms.reserve(total_locals);
         struct SlotPtr(*mut crate::symbol::Symbol);
         unsafe impl Sync for SlotPtr {}
-        let ptr = SlotPtr(ctx.symtab.syms.as_mut_ptr());
+        let ptr = SlotPtr(ctx.symbols.syms.as_mut_ptr());
         let ptr = &ptr;
         staged
             .par_iter()
@@ -811,7 +811,7 @@ pub fn integrate_objects<E: Arch>(
             });
         // SAFETY: every slot in old_len..old_len+total_locals was
         // initialized by exactly one object above.
-        unsafe { ctx.symtab.syms.set_len(old_len + total_locals) };
+        unsafe { ctx.symbols.syms.set_len(old_len + total_locals) };
     }
 
     // Arena extension: each object's staged vectors move into the
@@ -900,11 +900,11 @@ pub fn integrate_object_with<E: Arch>(
     let mut pre = pre_interned.map(Vec::into_iter);
     for (nlist, name) in staged.nlists.iter().zip(&staged.sym_names) {
         let id = if nlist.is_stab() || !nlist.is_extern() {
-            ctx.symtab.add_local(name)
+            ctx.symbols.add_local(name)
         } else {
             match &mut pre {
                 Some(iter) => iter.next().unwrap(),
-                None => ctx.symtab.intern(name),
+                None => ctx.symbols.intern(name),
             }
         };
         syms.push(id);
@@ -1002,7 +1002,7 @@ pub fn parse_bitcode<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile, ali
             continue;
         }
         let name: &'static str = String::leak(ls.name);
-        let id = ctx.symtab.intern(name);
+        let id = ctx.symbols.intern(name);
         let mut nlist = NList::default();
         if ls.is_defined {
             nlist.n_type = N_ABS | N_EXT | if ls.is_private_extern { N_PEXT } else { 0 };

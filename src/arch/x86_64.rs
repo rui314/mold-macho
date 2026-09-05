@@ -238,7 +238,7 @@ impl Arch for X86_64 {
                 X86_64_RELOC_UNSIGNED => {
                     let imported = ctx
                         .reloc_target_sym(obj, r)
-                        .is_some_and(|id| ctx.symtab[id].is_imported());
+                        .is_some_and(|id| ctx.symbols[id].is_imported());
                     if imported {
                         // The slot is filled by dyld.
                     } else if ctx.reloc_target_is_tls(obj, r) {

@@ -277,7 +277,7 @@ pub fn icf_sections<E: Arch>(ctx: &mut Context<E>) {
             if nlist.is_stab() || nlist.n_type() != N_SECT {
                 continue;
             }
-            let sym = &ctx.symtab[sym_id];
+            let sym = &ctx.symbols[sym_id];
             // Compiler-generated temporary labels don't make an atom's
             // address observable.
             if !nlist.is_extern() && (sym.name().starts_with('l') || sym.name().starts_with('L')) {
@@ -339,7 +339,7 @@ pub fn icf_sections<E: Arch>(ctx: &mut Context<E>) {
         match target {
             RelocTarget::Sym(idx) => {
                 let sym_id = ctx.objs[obj].syms[idx as usize];
-                let sym = &ctx.symtab[sym_id];
+                let sym = &ctx.symbols[sym_id];
                 if let (Origin::Obj(_), Some(isec)) = (sym.origin(), sym.isec()) {
                     let isec = ctx.resolve_isec(isec as usize);
                     if cand_index[isec] != usize::MAX {

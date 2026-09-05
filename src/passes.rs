@@ -288,7 +288,7 @@ fn load_pending<E: Arch>(ctx: &mut Context<E>, pending: Vec<PendingObject>) {
     for v in per_obj {
         batch.extend(v);
     }
-    let ids = t!("gather", ctx.symtab.gather(&batch));
+    let ids = t!("gather", ctx.symbols.gather(&batch));
 
     t!("integrate", input_files::integrate_objects(ctx, staged, ids, counts));
 }
@@ -532,10 +532,10 @@ pub fn claim_new_dylibs<E: Arch>(ctx: &mut Context<E>, first: usize) {
     use rayon::prelude::*;
     struct SymsPtr(*mut crate::symbol::Symbol);
     unsafe impl Sync for SymsPtr {}
-    let syms_ptr = SymsPtr(ctx.symtab.syms.as_mut_ptr());
+    let syms_ptr = SymsPtr(ctx.symbols.syms.as_mut_ptr());
     let syms_ptr = &syms_ptr;
     let dylibs = &ctx.dylibs;
-    (0..ctx.symtab.syms.len()).into_par_iter().for_each(|i| {
+    (0..ctx.symbols.syms.len()).into_par_iter().for_each(|i| {
         // SAFETY: each index is written only by its own iteration.
         let sym = unsafe { &mut *syms_ptr.0.add(i) };
         if !sym.is_used() || sym.is_defined() {
@@ -579,7 +579,7 @@ fn claim_locals<E: Arch>(ctx: &mut Context<E>) {
     // symbols and the objects proceed in parallel.
     struct SlotPtr(*mut crate::symbol::Symbol);
     unsafe impl Sync for SlotPtr {}
-    let ptr = SlotPtr(ctx.symtab.syms.as_mut_ptr());
+    let ptr = SlotPtr(ctx.symbols.syms.as_mut_ptr());
     let ptr = &ptr;
     let isecs = &ctx.isecs;
     ctx.objs.par_iter().enumerate().for_each(|(obj_idx, obj)| {
@@ -614,7 +614,7 @@ fn claim_locals<E: Arch>(ctx: &mut Context<E>) {
 
 fn clear_claims<E: Arch>(ctx: &mut Context<E>) {
     use rayon::prelude::*;
-    ctx.symtab.syms.par_iter_mut().for_each(|sym| {
+    ctx.symbols.syms.par_iter_mut().for_each(|sym| {
         if matches!(sym.origin(), Origin::Obj(_) | Origin::Dylib(_)) || sym.is_common() {
             sym.set_origin(Origin::Undef);
             sym.set_isec(None);
@@ -647,12 +647,12 @@ fn do_resolve<E: Arch>(ctx: &mut Context<E>, only_alive: bool) {
     // entry point to Foundation's _NSExtensionMain.
     named.extend(ctx.args.aliases.iter().map(|(existing, _)| existing.clone()));
     for name in named {
-        if ctx.symtab.get(&name).is_none() {
-            ctx.symtab.intern(String::leak(name));
+        if ctx.symbols.get(&name).is_none() {
+            ctx.symbols.intern(String::leak(name));
         }
     }
 
-    let n = ctx.symtab.syms.len();
+    let n = ctx.symbols.syms.len();
 
     // Which symbols the files considered this round actually reference.
     // References from dead archive members must not count: they would
@@ -677,15 +677,15 @@ fn do_resolve<E: Arch>(ctx: &mut Context<E>, only_alive: bool) {
             }
         });
     for name in &ctx.args.forced_undefined {
-        if let Some(id) = ctx.symtab.get(name) {
+        if let Some(id) = ctx.symbols.get(name) {
             used[id as usize].store(true, Ordering::Relaxed);
         }
     }
-    if let Some(id) = ctx.symtab.get(&ctx.args.entry) {
+    if let Some(id) = ctx.symbols.get(&ctx.args.entry) {
         used[id as usize].store(true, Ordering::Relaxed);
     }
     for (existing, _) in &ctx.args.aliases {
-        if let Some(id) = ctx.symtab.get(existing) {
+        if let Some(id) = ctx.symbols.get(existing) {
             used[id as usize].store(true, Ordering::Relaxed);
         }
     }
@@ -742,7 +742,7 @@ fn do_resolve<E: Arch>(ctx: &mut Context<E>, only_alive: bool) {
     // writer and the parallel writes are disjoint.
     struct SymsPtr(*mut crate::symbol::Symbol);
     unsafe impl Sync for SymsPtr {}
-    let syms_ptr = SymsPtr(ctx.symtab.syms.as_mut_ptr());
+    let syms_ptr = SymsPtr(ctx.symbols.syms.as_mut_ptr());
     let syms_ptr = &syms_ptr;
     let isecs = &ctx.isecs;
     let objs = &ctx.objs;
@@ -838,24 +838,24 @@ fn do_resolve<E: Arch>(ctx: &mut Context<E>, only_alive: bool) {
         })
         .collect();
     for (sym_id, size, p2align) in commons {
-        let sym = &mut ctx.symtab[sym_id];
+        let sym = &mut ctx.symbols[sym_id];
         sym.value = sym.value.max(size);
         sym.common_p2align = sym.common_p2align.max(p2align);
     }
 
     // Report duplicates deterministically, sorted by symbol name.
     let mut duplicates = duplicates.into_inner().unwrap();
-    duplicates.sort_by_key(|&(sym_id, obj_idx)| (ctx.symtab[sym_id].name(), obj_idx));
+    duplicates.sort_by_key(|&(sym_id, obj_idx)| (ctx.symbols[sym_id].name(), obj_idx));
     duplicates.dedup();
     for (sym_id, obj_idx) in duplicates {
-        let prev = match ctx.symtab[sym_id].origin() {
+        let prev = match ctx.symbols[sym_id].origin() {
             Origin::Obj(idx) => file_display(&ctx.objs[idx as usize]),
             _ => "?".to_string(),
         };
         error!("duplicate symbol: {}: {}: {}",
             file_display(&ctx.objs[obj_idx]),
             prev,
-            ctx.symtab[sym_id].name()
+            ctx.symbols[sym_id].name()
         );
     }
 
@@ -866,11 +866,11 @@ fn do_resolve<E: Arch>(ctx: &mut Context<E>, only_alive: bool) {
     // dylib loaded non-weakly.
     for i in 0..n {
         if strong_ref[i].load(Ordering::Relaxed) {
-            let sym = &mut ctx.symtab.syms[i];
+            let sym = &mut ctx.symbols.syms[i];
             sym.set_is_strong_ref(true);
             sym.set_is_weak_ref(false);
-        } else if weak_ref[i].load(Ordering::Relaxed) && !ctx.symtab.syms[i].is_strong_ref() {
-            ctx.symtab.syms[i].set_is_weak_ref(true);
+        } else if weak_ref[i].load(Ordering::Relaxed) && !ctx.symbols.syms[i].is_strong_ref() {
+            ctx.symbols.syms[i].set_is_weak_ref(true);
         }
     }
 
@@ -879,7 +879,7 @@ fn do_resolve<E: Arch>(ctx: &mut Context<E>, only_alive: bool) {
     // relocatable link keeps every reference undefined instead.
     if ctx.args.relocatable {
         for (i, u) in used.iter().enumerate() {
-            ctx.symtab.syms[i].set_is_used(u.load(Ordering::Relaxed));
+            ctx.symbols.syms[i].set_is_used(u.load(Ordering::Relaxed));
         }
         return;
     }
@@ -909,7 +909,7 @@ fn do_resolve<E: Arch>(ctx: &mut Context<E>, only_alive: bool) {
 
     // Record the final usage set for downstream passes.
     for (i, u) in used.iter().enumerate() {
-        ctx.symtab.syms[i].set_is_used(u.load(Ordering::Relaxed));
+        ctx.symbols.syms[i].set_is_used(u.load(Ordering::Relaxed));
     }
 }
 
@@ -927,12 +927,12 @@ fn mark_live_objects<E: Arch>(ctx: &mut Context<E>) {
     let mut root_syms: Vec<&str> = vec![ctx.args.entry.as_str()];
     root_syms.extend(ctx.args.forced_undefined.iter().map(String::as_str));
     for name in root_syms {
-        if let Some(id) = ctx.symtab.get(name) {
-            if let Origin::Obj(owner) = ctx.symtab[id].origin() {
+        if let Some(id) = ctx.symbols.get(name) {
+            if let Origin::Obj(owner) = ctx.symbols[id].origin() {
                 let owner = owner as usize;
                 if !ctx.objs[owner].is_alive {
                     ctx.objs[owner].is_alive = true;
-                    ctx.why_load.insert(owner, ctx.symtab[id].name());
+                    ctx.why_load.insert(owner, ctx.symbols[id].name());
                     queue.push(owner);
                 }
             }
@@ -946,11 +946,11 @@ fn mark_live_objects<E: Arch>(ctx: &mut Context<E>) {
                 continue;
             }
             let sym_id = ctx.objs[obj_idx].syms[i];
-            if let Origin::Obj(owner) = ctx.symtab[sym_id].origin() {
+            if let Origin::Obj(owner) = ctx.symbols[sym_id].origin() {
                 let owner = owner as usize;
                 if !ctx.objs[owner].is_alive {
                     ctx.objs[owner].is_alive = true;
-                    ctx.why_load.insert(owner, ctx.symtab[sym_id].name());
+                    ctx.why_load.insert(owner, ctx.symbols[sym_id].name());
                     queue.push(owner);
                 }
             }
@@ -990,7 +990,7 @@ pub fn do_lto<E: Arch>(ctx: &mut Context<E>) -> bool {
         // internalized and dead-stripped inside the module.
         let executable = ctx.args.output_type == MH_EXECUTE;
         let mut preserve: Vec<std::ffi::CString> = Vec::new();
-        for sym in &ctx.symtab.syms {
+        for sym in &ctx.symbols.syms {
             if let Origin::Obj(idx) = sym.origin() {
                 if ctx.objs[idx as usize].lto_module.is_some() && sym.is_extern() {
                     if executable
@@ -1045,7 +1045,7 @@ pub fn do_lto<E: Arch>(ctx: &mut Context<E>) -> bool {
     for &(obj_idx, _) in &modules {
         let ids = ctx.objs[obj_idx].syms.clone();
         for id in ids {
-            let sym = &mut ctx.symtab[id];
+            let sym = &mut ctx.symbols[id];
             if sym.origin() == Origin::Obj((obj_idx) as u32) {
                 sym.set_origin(Origin::Undef);
                 sym.set_isec(None);
@@ -1071,8 +1071,8 @@ pub fn do_lto<E: Arch>(ctx: &mut Context<E>) -> bool {
 /// Converts surviving tentative definitions (common symbols) into real
 /// definitions in a synthetic __DATA,__common zero-fill section.
 pub fn convert_common_symbols<E: Arch>(ctx: &mut Context<E>) {
-    for i in 0..ctx.symtab.syms.len() {
-        let sym = &ctx.symtab[i];
+    for i in 0..ctx.symbols.syms.len() {
+        let sym = &ctx.symbols[i];
         if !sym.is_common() || sym.is_defined() {
             continue;
         }
@@ -1104,7 +1104,7 @@ pub fn convert_common_symbols<E: Arch>(ctx: &mut Context<E>) {
             nunwind: 0,
         });
 
-        let sym = &mut ctx.symtab[i];
+        let sym = &mut ctx.symbols[i];
         sym.set_origin(Origin::Synthetic);
         sym.set_isec(Some((ctx.isecs.len() - 1) as u32));
         sym.value = 0;
@@ -1136,7 +1136,7 @@ pub fn convert_init_offsets<E: Arch>(ctx: &mut Context<E>) {
             let obj = ctx.isecs[i].obj as usize;
             let target = match ctx.reloc_target_sym(obj, &rel) {
                 Some(id) => {
-                    let sym = &ctx.symtab[id];
+                    let sym = &ctx.symbols[id];
                     match sym.isec() {
                         Some(isec) => (ctx.resolve_isec(isec as usize), sym.value),
                         None => continue,
@@ -1280,7 +1280,7 @@ pub fn merge_literals<E: Arch>(ctx: &mut Context<E>) {
 fn redirect_symbols_to_replacements<E: Arch>(ctx: &mut Context<E>) {
     use rayon::prelude::*;
     let isecs = &ctx.isecs;
-    ctx.symtab.syms.par_iter_mut().for_each(|sym| {
+    ctx.symbols.syms.par_iter_mut().for_each(|sym| {
         if let Some(i) = sym.isec() {
             let mut r = i as usize;
             while isecs[r].replacement != crate::input_sections::NO_REPLACEMENT {
@@ -1322,7 +1322,7 @@ pub fn coalesce_objc_refs<E: Arch>(ctx: &mut Context<E>) {
             RelocTarget::Section(t) => Target::At(ctx.resolve_isec(t as usize), rel.addend),
             RelocTarget::Sym(idx) => {
                 let sym_id = ctx.objs[obj].syms[idx as usize];
-                let sym = &ctx.symtab[sym_id];
+                let sym = &ctx.symbols[sym_id];
                 match sym.isec() {
                     Some(isec) => Target::At(ctx.resolve_isec(isec as usize), sym.value as i64 + rel.addend),
                     None => Target::Sym(sym_id, rel.addend),
@@ -1406,8 +1406,8 @@ pub fn coalesce_objc_refs<E: Arch>(ctx: &mut Context<E>) {
 /// itself; each stub loads the interned selector and tail-calls
 /// _objc_msgSend.
 pub fn create_objc_msgsend_stubs<E: Arch>(ctx: &mut Context<E>) {
-    for i in 0..ctx.symtab.syms.len() {
-        let sym = &ctx.symtab[i];
+    for i in 0..ctx.symbols.syms.len() {
+        let sym = &ctx.symbols[i];
         if sym.is_defined() || !sym.is_used() {
             continue;
         }
@@ -1416,25 +1416,25 @@ pub fn create_objc_msgsend_stubs<E: Arch>(ctx: &mut Context<E>) {
         };
         let sel = sel.to_string();
         let idx = ctx.objc_stubs.len() as u32;
-        ctx.symtab[i].set_origin(Origin::Synthetic);
+        ctx.symbols[i].set_origin(Origin::Synthetic);
         ctx.sym_aux_mut(i as u32).objc_stub_idx = idx;
         ctx.objc_stubs.push((i as u32, sel));
     }
 
     if !ctx.objc_stubs.is_empty() {
-        let id = ctx.symtab.intern("_objc_msgSend");
-        ctx.symtab[id].set_is_used(true);
+        let id = ctx.symbols.intern("_objc_msgSend");
+        ctx.symbols[id].set_is_used(true);
         ctx.objc_msgsend_sym = Some(id);
 
         // The stub machinery itself references _objc_msgSend; resolve
         // it now, since regular resolution has already run.
-        if !ctx.symtab[id].is_defined() {
+        if !ctx.symbols[id].is_defined() {
             if let Some(dylib) = ctx
                 .dylibs
                 .iter()
                 .position(|d| d.exports.contains("_objc_msgSend"))
             {
-                let sym = &mut ctx.symtab[id];
+                let sym = &mut ctx.symbols[id];
                 sym.set_origin(Origin::Dylib((dylib) as u32));
                 sym.set_is_imported(true);
                 sym.set_is_extern(true);
@@ -1484,7 +1484,7 @@ pub fn auto_hide_weak_defs<E: Arch>(ctx: &mut Context<E>) {
     use std::sync::atomic::{AtomicU8, Ordering};
     const SEEN: u8 = 1;
     const NOT_HIDABLE: u8 = 2;
-    let flags: Vec<AtomicU8> = (0..ctx.symtab.syms.len()).map(|_| AtomicU8::new(0)).collect();
+    let flags: Vec<AtomicU8> = (0..ctx.symbols.syms.len()).map(|_| AtomicU8::new(0)).collect();
     ctx.objs.par_iter().for_each(|obj| {
         if !obj.is_alive {
             return;
@@ -1504,7 +1504,7 @@ pub fn auto_hide_weak_defs<E: Arch>(ctx: &mut Context<E>) {
     });
 
     let exported = ctx.args.exported_symbols.as_ref();
-    ctx.symtab
+    ctx.symbols
         .syms
         .par_iter_mut()
         .zip(&flags)
@@ -1572,7 +1572,7 @@ pub fn coalesce_weak_defs<E: Arch>(ctx: &mut Context<E>) {
                 {
                     continue;
                 }
-                let sym = &shared.symtab[sym_id];
+                let sym = &shared.symbols[sym_id];
                 let Origin::Obj(owner) = sym.origin() else { continue };
                 if owner as usize == obj_idx {
                     continue;
@@ -1665,22 +1665,22 @@ pub fn report_undef_errors<E: Arch>(ctx: &mut Context<E>) {
         }
     };
 
-    for i in 0..ctx.symtab.syms.len() {
-        let sym = &ctx.symtab[i];
+    for i in 0..ctx.symbols.syms.len() {
+        let sym = &ctx.symbols[i];
         if sym.is_used() && !sym.is_defined() {
             let allowed = ctx.args.undefined_dynamic_lookup
                 || ctx.args.allowed_undefined.iter().any(|n| n == sym.name());
             if allowed {
                 if ctx.args.undefined_warning {
-                    crate::warn!("undefined symbol: {}", ctx.symtab[i].name());
+                    crate::warn!("undefined symbol: {}", ctx.symbols[i].name());
                 }
-                let sym = &mut ctx.symtab[i];
+                let sym = &mut ctx.symbols[i];
                 sym.set_origin(Origin::Dylib((usize::MAX) as u32));
                 sym.set_is_imported(true);
                 sym.set_is_extern(true);
             } else {
                 let file = who_wants(ctx, i as u32);
-                error!("undefined symbol: {}: {}", file, ctx.symtab[i].name());
+                error!("undefined symbol: {}: {}", file, ctx.symbols[i].name());
             }
         }
     }
@@ -1704,7 +1704,7 @@ pub fn print_dependencies<E: Arch>(ctx: &Context<E>) {
             if nlist.is_stab() || nlist.n_type() != N_UNDF || nlist.is_common() {
                 continue;
             }
-            let sym = &ctx.symtab[sym_id];
+            let sym = &ctx.symbols[sym_id];
             let provider = match sym.origin() {
                 Origin::Obj(idx) => {
                     let idx = idx as usize;
@@ -1797,7 +1797,7 @@ pub fn dead_strip_dylibs<E: Arch>(ctx: &mut Context<E>) {
     // come out weak, libswiftCore strong.
     let mut bound = vec![0u32; ctx.dylibs.len()];
     let mut weak = vec![0u32; ctx.dylibs.len()];
-    for sym in &ctx.symtab.syms {
+    for sym in &ctx.symbols.syms {
         if let Origin::Dylib(idx) = sym.origin() {
             if idx != u32::MAX {
                 used[idx as usize] = true;
@@ -1823,7 +1823,7 @@ pub fn dead_strip_dylibs<E: Arch>(ctx: &mut Context<E>) {
         }
     }
 
-    for sym in &mut ctx.symtab.syms {
+    for sym in &mut ctx.symbols.syms {
         if let Origin::Dylib(idx) = sym.origin() {
             if idx != u32::MAX {
                 sym.set_origin(Origin::Dylib(remap[idx as usize] as u32));
@@ -1889,7 +1889,7 @@ pub fn scan_relocations<E: Arch>(ctx: &mut Context<E>) {
         .collect();
 
     for (id, class) in classes {
-        let sym = &ctx.symtab[id];
+        let sym = &ctx.symbols[id];
 
         // Thread-locals live behind __thread_vars descriptors, so the
         // reference kind must agree with the symbol: a TLV load of
@@ -1936,7 +1936,7 @@ pub fn scan_relocations<E: Arch>(ctx: &mut Context<E>) {
 /// S_THREAD_LOCAL_VARIABLES section, or a dylib export listed as
 /// thread-local. Symbols left to runtime lookup pass as either.
 pub fn is_thread_local_sym<E: Arch>(ctx: &Context<E>, id: crate::symbol::SymbolId) -> bool {
-    let sym = &ctx.symtab[id];
+    let sym = &ctx.symbols[id];
     match sym.origin() {
         crate::symbol::Origin::Obj(_) => sym.isec().map(|i| i as usize).is_some_and(|isec| {
             ctx.hdr_of(&ctx.isecs[isec]).flags & SECTION_TYPE == S_THREAD_LOCAL_VARIABLES
@@ -2109,7 +2109,7 @@ pub fn fold_objc_classrefs<E: Arch>(ctx: &mut Context<E>) {
                 let slot = match rel.target() {
                     RelocTarget::Section(t) if rel.addend == 0 => t,
                     RelocTarget::Sym(idx) => {
-                        let sym = &ctx.symtab[ctx.objs[obj_idx].syms[idx as usize]];
+                        let sym = &ctx.symbols[ctx.objs[obj_idx].syms[idx as usize]];
                         match sym.isec() {
                             Some(t) if sym.value == 0 && rel.addend == 0 => t,
                             _ => continue,
@@ -2132,7 +2132,7 @@ pub fn fold_objc_classrefs<E: Arch>(ctx: &mut Context<E>) {
         }
 
         for (&slot, &(_, class)) in &slots {
-            if ctx.symtab[class].is_imported() || keep.contains(&slot) {
+            if ctx.symbols[class].is_imported() || keep.contains(&slot) {
                 add_got(ctx, class);
             }
             if !keep.contains(&slot) {
@@ -2263,7 +2263,7 @@ fn objc_ref_location<E: Arch>(ctx: &Context<E>, r: ObjcRef) -> Option<(u32, u64)
     let (isec, off) = match r {
         ObjcRef::Isec(isec, off) => (isec, off),
         ObjcRef::Sym(id, addend) => {
-            let sym = &ctx.symtab[id];
+            let sym = &ctx.symbols[id];
             let isec = sym.isec()?;
             (isec, (sym.value as i64 + addend) as u64)
         }
@@ -2488,10 +2488,10 @@ pub fn convert_objc_method_lists<E: Arch>(ctx: &mut Context<E>) {
     }
     // The lists' own symbols (__OBJC_$_INSTANCE_METHODS_Foo ...) follow
     // them into __objc_methlist.
-    for id in 0..ctx.symtab.syms.len() {
-        if let Some(isec) = ctx.symtab[id].isec() {
+    for id in 0..ctx.symbols.syms.len() {
+        if let Some(isec) = ctx.symbols[id].isec() {
             if let Some(&synth) = repoint.get(&isec) {
-                ctx.symtab[id].set_isec(Some(synth));
+                ctx.symbols[id].set_isec(Some(synth));
             }
         }
     }
@@ -2737,7 +2737,7 @@ pub fn merge_objc_categories<E: Arch>(ctx: &mut Context<E>) {
     let local = |ctx: &Context<E>, r: ObjcRef| -> bool {
         match r {
             ObjcRef::Null | ObjcRef::Isec(..) | ObjcRef::TailSelref(_) => true,
-            ObjcRef::Sym(id, _) => !ctx.symtab[id].is_imported() && ctx.symtab[id].isec().is_some(),
+            ObjcRef::Sym(id, _) => !ctx.symbols[id].is_imported() && ctx.symbols[id].isec().is_some(),
         }
     };
 
@@ -3099,7 +3099,7 @@ pub fn merge_objc_categories<E: Arch>(ctx: &mut Context<E>) {
             let flags = match rel.target() {
                 RelocTarget::Sym(idx) => {
                     let id = ctx.objs[obj].syms[idx as usize];
-                    (ctx.symtab[id].value as i64 + rel.addend) & 3
+                    (ctx.symbols[id].value as i64 + rel.addend) & 3
                 }
                 RelocTarget::Section(_) => rel.addend & 3,
             };
@@ -3212,8 +3212,8 @@ pub fn merge_objc_categories<E: Arch>(ctx: &mut Context<E>) {
 /// Defines the symbols the linker itself provides.
 pub fn add_synthetic_symbols<E: Arch>(ctx: &mut Context<E>) {
     if ctx.args.output_type == MH_EXECUTE {
-        let id = ctx.symtab.intern("__mh_execute_header");
-        let sym = &mut ctx.symtab[id];
+        let id = ctx.symbols.intern("__mh_execute_header");
+        let sym = &mut ctx.symbols[id];
         if !sym.is_defined() {
             sym.set_origin(Origin::Synthetic);
             sym.value = ctx.args.pagezero_size;
@@ -3224,8 +3224,8 @@ pub fn add_synthetic_symbols<E: Arch>(ctx: &mut Context<E>) {
     // ___dso_handle identifies the image; C++ static destructors pass it
     // to __cxa_atexit. It resolves to the mach header but is never
     // exported.
-    let id = ctx.symtab.intern("___dso_handle");
-    let sym = &mut ctx.symtab[id];
+    let id = ctx.symbols.intern("___dso_handle");
+    let sym = &mut ctx.symbols[id];
     if !sym.is_defined() {
         sym.set_origin(Origin::Synthetic);
         sym.value = ctx.args.pagezero_size;
@@ -3239,23 +3239,23 @@ pub fn add_synthetic_symbols<E: Arch>(ctx: &mut Context<E>) {
     // of $VARIANT names) without touching the source.
     let aliases = std::mem::take(&mut ctx.args.aliases);
     for (existing, new) in &aliases {
-        let Some(src) = ctx.symtab.get(existing) else {
+        let Some(src) = ctx.symbols.get(existing) else {
             error!("-alias: undefined base symbol: {existing}");
             continue;
         };
-        if !ctx.symtab[src].is_defined() {
+        if !ctx.symbols[src].is_defined() {
             error!("-alias: undefined base symbol: {existing}");
             continue;
         }
-        let dst = ctx.symtab.intern(String::leak(new.clone()));
-        if ctx.symtab[src].is_imported() {
+        let dst = ctx.symbols.intern(String::leak(new.clone()));
+        if ctx.symbols[src].is_imported() {
             // An alias of a dylib symbol is an indirect symbol
             // (N_INDR) whose export trie entry re-exports the dylib's
             // symbol under the new name; nothing here has an address.
             // ld64 does this for Xcode's
             // `-alias _NSExtensionMain ___debug_main_executable_dylib_entry_point`.
-            if !ctx.symtab[dst].is_defined() {
-                let sym = &mut ctx.symtab[dst];
+            if !ctx.symbols[dst].is_defined() {
+                let sym = &mut ctx.symbols[dst];
                 sym.set_origin(Origin::Synthetic);
                 sym.set_isec(None);
                 sym.value = 0;
@@ -3264,12 +3264,12 @@ pub fn add_synthetic_symbols<E: Arch>(ctx: &mut Context<E>) {
             }
             continue;
         }
-        if !ctx.symtab[dst].is_defined() {
+        if !ctx.symbols[dst].is_defined() {
             let (origin, isec, value) = {
-                let s = &ctx.symtab[src];
+                let s = &ctx.symbols[src];
                 (s.origin(), s.isec(), s.value)
             };
-            let sym = &mut ctx.symtab[dst];
+            let sym = &mut ctx.symbols[dst];
             sym.set_origin(origin);
             sym.set_isec(isec);
             sym.value = value;
@@ -3284,8 +3284,8 @@ pub fn add_synthetic_symbols<E: Arch>(ctx: &mut Context<E>) {
     // wills the named section into existence if nothing else creates
     // it. Their values can only be known after layout, so they are
     // claimed here and patched in fix_synthetic_symbols.
-    for id in 0..ctx.symtab.syms.len() {
-        let sym = &ctx.symtab[id];
+    for id in 0..ctx.symbols.syms.len() {
+        let sym = &ctx.symbols[id];
         if !sym.is_used() || sym.is_defined() {
             continue;
         }
@@ -3304,7 +3304,7 @@ pub fn add_synthetic_symbols<E: Arch>(ctx: &mut Context<E>) {
         let Some((is_start, seg, sect)) = parsed else {
             continue;
         };
-        let sym = &mut ctx.symtab[id];
+        let sym = &mut ctx.symbols[id];
         sym.set_origin(Origin::Synthetic);
         sym.set_is_extern(false);
         ctx.boundary_syms.push((id as u32, is_start, seg, sect));
@@ -3323,7 +3323,7 @@ pub fn fix_synthetic_symbols<E: Arch>(ctx: &mut Context<E>) {
                     .iter()
                     .find(|c| c.hdr.is_sect && c.hdr.segname == seg && c.hdr.sectname == *sect)
                 else {
-                    fatal!("no section for boundary symbol: {}", ctx.symtab[id].name());
+                    fatal!("no section for boundary symbol: {}", ctx.symbols[id].name());
                 };
                 if is_start {
                     chunk.hdr.addr
@@ -3333,7 +3333,7 @@ pub fn fix_synthetic_symbols<E: Arch>(ctx: &mut Context<E>) {
             }
             None => {
                 let Some(segment) = ctx.segments.iter().find(|s| s.name == seg) else {
-                    fatal!("no segment for boundary symbol: {}", ctx.symtab[id].name());
+                    fatal!("no segment for boundary symbol: {}", ctx.symbols[id].name());
                 };
                 if is_start {
                     segment.cmd.vmaddr
@@ -3342,7 +3342,7 @@ pub fn fix_synthetic_symbols<E: Arch>(ctx: &mut Context<E>) {
                 }
             }
         };
-        ctx.symtab[id].value = value;
+        ctx.symbols[id].value = value;
     }
 }
 
@@ -3667,7 +3667,7 @@ pub fn create_output_sections<E: Arch>(ctx: &mut Context<E>) {
                 if nlist.is_stab() || nlist.n_type() != N_SECT || nlist.n_desc & N_COLD_FUNC == 0 {
                     continue;
                 }
-                if let Some(isec) = ctx.symtab[sym_id].isec() {
+                if let Some(isec) = ctx.symbols[sym_id].isec() {
                     cold[isec as usize] = true;
                     any = true;
                 }
@@ -3919,7 +3919,7 @@ pub fn create_output_sections<E: Arch>(ctx: &mut Context<E>) {
         // 8-byte aligned; category merging also retires some after
         // their first placement.
         let mut name_of: hashbrown::HashMap<u32, &'static str> = hashbrown::HashMap::new();
-        for sym in ctx.symtab.syms.iter() {
+        for sym in ctx.symbols.syms.iter() {
             if let Some(isec) = sym.isec() {
                 let r = ctx.resolve_isec(isec as usize) as u32;
                 let e = name_of.entry(r).or_insert(sym.name());
@@ -4229,7 +4229,7 @@ pub fn plan_object_stabs<E: Arch>(
                 continue;
             }
             let mut ent = *nlist;
-            let name = ctx.symtab[sym_id].name();
+            let name = ctx.symbols[sym_id].name();
             // The string table starts " \0": offset 1 is the empty
             // name (a closing N_SO, an N_FUN size entry); offset 0
             // would read as the name " ", and lldb then never sees
@@ -4324,7 +4324,7 @@ pub fn plan_object_stabs<E: Arch>(
     ));
 
     for (nlist, &sym_id) in obj.nlists.iter().zip(&obj.syms) {
-        let sym = &ctx.symtab[sym_id];
+        let sym = &ctx.symbols[sym_id];
         if nlist.is_stab()
             || !matches!(sym.origin(), Origin::Obj(o) if o as usize == obj_idx)
             || (!nlist.is_extern() && !keep_local_symbol_in(ctx, sym.name(), sym.isec()))
@@ -4534,7 +4534,7 @@ pub fn create_output_symtab<E: Arch>(
                 }
                 let r = obj.local_range();
                 for (nlist, &sym_id) in obj.nlists[r.clone()].iter().zip(&obj.syms[r]) {
-                    let sym = &ctx_ref.symtab[sym_id];
+                    let sym = &ctx_ref.symbols[sym_id];
                     if nlist.is_stab() || nlist.is_extern() || !keep_local_symbol_in(ctx_ref, sym.name(), sym.isec()) {
                         continue;
                     }
@@ -4601,7 +4601,7 @@ pub fn create_output_symtab<E: Arch>(
         if !ctx.objc_stubs.is_empty() {
             let chunk = &ctx.chunks[ctx.objc_stubs_chunk];
             for (i, &(sym, _)) in ctx.objc_stubs.iter().enumerate() {
-                names.push(ctx.symtab[sym].name());
+                names.push(ctx.symbols[sym].name());
                 data.entries.push((
                     NList {
                         n_strx: 0,
@@ -4631,10 +4631,10 @@ pub fn create_output_symtab<E: Arch>(
     }
     let classes: Vec<Class> = {
         use rayon::prelude::*;
-        (0..ctx.symtab.syms.len())
+        (0..ctx.symbols.syms.len())
             .into_par_iter()
             .map(|i| {
-                let sym = &ctx.symtab[i];
+                let sym = &ctx.symbols[i];
                 if matches!(sym.origin(), Origin::Dylib(_)) {
                     return Class::Undef;
                 }
@@ -4665,7 +4665,7 @@ pub fn create_output_symtab<E: Arch>(
         if class != Class::Pext {
             continue;
         }
-        let sym = &ctx.symtab[i];
+        let sym = &ctx.symbols[i];
         let isec = ctx.resolve_isec(sym.isec().unwrap() as usize);
         names.push(sym.name());
         let ent = NList {
@@ -4683,7 +4683,7 @@ pub fn create_output_symtab<E: Arch>(
     // once for this table and the export trie both.
     use rayon::prelude::*;
     for &i in sorted_globals {
-        let sym = &ctx.symtab[i];
+        let sym = &ctx.symbols[i];
         let n_strx = 0;
         names.push(sym.name());
         let (n_type, n_sect, mut n_desc) = match (sym.origin(), sym.isec()) {
@@ -4717,10 +4717,10 @@ pub fn create_output_symtab<E: Arch>(
         .filter(|&(_, &c)| c == Class::Undef)
         .map(|(i, _)| i)
         .collect();
-    undefs.par_sort_unstable_by_key(|&i| crate::util::name_sort_key(ctx.symtab[i].name()));
+    undefs.par_sort_unstable_by_key(|&i| crate::util::name_sort_key(ctx.symbols[i].name()));
 
     for &i in &undefs {
-        let sym = &ctx.symtab[i];
+        let sym = &ctx.symbols[i];
         let Origin::Dylib(dylib) = sym.origin() else {
             unreachable!()
         };
@@ -4869,10 +4869,10 @@ pub fn create_output_symtab<E: Arch>(
     }
 
     // Record each global symbol's index for the indirect symbol table.
-    data.output_sym_indices = vec![u32::MAX; ctx.symtab.syms.len()];
+    data.output_sym_indices = vec![u32::MAX; ctx.symbols.syms.len()];
     for (i, (_, sym)) in data.entries.iter().enumerate() {
         if let Some(id) = sym {
-            if ctx.symtab[*id].is_extern() {
+            if ctx.symbols[*id].is_extern() {
                 data.output_sym_indices[*id as usize] = i as u32;
             }
         }
@@ -4964,10 +4964,10 @@ pub fn set_osec_offsets<E: Arch>(ctx: &mut Context<E>) {
             // streams, function starts and data-in-code build under it.
             let sorted_globals_of = || -> Vec<crate::symbol::SymbolId> { t!("globals_sort", {
                 use rayon::prelude::*;
-                let mut v: Vec<crate::symbol::SymbolId> = (0..shared.symtab.syms.len())
+                let mut v: Vec<crate::symbol::SymbolId> = (0..shared.symbols.syms.len())
                     .into_par_iter()
                     .filter(|&i| {
-                        let sym = &shared.symtab[i];
+                        let sym = &shared.symbols[i];
                         sym.is_extern()
                             && !sym.is_private_extern()
                             && matches!(sym.origin(), Origin::Obj(_) | Origin::Synthetic)
@@ -4977,7 +4977,7 @@ pub fn set_osec_offsets<E: Arch>(ctx: &mut Context<E>) {
                     })
                     .map(|i| i as u32)
                     .collect();
-                v.par_sort_unstable_by_key(|&i| crate::util::name_sort_key(shared.symtab[i].name()));
+                v.par_sort_unstable_by_key(|&i| crate::util::name_sort_key(shared.symbols[i].name()));
                 v
             })};
             let ((symtab, trie), (streams, (starts, dice))) = rayon::join(
@@ -5021,7 +5021,7 @@ pub fn set_osec_offsets<E: Arch>(ctx: &mut Context<E>) {
                     )
                 },
             );
-            ctx.symtab_data = symtab;
+            ctx.symtab = symtab;
             ctx.dice_data = dice;
             match streams {
                 Streams::Chained(chained) => {
@@ -5070,9 +5070,9 @@ pub fn set_osec_offsets<E: Arch>(ctx: &mut Context<E>) {
             let size = match &ctx.chunks[idx].kind {
                 ChunkKind::MachHeader => header_size,
                 ChunkKind::Symtab => {
-                    (ctx.symtab_data.entries.len() * size_of::<NList>()) as u64
+                    (ctx.symtab.entries.len() * size_of::<NList>()) as u64
                 }
-                ChunkKind::Strtab => ctx.symtab_data.strtab_size as u64,
+                ChunkKind::Strtab => ctx.symtab.strtab_size as u64,
                 // Encoded once; the personality cells the encoding
                 // cannot know yet (GOT addresses) come back as a
                 // patch list for the copy phase.
@@ -5216,7 +5216,7 @@ fn build_rebase_info<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
             // offsets, not addresses, so they are not rebased.
             let imported = ctx
                 .reloc_target_sym(isec.obj as usize, rel)
-                .is_some_and(|id| ctx.symtab[id].is_imported());
+                .is_some_and(|id| ctx.symbols[id].is_imported());
             if !imported && !ctx.reloc_target_is_tls(isec.obj as usize, rel) {
                 locs.push(base + rel.offset as u64);
             }
@@ -5228,7 +5228,7 @@ fn build_rebase_info<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
     if let Some(idx) = output_chunks::find_chunk(ctx, |k| matches!(k, ChunkKind::ThreadPtrs)) {
         let addr = ctx.chunks[idx].hdr.addr;
         for (i, &id) in ctx.thread_ptr_syms.iter().enumerate() {
-            if !ctx.symtab[id].is_imported() {
+            if !ctx.symbols[id].is_imported() {
                 locs.push(addr + i as u64 * 8);
             }
         }
@@ -5259,7 +5259,7 @@ fn build_rebase_info<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
     if let Some(idx) = output_chunks::find_chunk(ctx, |k| matches!(k, ChunkKind::Got)) {
         let got_addr = ctx.chunks[idx].hdr.addr;
         for (i, &id) in ctx.got_syms.iter().enumerate() {
-            if !ctx.symtab[id].is_imported() {
+            if !ctx.symbols[id].is_imported() {
                 locs.push(got_addr + i as u64 * 8);
             }
         }
@@ -5341,7 +5341,7 @@ fn build_lazy_bind_info<E: Arch>(ctx: &Context<E>) -> (Vec<u8>, Vec<u32>) {
         let (seg, off) = segment_and_offset(ctx, addr);
         buf.push(BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB | seg as u8);
         write_uleb(&mut buf, off);
-        let sym = &ctx.symtab[id];
+        let sym = &ctx.symbols[id];
         let Origin::Dylib(dylib) = sym.origin() else {
             unreachable!()
         };
@@ -5374,7 +5374,7 @@ fn build_bind_info<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
     if let Some(idx) = output_chunks::find_chunk(ctx, |k| matches!(k, ChunkKind::Got)) {
         let got_addr = ctx.chunks[idx].hdr.addr;
         for (i, &id) in ctx.got_syms.iter().enumerate() {
-            if ctx.symtab[id].is_imported() {
+            if ctx.symbols[id].is_imported() {
                 binds.push((got_addr + i as u64 * 8, id, 0));
             }
         }
@@ -5385,7 +5385,7 @@ fn build_bind_info<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
     if let Some(idx) = output_chunks::find_chunk(ctx, |k| matches!(k, ChunkKind::ThreadPtrs)) {
         let addr = ctx.chunks[idx].hdr.addr;
         for (i, &id) in ctx.thread_ptr_syms.iter().enumerate() {
-            if ctx.symtab[id].is_imported() {
+            if ctx.symbols[id].is_imported() {
                 binds.push((addr + i as u64 * 8, id, 0));
             }
         }
@@ -5408,7 +5408,7 @@ fn build_bind_info<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
                 continue;
             }
             if let Some(id) = ctx.reloc_target_sym(isec.obj as usize, rel) {
-                if ctx.symtab[id].is_imported() {
+                if ctx.symbols[id].is_imported() {
                     binds.push((base + rel.offset as u64, id, rel.addend));
                 }
             }
@@ -5423,7 +5423,7 @@ fn build_bind_info<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
     let mut buf = Vec::new();
     let mut last_addend = 0i64;
     for (addr, id, addend) in binds {
-        let sym = &ctx.symtab[id];
+        let sym = &ctx.symbols[id];
         let Origin::Dylib(dylib) = sym.origin() else {
             unreachable!()
         };
@@ -5553,7 +5553,7 @@ fn collect_fixups<E: Arch>(ctx: &Context<E>) -> Vec<(u64, Option<crate::symbol::
     if let Some(idx) = output_chunks::find_chunk(ctx, |k| matches!(k, ChunkKind::ThreadPtrs)) {
         let addr = ctx.chunks[idx].hdr.addr;
         for (i, &id) in ctx.thread_ptr_syms.iter().enumerate() {
-            let sym = Some(id).filter(|&id| ctx.symtab[id].is_imported());
+            let sym = Some(id).filter(|&id| ctx.symbols[id].is_imported());
             fixups.push((addr + i as u64 * 8, sym, 0));
         }
     }
@@ -5611,24 +5611,24 @@ fn build_weak_bind_info<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
     // first, by name, flagged non-weak, with no location: dyld then
     // knows this image's copy wins coalescing.
     let mut overrides: Vec<crate::symbol::SymbolId> =
-        (0..ctx.symtab.syms.len() as u32).filter(|&i| ctx.overrides_weak_export(i)).collect();
+        (0..ctx.symbols.syms.len() as u32).filter(|&i| ctx.overrides_weak_export(i)).collect();
     if binds.is_empty() && overrides.is_empty() {
         return Vec::new();
     }
-    overrides.sort_by(|&a, &b| ctx.symtab[a].name().cmp(ctx.symtab[b].name()));
-    binds.sort_by(|a, b| ctx.symtab[a.0].name().cmp(ctx.symtab[b.0].name()).then(a.1.cmp(&b.1)));
+    overrides.sort_by(|&a, &b| ctx.symbols[a].name().cmp(ctx.symbols[b].name()));
+    binds.sort_by(|a, b| ctx.symbols[a.0].name().cmp(ctx.symbols[b.0].name()).then(a.1.cmp(&b.1)));
 
     let mut buf = Vec::new();
     for id in overrides {
         buf.push(BIND_OPCODE_SET_SYMBOL_TRAILING_FLAGS_IMM | BIND_SYMBOL_FLAGS_NON_WEAK_DEFINITION);
-        buf.extend_from_slice(ctx.symtab[id].name().as_bytes());
+        buf.extend_from_slice(ctx.symbols[id].name().as_bytes());
         buf.push(0);
     }
     let mut last: Option<crate::symbol::SymbolId> = None;
     for (id, addr) in binds {
         if last != Some(id) {
             buf.push(BIND_OPCODE_SET_SYMBOL_TRAILING_FLAGS_IMM);
-            buf.extend_from_slice(ctx.symtab[id].name().as_bytes());
+            buf.extend_from_slice(ctx.symbols[id].name().as_bytes());
             buf.push(0);
             buf.push(BIND_OPCODE_SET_TYPE_IMM | BIND_TYPE_POINTER);
             last = Some(id);
@@ -5773,11 +5773,11 @@ fn build_chained_fixups<E: Arch>(ctx: &Context<E>) -> ChainedFixups {
     for (i, &(sym, _)) in dynsyms.iter().enumerate() {
         name_offs.push(nameoff);
         if i + 1 == dynsyms.len() || dynsyms[i + 1].0 != sym {
-            nameoff += ctx.symtab[sym].name().len() as u32 + 1;
+            nameoff += ctx.symbols[sym].name().len() as u32 + 1;
         }
     }
     for (i, &(sym, addend)) in dynsyms.iter().enumerate() {
-        let s = &ctx.symtab[sym];
+        let s = &ctx.symbols[sym];
         // An import names its dylib; one of this image's own weak
         // definitions is bound by weak lookup (ordinal -3), which
         // makes dyld search every loaded image for the coalesced
@@ -5817,7 +5817,7 @@ fn build_chained_fixups<E: Arch>(ctx: &Context<E>) -> ChainedFixups {
     buf[12..16].copy_from_slice(&(symbols_offset as u32).to_le_bytes());
     for (i, &(sym, _)) in dynsyms.iter().enumerate() {
         if i + 1 == dynsyms.len() || dynsyms[i + 1].0 != sym {
-            buf.extend_from_slice(ctx.symtab[sym].name().as_bytes());
+            buf.extend_from_slice(ctx.symbols[sym].name().as_bytes());
             buf.push(0);
         }
     }
@@ -5940,7 +5940,7 @@ fn order_file_ranks<E: Arch>(ctx: &Context<E>) -> Option<Vec<u64>> {
     }
 
     let mut ranks = vec![u64::MAX; ctx.isecs.len()];
-    for sym in &ctx.symtab.syms {
+    for sym in &ctx.symbols.syms {
         let Origin::Obj(obj) = sym.origin() else {
             continue;
         };
@@ -6002,7 +6002,7 @@ fn build_function_starts<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
     }
     use rayon::prelude::*;
     let mut addrs: Vec<u64> = ctx
-        .symtab
+        .symbols
         .syms
         .par_iter()
         .filter_map(|sym| {
@@ -6044,12 +6044,12 @@ pub fn resolve_entry<E: Arch>(ctx: &mut Context<E>) {
     if ctx.args.output_type != MH_EXECUTE {
         return;
     }
-    match ctx.symtab.get(&ctx.args.entry) {
+    match ctx.symbols.get(&ctx.args.entry) {
         // An entry point in a dylib (an app extension's
         // _NSExtensionMain): LC_MAIN must point into __TEXT, so it
         // names the symbol's stub, as ld64 does.
-        Some(id) if ctx.symtab[id].is_imported() => ctx.entry_addr = ctx.sym_stub_addr(id),
-        Some(id) if ctx.symtab[id].is_defined() => ctx.entry_addr = ctx.sym_addr(id),
+        Some(id) if ctx.symbols[id].is_imported() => ctx.entry_addr = ctx.sym_stub_addr(id),
+        Some(id) if ctx.symbols[id].is_defined() => ctx.entry_addr = ctx.sym_addr(id),
         _ => error!("undefined symbol for entry point: {}", ctx.args.entry),
     }
 }
@@ -6061,8 +6061,8 @@ pub fn add_entry_stub<E: Arch>(ctx: &mut Context<E>) {
     if ctx.args.output_type != MH_EXECUTE {
         return;
     }
-    if let Some(id) = ctx.symtab.get(&ctx.args.entry) {
-        if ctx.symtab[id].is_imported() {
+    if let Some(id) = ctx.symbols.get(&ctx.args.entry) {
+        if ctx.symbols[id].is_imported() {
             add_stub(ctx, id);
             if ctx.lazy_binding() {
                 ensure_stub_binder(ctx);
@@ -6086,8 +6086,8 @@ fn ensure_stub_binder<E: Arch>(ctx: &mut Context<E>) {
     let Some(dylib) = ctx.dylibs.iter().position(|d| d.exports.contains(name)) else {
         fatal!("lazy binding needs dyld_stub_binder, which no loaded dylib exports");
     };
-    let id = ctx.symtab.intern(name);
-    let sym = &mut ctx.symtab[id];
+    let id = ctx.symbols.intern(name);
+    let sym = &mut ctx.symbols[id];
     if !sym.is_defined() {
         sym.set_origin(Origin::Dylib(dylib as u32));
         sym.set_is_imported(true);
@@ -6247,14 +6247,14 @@ fn copy_chunk<E: Arch>(ctx: &Context<E>, chunk: &Chunk, buf: &mut [u8]) {
             // Slots for imported symbols stay zero; dyld fills them
             // via the bind stream.
             for (i, &id) in ctx.got_syms.iter().enumerate() {
-                if !ctx.symtab[id].is_imported() {
+                if !ctx.symbols[id].is_imported() {
                     buf[i * 8..i * 8 + 8].copy_from_slice(&ctx.sym_addr(id).to_le_bytes());
                 }
             }
         }
         ChunkKind::ThreadPtrs => {
             for (i, &id) in ctx.thread_ptr_syms.iter().enumerate() {
-                if !ctx.symtab[id].is_imported() {
+                if !ctx.symbols[id].is_imported() {
                     buf[i * 8..i * 8 + 8].copy_from_slice(&ctx.sym_addr(id).to_le_bytes());
                 }
             }
@@ -6333,7 +6333,7 @@ fn copy_chunk<E: Arch>(ctx: &Context<E>, chunk: &Chunk, buf: &mut [u8]) {
                 .chain(ctx.got_syms.iter().map(|&id| (id, !ctx.binds_at_runtime(id))))
                 .chain(lazy.iter().map(|&id| (id, false)));
             for (id, local) in entries {
-                let val = match ctx.symtab_data.output_sym_indices[id as usize] {
+                let val = match ctx.symtab.output_sym_indices[id as usize] {
                     _ if local => INDIRECT_SYMBOL_LOCAL,
                     u32::MAX => INDIRECT_SYMBOL_LOCAL,
                     idx => idx,

@@ -278,7 +278,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
     let mut index_of_sym: HashMap<crate::symbol::SymbolId, u32> = HashMap::new();
 
     let sym_addr = |ctx: &Context<E>, id: crate::symbol::SymbolId| -> u64 {
-        let sym = &ctx.symtab[id];
+        let sym = &ctx.symbols[id];
         match sym.isec() {
             Some(isec) => {
                 let isec = &ctx.isecs[ctx.resolve_isec(isec as usize)];
@@ -428,7 +428,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
             if nlist.is_stab() || nlist.n_type() != N_SECT {
                 continue;
             }
-            if !ctx.symtab[sym_id].name().starts_with("ltmp") {
+            if !ctx.symbols[sym_id].name().starts_with("ltmp") {
                 *named_at.entry((obj_idx, nlist.n_sect, nlist.n_value)).or_default() += 1;
             }
         }
@@ -442,7 +442,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
             if nlist.is_stab() || nlist.is_extern() {
                 continue;
             }
-            let sym = &ctx.symtab[sym_id];
+            let sym = &ctx.symbols[sym_id];
             let Some(isec) = sym.isec().map(|i| i as usize) else { continue };
             let isec = ctx.resolve_isec(isec);
             if !ctx.isecs[isec].is_alive() || sym.name().is_empty() {
@@ -489,7 +489,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
             }
             let r = obj.global_range();
             for (nlist, &sym_id) in obj.nlists[r.clone()].iter().zip(&obj.syms[r]) {
-                let sym = &ctx.symtab[sym_id];
+                let sym = &ctx.symbols[sym_id];
                 // Only the copy that won resolution is emitted.
                 if nlist.is_stab()
                     || !nlist.is_extern()
@@ -587,7 +587,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
             if !nlist.is_stab()
                 && nlist.is_extern()
                 && nlist.n_type() != N_UNDF
-                && matches!(ctx.symtab[sym_id].origin(), Origin::Obj(o) if o as usize == obj_idx)
+                && matches!(ctx.symbols[sym_id].origin(), Origin::Obj(o) if o as usize == obj_idx)
             {
                 desc_of.insert(sym_id, nlist.n_desc);
             }
@@ -595,9 +595,9 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
     }
 
     // Defined externals, sorted by name.
-    let mut globals: Vec<usize> = (0..ctx.symtab.syms.len())
+    let mut globals: Vec<usize> = (0..ctx.symbols.syms.len())
         .filter(|&i| {
-            let sym = &ctx.symtab[i];
+            let sym = &ctx.symbols[i];
             sym.is_extern()
                 && (keep_pext || !sym.is_private_extern())
                 && matches!(sym.origin(), Origin::Obj(_))
@@ -606,9 +606,9 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
                     .is_none_or(|isec| ctx.isecs[ctx.resolve_isec(isec as usize)].is_alive())
         })
         .collect();
-    globals.sort_by_key(|&i| ctx.symtab[i].name());
+    globals.sort_by_key(|&i| ctx.symbols[i].name());
     for &i in &globals {
-        let sym = &ctx.symtab[i];
+        let sym = &ctx.symbols[i];
         let (n_type, n_sect) = match sym.isec() {
             Some(isec) => (
                 N_SECT | N_EXT | if sym.is_private_extern() { N_PEXT } else { 0 },
@@ -637,15 +637,15 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
     let nextdef = nlists_out.len() as u32 - nlocal;
 
     // Undefined and tentative symbols, sorted by name.
-    let mut undefs: Vec<usize> = (0..ctx.symtab.syms.len())
+    let mut undefs: Vec<usize> = (0..ctx.symbols.syms.len())
         .filter(|&i| {
-            let sym = &ctx.symtab[i];
+            let sym = &ctx.symbols[i];
             sym.is_used() && (!sym.is_defined() || sym.is_common())
         })
         .collect();
-    undefs.sort_by_key(|&i| ctx.symtab[i].name());
+    undefs.sort_by_key(|&i| ctx.symbols[i].name());
     for &i in &undefs {
-        let sym = &ctx.symtab[i];
+        let sym = &ctx.symbols[i];
         let mut n_desc = 0;
         let mut n_value = 0;
         if sym.is_common() {
@@ -675,7 +675,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
     // field); a nameless one is referred to section-relatively.
     let mut sym_at: HashMap<(usize, u64), u32> = HashMap::new();
     for (&sym_id, &symnum) in &index_of_sym {
-        let sym = &ctx.symtab[sym_id];
+        let sym = &ctx.symbols[sym_id];
         if let Some(isec) = sym.isec() {
             sym_at.entry((ctx.resolve_isec(isec as usize), sym.value)).or_insert(symnum);
         }
@@ -708,7 +708,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
         match rec.personality() {
             Some(p) => {
                 let Some(&symnum) = index_of_sym.get(&p) else {
-                    fatal!("-r: unwind personality lost: {}", ctx.symtab[p].name());
+                    fatal!("-r: unwind personality lost: {}", ctx.symbols[p].name());
                 };
                 cu_data.extend_from_slice(&0u64.to_le_bytes());
                 cu_relocs.push(MachRel {
@@ -786,7 +786,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
                     eh_data.extend_from_slice(&cie.data);
                     if let Some(p) = cie.personality {
                         let Some(&symnum) = index_of_sym.get(&p) else {
-                            fatal!("-r: unwind personality lost: {}", ctx.symtab[p].name());
+                            fatal!("-r: unwind personality lost: {}", ctx.symbols[p].name());
                         };
                         // The cell keeps the object's addend (4 on
                         // x86-64, where a pcrel field is relative to
@@ -882,7 +882,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
                         let sym_id = ctx.objs[isec.obj as usize].syms[idx as usize];
                         let Some(&symnum) = index_of_sym.get(&sym_id) else {
                             fatal!("-r: cannot re-emit relocation against {}",
-                                ctx.symtab[sym_id].name()
+                                ctx.symbols[sym_id].name()
                             );
                         };
                         // An explicit addend record precedes relocations

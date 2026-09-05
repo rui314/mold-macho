@@ -130,7 +130,7 @@ pub fn create_range_extension_thunks<E: Arch>(
     // Marks of the thunks still in reach at the end are cleared too.
     for thunk in &thunks[reachable_from..] {
         for &sym in &thunk.syms {
-            ctx.symtab[sym].unmark();
+            ctx.symbols[sym].unmark();
         }
     }
     thunks
@@ -147,7 +147,7 @@ fn release_out_of_reach<E: Arch>(
 ) {
     while *reachable_from < thunks.len() && thunks[*reachable_from].offset + reach <= from {
         for &sym in &thunks[*reachable_from].syms {
-            ctx.symtab[sym].unmark();
+            ctx.symbols[sym].unmark();
         }
         *reachable_from += 1;
     }
@@ -187,7 +187,7 @@ fn scan_batch<E: Arch>(
                 let Some(sym_id) = ctx_ref.reloc_target_sym(obj, &rel) else {
                     continue;
                 };
-                let sym = &ctx_ref.symtab[sym_id];
+                let sym = &ctx_ref.symbols[sym_id];
                 if let (Origin::Obj(_), Some(target)) = (sym.origin(), sym.isec()) {
                     let t = &ctx_ref.isecs[ctx_ref.resolve_isec(target as usize)];
                     // A target in another output section has no offset
@@ -237,7 +237,7 @@ pub fn gather_thunk_addresses<E: Arch>(ctx: &mut Context<E>, chunk_idxs: &[usize
     // borrows are split and the addresses recorded as the thunks are
     // walked, without a temporary list (mold-rust 94e2104).
     let chunks = &ctx.chunks;
-    let symtab = &mut ctx.symtab;
+    let symtab = &mut ctx.symbols;
     let sym_aux = &mut ctx.sym_aux;
     for &ci in chunk_idxs {
         let base = chunks[ci].hdr.addr;

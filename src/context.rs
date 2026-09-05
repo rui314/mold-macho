@@ -16,7 +16,7 @@ pub struct Context<E: Arch> {
     pub args: Args,
     pub objs: Vec<ObjectFile>,
     pub dylibs: Vec<DylibFile>,
-    pub symtab: SymbolTable,
+    pub symbols: SymbolTable,
     /// All input sections, in one arena.
     pub isecs: crate::input_sections::InputSections,
     /// Section headers of the linker-synthesized input sections (those
@@ -44,7 +44,7 @@ pub struct Context<E: Arch> {
     pub fdes: Vec<crate::input_files::Fde>,
     pub chunks: Vec<Chunk>,
     pub segments: Vec<OutputSegment>,
-    pub symtab_data: SymtabData,
+    pub symtab: SymtabData,
     /// Symbols with a __stubs entry, in stub order.
     pub stub_syms: Vec<SymbolId>,
     /// Symbols with a __got slot, in slot order.
@@ -178,7 +178,7 @@ impl<E: Arch> Context<E> {
             args,
             objs: Vec::new(),
             dylibs: Vec::new(),
-            symtab: SymbolTable::default(),
+            symbols: SymbolTable::default(),
             isecs: Default::default(),
             synthetic_hdrs: Vec::new(),
             sym_aux: Vec::new(),
@@ -192,7 +192,7 @@ impl<E: Arch> Context<E> {
             fdes: Vec::new(),
             chunks: Vec::new(),
             segments: Vec::new(),
-            symtab_data: SymtabData::default(),
+            symtab: SymtabData::default(),
             stub_syms: Vec::new(),
             got_syms: Vec::new(),
             objc_classref_slots: Vec::new(),
@@ -365,7 +365,7 @@ impl<E: Arch> Context<E> {
     pub fn sym_aux(&self, id: SymbolId) -> &crate::symbol::SymAux {
         // Sparse, as mold-rust's SymbolAux: the symbol carries an index
         // into the table, NONE for the vast majority that have no slot.
-        match self.symtab[id].aux_idx {
+        match self.symbols[id].aux_idx {
             crate::symbol::NONE => &crate::symbol::NONE_AUX,
             i => &self.sym_aux[i as usize],
         }
@@ -374,7 +374,7 @@ impl<E: Arch> Context<E> {
     /// Mutable access to a symbol's slot indices, growing the side table
     /// to cover it. Called only from the serial slot-assignment passes.
     pub fn sym_aux_mut(&mut self, id: SymbolId) -> &mut crate::symbol::SymAux {
-        Self::sym_aux_mut_in(&mut self.symtab, &mut self.sym_aux, id)
+        Self::sym_aux_mut_in(&mut self.symbols, &mut self.sym_aux, id)
     }
 
     /// `sym_aux_mut` over the two tables it touches, for callers that
@@ -429,7 +429,7 @@ impl<E: Arch> Context<E> {
 
     /// Returns the output address of a symbol.
     pub fn sym_addr(&self, id: SymbolId) -> u64 {
-        let sym = &self.symtab[id];
+        let sym = &self.symbols[id];
         match sym.origin() {
             Origin::Undef => {
                 error!("undefined symbol: {}", sym.name());
@@ -496,7 +496,7 @@ impl<E: Arch> Context<E> {
         if self.args.relocatable {
             return false;
         }
-        let sym = &self.symtab[id];
+        let sym = &self.symbols[id];
         matches!(sym.origin(), Origin::Obj(_))
             && sym.is_weak_def()
             && sym.is_extern()
@@ -506,7 +506,7 @@ impl<E: Arch> Context<E> {
     /// True if dyld fills the references to this symbol: an import, or
     /// a weak definition subject to coalescing.
     pub fn binds_at_runtime(&self, id: SymbolId) -> bool {
-        self.symtab[id].is_imported() || self.is_weak_coalesced(id)
+        self.symbols[id].is_imported() || self.is_weak_coalesced(id)
     }
 
     /// True for a definition this image exports that some dylib in the
@@ -516,7 +516,7 @@ impl<E: Arch> Context<E> {
     /// the symbol is listed in the weak_bind stream as a non-weak
     /// definition (ld64 does both).
     pub fn overrides_weak_export(&self, id: SymbolId) -> bool {
-        let sym = &self.symtab[id];
+        let sym = &self.symbols[id];
         matches!(sym.origin(), Origin::Obj(_))
             && sym.is_extern()
             && !sym.is_private_extern()
@@ -535,7 +535,7 @@ impl<E: Arch> Context<E> {
         if self.is_weak_coalesced(id) {
             return true;
         }
-        let sym = &self.symtab[id];
+        let sym = &self.symbols[id];
         match sym.origin() {
             Origin::Dylib(d) if d != u32::MAX => {
                 self.dylibs[d as usize].weak_exports.contains(sym.name())
@@ -576,7 +576,7 @@ impl<E: Arch> Context<E> {
     /// Returns the input section a relocation's target lives in, if any.
     pub fn reloc_target_isec(&self, obj: usize, rel: &Reloc) -> Option<usize> {
         match rel.target() {
-            RelocTarget::Sym(idx) => self.symtab[self.objs[obj].syms[idx as usize]].isec().map(|i| i as usize),
+            RelocTarget::Sym(idx) => self.symbols[self.objs[obj].syms[idx as usize]].isec().map(|i| i as usize),
             RelocTarget::Section(idx) => Some(idx as usize),
         }
     }

@@ -85,7 +85,7 @@ pub fn dead_strip<E: Arch>(ctx: &mut Context<E>) {
     // Symbol-level roots, found on all cores like the section roots.
     let sym_roots: Vec<usize> = {
         use rayon::prelude::*;
-        ctx.symtab
+        ctx.symbols
             .syms
             .par_iter()
             .filter_map(|sym| {
@@ -102,8 +102,8 @@ pub fn dead_strip<E: Arch>(ctx: &mut Context<E>) {
         mark(ctx, &mut pred, &mut stack, isec, usize::MAX);
     }
     if ctx.args.output_type == MH_EXECUTE {
-        if let Some(id) = ctx.symtab.get(&ctx.args.entry) {
-            if let Some(isec) = ctx.symtab[id].isec().map(|i| i as usize) {
+        if let Some(id) = ctx.symbols.get(&ctx.args.entry) {
+            if let Some(isec) = ctx.symbols[id].isec().map(|i| i as usize) {
                 mark(ctx, &mut pred, &mut stack, isec, usize::MAX);
             }
         }
@@ -120,7 +120,7 @@ pub fn dead_strip<E: Arch>(ctx: &mut Context<E>) {
         for rel in ctx.isec_relocs(id) {
             match rel.target() {
                 RelocTarget::Sym(idx) => {
-                    let sym = &ctx.symtab[ctx.objs[ctx.isecs[id].obj as usize].syms[idx as usize]];
+                    let sym = &ctx.symbols[ctx.objs[ctx.isecs[id].obj as usize].syms[idx as usize]];
                     if let Some(isec) = sym.isec().map(|i| i as usize) {
                         out.push(isec);
                     }
@@ -144,7 +144,7 @@ pub fn dead_strip<E: Arch>(ctx: &mut Context<E>) {
                 personality = personality.or(ctx.cies[ctx.fdes[fde].cie as usize].personality);
             }
             if let Some(p) = personality {
-                if let Some(isec) = ctx.symtab[p].isec().map(|i| i as usize) {
+                if let Some(isec) = ctx.symbols[p].isec().map(|i| i as usize) {
                     out.push(isec);
                 }
             }
@@ -177,7 +177,7 @@ pub fn dead_strip<E: Arch>(ctx: &mut Context<E>) {
                 match rel.target() {
                     RelocTarget::Sym(idx) => {
                         let sym =
-                            &gc.ctx.symtab[gc.ctx.objs[gc.ctx.isecs[id].obj as usize].syms[idx as usize]];
+                            &gc.ctx.symbols[gc.ctx.objs[gc.ctx.isecs[id].obj as usize].syms[idx as usize]];
                         if let Some(isec) = sym.isec().map(|i| i as usize) {
                             targets.push(isec);
                         }
@@ -201,7 +201,7 @@ pub fn dead_strip<E: Arch>(ctx: &mut Context<E>) {
                         personality.or(gc.ctx.cies[gc.ctx.fdes[fde].cie as usize].personality);
                 }
                 if let Some(p) = personality {
-                    if let Some(isec) = gc.ctx.symtab[p].isec().map(|i| i as usize) {
+                    if let Some(isec) = gc.ctx.symbols[p].isec().map(|i| i as usize) {
                         targets.push(isec);
                     }
                 }
@@ -308,7 +308,7 @@ fn print_why_live<E: Arch>(ctx: &Context<E>, pred: &[usize]) {
     // A displayable symbol for each live subsection: prefer an extern
     // symbol defined at it, else any named local.
     let mut name_of: std::collections::HashMap<usize, &str> = std::collections::HashMap::new();
-    for sym in &ctx.symtab.syms {
+    for sym in &ctx.symbols.syms {
         if !matches!(sym.origin(), Origin::Obj(_)) || sym.name().is_empty() {
             continue;
         }
@@ -338,7 +338,7 @@ fn print_why_live<E: Arch>(ctx: &Context<E>, pred: &[usize]) {
         format!("{} from {}", name, crate::passes::file_display(&ctx.objs[sec.obj as usize]))
     };
 
-    for sym in &ctx.symtab.syms {
+    for sym in &ctx.symbols.syms {
         if !matches!(sym.origin(), Origin::Obj(_))
             || !ctx.args.why_live.iter().any(|p| matches(p, sym.name()))
         {
