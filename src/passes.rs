@@ -589,7 +589,7 @@ fn claim_locals<E: Arch>(ctx: &mut Context<E>) {
                 continue;
             }
             // SAFETY: disjoint per object, as above.
-            let sym = unsafe { &mut *ptr.0.add(obj.syms[i] as usize) };
+            let sym = unsafe { &mut *ptr.0.add(obj.symbols[i] as usize) };
             match nlist.n_type() {
                 N_ABS => {
                     sym.set_origin(Origin::Obj((obj_idx) as u32));
@@ -665,7 +665,7 @@ fn do_resolve<E: Arch>(ctx: &mut Context<E>, only_alive: bool) {
         .filter(|obj| !only_alive || obj.is_alive)
         .for_each(|obj| {
             let r = obj.global_range();
-            for (nlist, &sym_id) in obj.nlists[r.clone()].iter().zip(&obj.syms[r]) {
+            for (nlist, &sym_id) in obj.nlists[r.clone()].iter().zip(&obj.symbols[r]) {
                 if !nlist.is_stab() && nlist.is_extern() && nlist.n_type() == N_UNDF {
                     used[sym_id as usize].store(true, Ordering::Relaxed);
                     if nlist.n_desc & N_WEAK_REF != 0 {
@@ -730,7 +730,7 @@ fn do_resolve<E: Arch>(ctx: &mut Context<E>, only_alive: bool) {
         .filter(|obj| !only_alive || obj.is_alive)
         .for_each(|obj| {
             let r = obj.global_range();
-            for (nlist, &sym_id) in obj.nlists[r.clone()].iter().zip(&obj.syms[r]) {
+            for (nlist, &sym_id) in obj.nlists[r.clone()].iter().zip(&obj.symbols[r]) {
                 if let Some(rank) = rank_of(obj, nlist) {
                     best[sym_id as usize].fetch_min(rank, Ordering::Relaxed);
                 }
@@ -754,7 +754,7 @@ fn do_resolve<E: Arch>(ctx: &mut Context<E>, only_alive: bool) {
         .filter(|(_, obj)| !only_alive || obj.is_alive)
         .for_each(|(obj_idx, obj)| {
             let r = obj.global_range();
-            for (nlist, &sym_id) in obj.nlists[r.clone()].iter().zip(&obj.syms[r]) {
+            for (nlist, &sym_id) in obj.nlists[r.clone()].iter().zip(&obj.symbols[r]) {
                 let Some(rank) = rank_of(obj, nlist) else {
                     continue;
                 };
@@ -823,7 +823,7 @@ fn do_resolve<E: Arch>(ctx: &mut Context<E>, only_alive: bool) {
         .filter(|obj| (!only_alive || obj.is_alive) && obj.is_alive)
         .flat_map_iter(|obj| {
             let r = obj.global_range();
-            obj.nlists[r.clone()].iter().zip(&obj.syms[r]).filter_map(|(nlist, &sym_id)| {
+            obj.nlists[r.clone()].iter().zip(&obj.symbols[r]).filter_map(|(nlist, &sym_id)| {
                 if !nlist.is_stab()
                     && nlist.is_extern()
                     && nlist.n_type() == N_UNDF
@@ -945,7 +945,7 @@ fn mark_live_objects<E: Arch>(ctx: &mut Context<E>) {
             if nlist.is_stab() || !nlist.is_extern() || nlist.n_type() != N_UNDF {
                 continue;
             }
-            let sym_id = ctx.objs[obj_idx].syms[i];
+            let sym_id = ctx.objs[obj_idx].symbols[i];
             if let Origin::Obj(owner) = ctx.symbols[sym_id].origin() {
                 let owner = owner as usize;
                 if !ctx.objs[owner].is_alive {
@@ -1043,7 +1043,7 @@ pub fn do_lto<E: Arch>(ctx: &mut Context<E>) -> bool {
     // the next resolution round.
     let modules = std::mem::take(&mut ctx.lto_modules);
     for &(obj_idx, _) in &modules {
-        let ids = ctx.objs[obj_idx].syms.clone();
+        let ids = ctx.objs[obj_idx].symbols.clone();
         for id in ids {
             let sym = &mut ctx.symbols[id];
             if sym.origin() == Origin::Obj((obj_idx) as u32) {
@@ -1056,7 +1056,7 @@ pub fn do_lto<E: Arch>(ctx: &mut Context<E>) -> bool {
         let obj = &mut ctx.objs[obj_idx];
         obj.is_alive = false;
         obj.nlists = std::borrow::Cow::Borrowed(&[]);
-        obj.syms.clear();
+        obj.symbols.clear();
     }
 
     let mf = Box::leak(Box::new(crate::mapped_file::MappedFile {
@@ -1321,7 +1321,7 @@ pub fn coalesce_objc_refs<E: Arch>(ctx: &mut Context<E>) {
         match rel.target() {
             RelocTarget::Section(t) => Target::At(ctx.resolve_isec(t as usize), rel.addend),
             RelocTarget::Sym(idx) => {
-                let sym_id = ctx.objs[obj].syms[idx as usize];
+                let sym_id = ctx.objs[obj].symbols[idx as usize];
                 let sym = &ctx.symbols[sym_id];
                 match sym.isec() {
                     Some(isec) => Target::At(ctx.resolve_isec(isec as usize), sym.value as i64 + rel.addend),
@@ -1357,7 +1357,7 @@ pub fn coalesce_objc_refs<E: Arch>(ctx: &mut Context<E>) {
                     if rels[0].addend != 0 {
                         continue;
                     }
-                    Key::Class(ctx.objs[obj].syms[idx as usize])
+                    Key::Class(ctx.objs[obj].symbols[idx as usize])
                 } else {
                     Key::Sel(place(ctx, obj, &rels[0]))
                 }
@@ -1490,7 +1490,7 @@ pub fn auto_hide_weak_defs<E: Arch>(ctx: &mut Context<E>) {
             return;
         }
         let r = obj.global_range();
-        for (nlist, &sym_id) in obj.nlists[r.clone()].iter().zip(&obj.syms[r]) {
+        for (nlist, &sym_id) in obj.nlists[r.clone()].iter().zip(&obj.symbols[r]) {
             if nlist.is_stab()
                 || !nlist.is_extern()
                 || nlist.n_type() != N_SECT
@@ -1564,7 +1564,7 @@ pub fn coalesce_weak_defs<E: Arch>(ctx: &mut Context<E>) {
             // splits at symbols regardless; we keep such a copy.
             let mut values: Option<Vec<u64>> = None;
             let r = obj.global_range();
-            for (nlist, &sym_id) in obj.nlists[r.clone()].iter().zip(&obj.syms[r]) {
+            for (nlist, &sym_id) in obj.nlists[r.clone()].iter().zip(&obj.symbols[r]) {
                 if nlist.is_stab()
                     || !nlist.is_extern()
                     || nlist.n_type() != N_SECT
@@ -1651,7 +1651,7 @@ pub fn report_undef_errors<E: Arch>(ctx: &mut Context<E>) {
                     continue;
                 }
                 let r = obj.global_range();
-                for (nlist, &sym_id) in obj.nlists[r.clone()].iter().zip(&obj.syms[r]) {
+                for (nlist, &sym_id) in obj.nlists[r.clone()].iter().zip(&obj.symbols[r]) {
                     if !nlist.is_stab() && nlist.n_type() == N_UNDF && !nlist.is_common() {
                         map.entry(sym_id).or_insert(obj_idx);
                     }
@@ -1700,7 +1700,7 @@ pub fn print_dependencies<E: Arch>(ctx: &Context<E>) {
             continue;
         }
         let r = obj.global_range();
-        for (nlist, &sym_id) in obj.nlists[r.clone()].iter().zip(&obj.syms[r]) {
+        for (nlist, &sym_id) in obj.nlists[r.clone()].iter().zip(&obj.symbols[r]) {
             if nlist.is_stab() || nlist.n_type() != N_UNDF || nlist.is_common() {
                 continue;
             }
@@ -2089,7 +2089,7 @@ pub fn fold_objc_classrefs<E: Arch>(ctx: &mut Context<E>) {
             {
                 continue;
             }
-            slots.insert(i, (idx, ctx.objs[obj_idx].syms[idx as usize]));
+            slots.insert(i, (idx, ctx.objs[obj_idx].symbols[idx as usize]));
         }
         if slots.is_empty() {
             continue;
@@ -2109,7 +2109,7 @@ pub fn fold_objc_classrefs<E: Arch>(ctx: &mut Context<E>) {
                 let slot = match rel.target() {
                     RelocTarget::Section(t) if rel.addend == 0 => t,
                     RelocTarget::Sym(idx) => {
-                        let sym = &ctx.symbols[ctx.objs[obj_idx].syms[idx as usize]];
+                        let sym = &ctx.symbols[ctx.objs[obj_idx].symbols[idx as usize]];
                         match sym.isec() {
                             Some(t) if sym.value == 0 && rel.addend == 0 => t,
                             _ => continue,
@@ -2252,7 +2252,7 @@ fn objc_pointer_at<E: Arch>(ctx: &Context<E>, isec: u32, off: u64) -> Option<Obj
         return None;
     }
     Some(match rel.target() {
-        RelocTarget::Sym(idx) => ObjcRef::Sym(ctx.objs[sec.file as usize].syms[idx as usize], rel.addend),
+        RelocTarget::Sym(idx) => ObjcRef::Sym(ctx.objs[sec.file as usize].symbols[idx as usize], rel.addend),
         RelocTarget::Section(t) => ObjcRef::Isec(t, rel.addend as u64),
     })
 }
@@ -3098,7 +3098,7 @@ pub fn merge_objc_categories<E: Arch>(ctx: &mut Context<E>) {
             let rel = ctx.objs[obj].relocs[k];
             let flags = match rel.target() {
                 RelocTarget::Sym(idx) => {
-                    let id = ctx.objs[obj].syms[idx as usize];
+                    let id = ctx.objs[obj].symbols[idx as usize];
                     (ctx.symbols[id].value as i64 + rel.addend) & 3
                 }
                 RelocTarget::Section(_) => rel.addend & 3,
@@ -3663,7 +3663,7 @@ pub fn create_output_sections<E: Arch>(ctx: &mut Context<E>) {
             if !obj.is_alive {
                 continue;
             }
-            for (nlist, &sym_id) in obj.nlists.iter().zip(&obj.syms) {
+            for (nlist, &sym_id) in obj.nlists.iter().zip(&obj.symbols) {
                 if nlist.is_stab() || nlist.n_type() != N_SECT || nlist.n_desc & N_COLD_FUNC == 0 {
                     continue;
                 }
@@ -4224,7 +4224,7 @@ pub fn plan_object_stabs<E: Arch>(
                 )
         };
         let mut skip_size = false;
-        for (nlist, &sym_id) in obj.nlists.iter().zip(&obj.syms) {
+        for (nlist, &sym_id) in obj.nlists.iter().zip(&obj.symbols) {
             if !nlist.is_stab() {
                 continue;
             }
@@ -4323,7 +4323,7 @@ pub fn plan_object_stabs<E: Arch>(
         None,
     ));
 
-    for (nlist, &sym_id) in obj.nlists.iter().zip(&obj.syms) {
+    for (nlist, &sym_id) in obj.nlists.iter().zip(&obj.symbols) {
         let sym = &ctx.symbols[sym_id];
         if nlist.is_stab()
             || !matches!(sym.origin(), Origin::Obj(o) if o as usize == obj_idx)
@@ -4533,7 +4533,7 @@ pub fn create_output_symtab<E: Arch>(
                     return out;
                 }
                 let r = obj.local_range();
-                for (nlist, &sym_id) in obj.nlists[r.clone()].iter().zip(&obj.syms[r]) {
+                for (nlist, &sym_id) in obj.nlists[r.clone()].iter().zip(&obj.symbols[r]) {
                     let sym = &ctx_ref.symbols[sym_id];
                     if nlist.is_stab() || nlist.is_extern() || !keep_local_symbol_in(ctx_ref, sym.name(), sym.isec()) {
                         continue;

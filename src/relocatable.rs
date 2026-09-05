@@ -412,7 +412,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
         }
         for rel in crate::input_files::isec_relocs_of(&ctx.objs, isec) {
             if let RelocTarget::Sym(idx) = rel.target() {
-                referenced.insert(ctx.objs[isec.file as usize].syms[idx as usize]);
+                referenced.insert(ctx.objs[isec.file as usize].symbols[idx as usize]);
             }
         }
     }
@@ -424,7 +424,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
         if !obj.is_alive {
             continue;
         }
-        for (nlist, &sym_id) in obj.nlists.iter().zip(&obj.syms) {
+        for (nlist, &sym_id) in obj.nlists.iter().zip(&obj.symbols) {
             if nlist.is_stab() || nlist.n_type() != N_SECT {
                 continue;
             }
@@ -438,7 +438,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
             continue;
         }
         let r = obj.local_range();
-        for (nlist, &sym_id) in obj.nlists[r.clone()].iter().zip(&obj.syms[r]) {
+        for (nlist, &sym_id) in obj.nlists[r.clone()].iter().zip(&obj.symbols[r]) {
             if nlist.is_stab() || nlist.is_extern() {
                 continue;
             }
@@ -488,7 +488,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
                 continue;
             }
             let r = obj.global_range();
-            for (nlist, &sym_id) in obj.nlists[r.clone()].iter().zip(&obj.syms[r]) {
+            for (nlist, &sym_id) in obj.nlists[r.clone()].iter().zip(&obj.symbols[r]) {
                 let sym = &ctx.symbols[sym_id];
                 // Only the copy that won resolution is emitted.
                 if nlist.is_stab()
@@ -583,7 +583,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
             continue;
         }
         let r = obj.global_range();
-        for (nlist, &sym_id) in obj.nlists[r.clone()].iter().zip(&obj.syms[r]) {
+        for (nlist, &sym_id) in obj.nlists[r.clone()].iter().zip(&obj.symbols[r]) {
             if !nlist.is_stab()
                 && nlist.is_extern()
                 && nlist.n_type() != N_UNDF
@@ -879,7 +879,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
 
                 match rel.target() {
                     RelocTarget::Sym(idx) => {
-                        let sym_id = ctx.objs[isec.file as usize].syms[idx as usize];
+                        let sym_id = ctx.objs[isec.file as usize].symbols[idx as usize];
                         let Some(&symnum) = index_of_sym.get(&sym_id) else {
                             fatal!("-r: cannot re-emit relocation against {}",
                                 ctx.symbols[sym_id].name()

@@ -568,7 +568,7 @@ impl<E: Arch> Context<E> {
     /// Returns the symbol a relocation refers to, if it refers to one.
     pub fn reloc_target_sym(&self, obj: usize, rel: &Reloc) -> Option<SymbolId> {
         match rel.target() {
-            RelocTarget::Sym(idx) => Some(self.objs[obj].syms[idx as usize]),
+            RelocTarget::Sym(idx) => Some(self.objs[obj].symbols[idx as usize]),
             RelocTarget::Section(_) => None,
         }
     }
@@ -576,7 +576,7 @@ impl<E: Arch> Context<E> {
     /// Returns the input section a relocation's target lives in, if any.
     pub fn reloc_target_isec(&self, obj: usize, rel: &Reloc) -> Option<usize> {
         match rel.target() {
-            RelocTarget::Sym(idx) => self.symbols[self.objs[obj].syms[idx as usize]].isec().map(|i| i as usize),
+            RelocTarget::Sym(idx) => self.symbols[self.objs[obj].symbols[idx as usize]].isec().map(|i| i as usize),
             RelocTarget::Section(idx) => Some(idx as usize),
         }
     }
@@ -594,7 +594,7 @@ impl<E: Arch> Context<E> {
     /// Resolves a relocation target to its output address.
     pub fn reloc_target_addr(&self, obj: usize, rel: &Reloc) -> u64 {
         match rel.target() {
-            RelocTarget::Sym(idx) => self.sym_addr(self.objs[obj].syms[idx as usize]),
+            RelocTarget::Sym(idx) => self.sym_addr(self.objs[obj].symbols[idx as usize]),
             RelocTarget::Section(idx) => self.isec_addr(idx as usize),
         }
     }

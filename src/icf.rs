@@ -273,7 +273,7 @@ pub fn icf_sections<E: Arch>(ctx: &mut Context<E>) {
     use std::sync::atomic::{AtomicU8, Ordering};
     let weak_state: Vec<AtomicU8> = (0..ctx.isecs.len()).map(|_| AtomicU8::new(0)).collect();
     ctx.objs.par_iter().for_each(|obj| {
-        for (nlist, &sym_id) in obj.nlists.iter().zip(&obj.syms) {
+        for (nlist, &sym_id) in obj.nlists.iter().zip(&obj.symbols) {
             if nlist.is_stab() || nlist.n_type() != N_SECT {
                 continue;
             }
@@ -338,7 +338,7 @@ pub fn icf_sections<E: Arch>(ctx: &mut Context<E>) {
     let edge_of = |ctx: &Context<E>, obj: usize, target: RelocTarget, addend: i64| -> (Edge, i64) {
         match target {
             RelocTarget::Sym(idx) => {
-                let sym_id = ctx.objs[obj].syms[idx as usize];
+                let sym_id = ctx.objs[obj].symbols[idx as usize];
                 let sym = &ctx.symbols[sym_id];
                 if let (Origin::Obj(_), Some(isec)) = (sym.origin(), sym.isec()) {
                     let isec = ctx.resolve_isec(isec as usize);

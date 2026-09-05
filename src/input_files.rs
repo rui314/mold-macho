@@ -46,7 +46,7 @@ pub struct ObjectFile {
     /// locals-then-externals (see first_global_of).
     pub first_global: Option<u32>,
     /// The symbol slot for each nlist entry.
-    pub syms: Vec<SymbolId>,
+    pub symbols: Vec<SymbolId>,
     /// LC_DATA_IN_CODE entries: (file offset in the object, length,
     /// kind).
     pub dice: Vec<(u32, u16, u16)>,
@@ -867,7 +867,7 @@ pub fn integrate_objects<E: Arch>(
             has_debug_info: st.has_debug_info,
             nlists: st.nlists,
             first_global: st.first_global,
-            syms,
+            symbols: syms,
             lto_module: None,
             dice: st.dice,
             loh: st.loh,
@@ -960,7 +960,7 @@ pub fn integrate_object_with<E: Arch>(
         has_debug_info: staged.has_debug_info,
         nlists: staged.nlists,
         first_global: staged.first_global,
-        syms,
+        symbols: syms,
         lto_module: None,
         dice: staged.dice,
         loh: staged.loh,
@@ -1030,7 +1030,7 @@ pub fn parse_bitcode<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile, ali
         has_debug_info: false,
         nlists: std::borrow::Cow::Owned(nlists),
         first_global: None,
-        syms,
+        symbols: syms,
         lto_module: Some(module),
         dice: Vec::new(),
         loh: Vec::new(),

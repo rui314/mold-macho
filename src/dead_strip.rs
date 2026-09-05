@@ -120,7 +120,7 @@ pub fn dead_strip<E: Arch>(ctx: &mut Context<E>) {
         for rel in ctx.isec_relocs(id) {
             match rel.target() {
                 RelocTarget::Sym(idx) => {
-                    let sym = &ctx.symbols[ctx.objs[ctx.isecs[id].file as usize].syms[idx as usize]];
+                    let sym = &ctx.symbols[ctx.objs[ctx.isecs[id].file as usize].symbols[idx as usize]];
                     if let Some(isec) = sym.isec().map(|i| i as usize) {
                         out.push(isec);
                     }
@@ -177,7 +177,7 @@ pub fn dead_strip<E: Arch>(ctx: &mut Context<E>) {
                 match rel.target() {
                     RelocTarget::Sym(idx) => {
                         let sym =
-                            &gc.ctx.symbols[gc.ctx.objs[gc.ctx.isecs[id].file as usize].syms[idx as usize]];
+                            &gc.ctx.symbols[gc.ctx.objs[gc.ctx.isecs[id].file as usize].symbols[idx as usize]];
                         if let Some(isec) = sym.isec().map(|i| i as usize) {
                             targets.push(isec);
                         }
