@@ -12,10 +12,10 @@ use crate::input_files;
 use crate::input_sections::{InputSection, RelocTarget};
 use crate::macho::*;
 use crate::mapped_file::MappedFile;
-use crate::output_chunks::misc::SectCreateSection;
+use crate::output_chunks::misc::{code_signature_size, SectCreateSection};
 use crate::output_chunks::symtab::SymtabSection;
 use crate::output_chunks::{
-    self, ChunkId, OutputSection, OutputSectionId, OutputSegment, Tail, code_signature_size,
+    self, ChunkId, OutputSection, OutputSectionId, OutputSegment, Tail,
     mach_header_size,
 };
 use crate::arch::RelocClass;
@@ -6170,7 +6170,7 @@ pub fn copy_chunks<E: Arch>(ctx: &Context<E>, buf: &mut [u8], out: &crate::outpu
     // basename); unsigned output hashes its pages the same way.
     let mut hashes: Vec<[u8; 32]> = Vec::new();
     if ctx.args.uuid || ctx.args.adhoc_codesign {
-        t!("page-hashes", hashes = output_chunks::page_hashes(&buf[..sig_start]));
+        t!("page-hashes", hashes = output_chunks::misc::page_hashes(&buf[..sig_start]));
     }
     if ctx.args.uuid {
         t!("uuid", {
@@ -6182,13 +6182,13 @@ pub fn copy_chunks<E: Arch>(ctx: &Context<E>, buf: &mut [u8], out: &crate::outpu
             uuid[8] = (uuid[8] & 0x3f) | 0x80; // RFC 4122 variant
             *ctx.uuid.lock().unwrap() = uuid;
             output_chunks::copy_mach_header(ctx, buf);
-            output_chunks::rehash_pages(&buf[..sig_start], &mut hashes, 0..hdr_end);
+            output_chunks::misc::rehash_pages(&buf[..sig_start], &mut hashes, 0..hdr_end);
         });
     }
     out.queue(0, hdr_end);
 
     if ctx.args.adhoc_codesign {
-        t!("codesign", output_chunks::write_code_signature(ctx, buf, &hashes));
+        t!("codesign", output_chunks::misc::write_code_signature(ctx, buf, &hashes));
     }
     out.queue(sig_start, buf.len() - sig_start);
 }
