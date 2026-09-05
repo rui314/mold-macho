@@ -356,7 +356,7 @@ pub fn collect_fixups<E: Arch>(ctx: &Context<E>) -> Vec<(u64, Option<crate::symb
             fixups.push((ctx.objc_selref_addr(i), None, 0));
         }
     }
-    for (addr, _) in crate::passes::data_blob_pointers(ctx) {
+    for (addr, _) in super::dyld_info::data_blob_pointers(ctx) {
         fixups.push((addr, None, 0));
     }
 
