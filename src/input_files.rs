@@ -476,7 +476,7 @@ pub fn stage_object<E: Arch>(
                 p2align: sect.p2align as u8,
                 input_addr: start as u32,
                 size: (end - start) as u32,
-                data_ptr: if contents.is_empty() { 0 } else { contents.as_ptr() as usize },
+                contents: if contents.is_empty() { 0 } else { contents.as_ptr() as usize },
                 rel_offset: 0,
                 nrels: 0,
                 osec: u32::MAX,

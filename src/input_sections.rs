@@ -157,7 +157,7 @@ pub struct InputSection {
     /// section). Stored as an integer, not a slice, to save 8 bytes and
     /// keep the struct trivially Send/Sync; read through `data()`.
     /// mold-rust likewise keeps `contents` as a bare address.
-    pub data_ptr: usize,
+    pub contents: usize,
     /// This subsection's relocations: a range in the owning object's
     /// `relocs` arena, offsets relative to the subsection. sold keeps
     /// rel_offset/nrels per subsection the same way, rather than a Vec
@@ -261,13 +261,13 @@ impl InputSection {
     /// mmap'd input, so they live for the whole link).
     #[inline]
     pub fn data(&self) -> &'static [u8] {
-        if self.data_ptr == 0 {
+        if self.contents == 0 {
             &[]
         } else {
             // SAFETY: for a non-empty section data_ptr is the start of
             // `size` valid bytes in the leaked/mmap'd input, and every
             // such section is built with size == contents.len().
-            unsafe { std::slice::from_raw_parts(self.data_ptr as *const u8, self.size as usize) }
+            unsafe { std::slice::from_raw_parts(self.contents as *const u8, self.size as usize) }
         }
     }
 }
