@@ -102,6 +102,7 @@ pub fn link<E: Arch>(cmdline: &[String]) -> Result<i32, String> {
     // libraries or the LTO output adds inputs, so resolution repeats
     // until the input set is stable.
     passes::read_input_files(&mut ctx);
+    passes::create_internal_file(&mut ctx);
     crate::error::checkpoint();
     lap(&mut phases, "parse");
     loop {
@@ -247,8 +248,8 @@ pub fn link<E: Arch>(cmdline: &[String]) -> Result<i32, String> {
         }
         eprintln!(
             "  objects: {} alive of {}; dylibs: {}; output: {} bytes",
-            ctx.objs.iter().filter(|o| o.is_alive).count(),
-            ctx.objs.len(),
+            ctx.objs.iter().enumerate().filter(|(i, o)| o.is_alive && !ctx.is_internal(*i)).count(),
+            ctx.objs.len() - 1,
             ctx.dylibs.len(),
             ctx.output_size,
         );

@@ -26,8 +26,10 @@ pub struct ObjectFile {
     /// externals.
     pub hidden: bool,
     /// Section headers in ordinal order (all segments' sections
-    /// concatenated in load command order).
-    pub sect_hdrs: &'static [MachSection],
+    /// concatenated in load command order). Borrowed from the mapped
+    /// file; the internal object owns its, and grows the list as the
+    /// linker synthesizes sections.
+    pub sect_hdrs: std::borrow::Cow<'static, [MachSection]>,
     /// This object's relocations, grouped by subsection; each
     /// subsection references a contiguous range (rel_offset/nrels).
     pub relocs: Vec<crate::input_sections::Reloc>,
@@ -55,6 +57,40 @@ pub struct ObjectFile {
     pub loh: Vec<(u8, Vec<u64>)>,
 }
 
+impl ObjectFile {
+    /// The object that owns what the linker synthesizes itself: the
+    /// sections standing for merged Objective-C records, folded class
+    /// references or the __common zero-fill of tentative definitions,
+    /// and symbols such as __mh_execute_header. It has no file behind
+    /// it and no symbol table of its own; mold-rust's
+    /// ObjectFile::internal.
+    pub fn internal() -> ObjectFile {
+        let mf: &'static MappedFile = Box::leak(Box::new(MappedFile {
+            name: "<synthesized>".to_string(),
+            data: &[],
+            parent: None,
+        }));
+        ObjectFile {
+            mf,
+            is_alive: true,
+            priority: 0,
+            linker_options: Vec::new(),
+            hidden: false,
+            sect_hdrs: std::borrow::Cow::Owned(Vec::new()),
+            relocs: Vec::new(),
+            subsecs: Vec::new(),
+            objc_image_info: None,
+            has_debug_info: false,
+            lto_module: None,
+            nlists: std::borrow::Cow::Owned(Vec::new()),
+            first_global: None,
+            symbols: Vec::new(),
+            dice: Vec::new(),
+            loh: Vec::new(),
+        }
+    }
+}
+
 /// A subsection's relocations, sliced from its object's reloc arena.
 /// A free function (not a Context method) so callers already holding a
 /// borrow of `ctx.isecs` can pass `&ctx.objs` alongside an `&isec`.
@@ -62,9 +98,6 @@ pub fn isec_relocs_of<'a>(
     objs: &'a [ObjectFile],
     isec: &InputSection,
 ) -> &'a [crate::input_sections::Reloc] {
-    if isec.file == u32::MAX {
-        return &[];
-    }
     let off = isec.rel_offset as usize;
     &objs[isec.file as usize].relocs[off..off + isec.nrels as usize]
 }
@@ -860,7 +893,7 @@ pub fn integrate_objects<E: Arch>(
             priority: st.priority,
             linker_options: st.linker_options,
             hidden: st.hidden,
-            sect_hdrs: st.sect_hdrs,
+            sect_hdrs: std::borrow::Cow::Borrowed(st.sect_hdrs),
             relocs: st.relocs,
             subsecs: st.subsecs,
             objc_image_info: st.objc_image_info,
@@ -953,7 +986,7 @@ pub fn integrate_object_with<E: Arch>(
         priority: staged.priority,
         linker_options: staged.linker_options,
         hidden: staged.hidden,
-        sect_hdrs: staged.sect_hdrs,
+        sect_hdrs: std::borrow::Cow::Borrowed(staged.sect_hdrs),
         relocs: obj_relocs,
         subsecs: staged.subsecs.into_iter().map(|i| i + isec_base as u32).collect(),
         objc_image_info: staged.objc_image_info,
@@ -1023,7 +1056,7 @@ pub fn parse_bitcode<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile, ali
         priority,
         linker_options: Vec::new(),
         hidden: false,
-        sect_hdrs: &[],
+        sect_hdrs: std::borrow::Cow::Borrowed(&[]),
         relocs: Vec::new(),
         subsecs: Vec::new(),
         objc_image_info: None,

@@ -173,9 +173,6 @@ fn scan_batch<E: Arch>(
         .flat_map_iter(|&isec_id| {
             let mut out = Vec::new();
             let obj = ctx_ref.isecs[isec_id].file as usize;
-            if obj == usize::MAX {
-                return out;
-            }
             let osec = ctx_ref.isecs[isec_id].output_section();
             let ro = ctx_ref.isecs[isec_id].rel_offset as usize;
             let nr = ctx_ref.isecs[isec_id].nrels as usize;

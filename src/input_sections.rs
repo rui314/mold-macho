@@ -141,7 +141,7 @@ pub struct InputSection {
     /// section with no object).
     pub file: u32,
     /// Index of the parent section's header in the owning object's
-    /// section list (or in ctx.synthetic_hdrs for a synthetic section):
+    /// section list (the internal object's, for a synthesized one):
     /// mold-rust's shndx. Resolved through Context::hdr_of; a u32 index
     /// instead of an 8-byte header pointer. `p2align` is held inline
     /// because it is the one header field the linker raises per

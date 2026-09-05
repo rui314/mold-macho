@@ -562,6 +562,18 @@ pub fn claim_new_dylibs<E: Arch>(ctx: &mut Context<E>, first: usize) {
 /// > common), breaking ties by input order. A liveness walk then marks
 /// the archive members whose definitions are actually referenced, and
 /// a second round restricted to live files settles the final owners.
+/// Adds the object that owns what the linker synthesizes: the
+/// sections standing for merged Objective-C records, folded class
+/// references or tentative definitions, and symbols such as
+/// __mh_execute_header. It takes part in every pass like an input
+/// object with no symbol table of its own, so no pass has to treat
+/// synthesized sections and symbols as fileless. mold-rust's
+/// create_internal_file.
+pub fn create_internal_file<E: Arch>(ctx: &mut Context<E>) {
+    ctx.internal_obj = Some(ctx.objs.len());
+    ctx.objs.push(input_files::ObjectFile::internal());
+}
+
 pub fn resolve_symbols<E: Arch>(ctx: &mut Context<E>) {
     clear_claims(ctx);
     do_resolve(ctx, false);
@@ -1050,6 +1062,7 @@ pub fn do_lto<E: Arch>(ctx: &mut Context<E>) -> bool {
 /// Converts surviving tentative definitions (common symbols) into real
 /// definitions in a synthetic __DATA,__common zero-fill section.
 pub fn convert_common_symbols<E: Arch>(ctx: &mut Context<E>) {
+    let internal = ctx.internal_obj.expect("internal object not created yet") as u32;
     for i in 0..ctx.symbols.syms.len() {
         let sym = &ctx.symbols[i];
         if !sym.is_common() || sym.is_defined() {
@@ -1057,18 +1070,17 @@ pub fn convert_common_symbols<E: Arch>(ctx: &mut Context<E>) {
         }
         let (size, p2align) = (sym.value, sym.common_p2align);
 
-        let hdr: &'static MachSection = Box::leak(Box::new(MachSection {
+        let (file, shndx) = ctx.add_synthetic_section(MachSection {
             sectname: str_to_name("__common"),
             segname: str_to_name("__DATA"),
             size,
             p2align: p2align as u32,
             flags: S_ZEROFILL,
             ..Default::default()
-        }));
-        ctx.synthetic_hdrs.push(hdr);
+        });
         ctx.isecs.push(InputSection {
-            file: u32::MAX,
-            shndx: (ctx.synthetic_hdrs.len() - 1) as u32,
+            file,
+            shndx,
             p2align: p2align as u8,
             input_addr: 0,
             size: size as u32,
@@ -1084,7 +1096,7 @@ pub fn convert_common_symbols<E: Arch>(ctx: &mut Context<E>) {
         });
 
         let sym = &mut ctx.symbols[i];
-        sym.set_origin(Origin::Synthetic);
+        sym.set_origin(Origin::Obj(internal));
         sym.set_input_section(Some((ctx.isecs.len() - 1) as u32));
         sym.value = 0;
         sym.set_is_common(false);
@@ -1138,7 +1150,7 @@ pub fn convert_init_offsets<E: Arch>(ctx: &mut Context<E>) {
 /// dead, so nothing of theirs reaches the output.
 pub fn remove_unreachable_files<E: Arch>(ctx: &mut Context<E>) {
     for isec in ctx.isecs.iter_mut() {
-        if isec.file != u32::MAX && !ctx.objs[isec.file as usize].is_alive {
+        if !ctx.objs[isec.file as usize].is_alive {
             isec.set_alive(false);
         }
     }
@@ -1313,7 +1325,7 @@ pub fn coalesce_objc_refs<E: Arch>(ctx: &mut Context<E>) {
     let mut folds: Vec<(usize, u32)> = Vec::new();
     for i in 0..ctx.isecs.len() {
         let isec = &ctx.isecs[i];
-        if !isec.is_alive() || isec.replacement != crate::input_sections::NO_REPLACEMENT || isec.file == u32::MAX {
+        if !isec.is_alive() || isec.replacement != crate::input_sections::NO_REPLACEMENT || ctx.is_internal(isec.file as usize) {
             continue;
         }
         let h = ctx.hdr_of(isec);
@@ -1385,6 +1397,7 @@ pub fn coalesce_objc_refs<E: Arch>(ctx: &mut Context<E>) {
 /// itself; each stub loads the interned selector and tail-calls
 /// _objc_msgSend.
 pub fn create_objc_msgsend_stubs<E: Arch>(ctx: &mut Context<E>) {
+    let internal = ctx.internal_obj.expect("internal object not created yet") as u32;
     for i in 0..ctx.symbols.syms.len() {
         let sym = &ctx.symbols[i];
         if sym.is_defined() || !sym.is_used() {
@@ -1395,7 +1408,7 @@ pub fn create_objc_msgsend_stubs<E: Arch>(ctx: &mut Context<E>) {
         };
         let sel = sel.to_string();
         let idx = ctx.objc_stubs.symbols.len() as u32;
-        ctx.symbols[i].set_origin(Origin::Synthetic);
+        ctx.symbols[i].set_origin(Origin::Obj(internal));
         ctx.sym_aux_mut(i as u32).objc_stub_idx = idx;
         ctx.objc_stubs.symbols.push((i as u32, sel));
     }
@@ -1758,8 +1771,8 @@ pub fn print_trace<E: Arch>(ctx: &Context<E>) {
     if !ctx.args.trace {
         return;
     }
-    for obj in &ctx.objs {
-        if obj.is_alive {
+    for (i, obj) in ctx.objs.iter().enumerate() {
+        if obj.is_alive && !ctx.is_internal(i) {
             println!("{}", file_display(obj));
         }
     }
@@ -1987,7 +2000,7 @@ pub fn scan_objc_stubs<E: Arch>(ctx: &mut Context<E>) {
     for i in 0..ctx.isecs.len() {
         let isec = &ctx.isecs[i];
         if !isec.is_alive()
-            || isec.file == u32::MAX
+            || ctx.is_internal(isec.file as usize)
             || isec.replacement != crate::input_sections::NO_REPLACEMENT
             || isec.size != 8
         {
@@ -2079,7 +2092,7 @@ pub fn fold_objc_classrefs<E: Arch>(ctx: &mut Context<E>) {
     if ctx.args.relocatable || !objc_refs_are_const(ctx) {
         return;
     }
-    let mut got_hdr: Option<u32> = None;
+    let mut got_hdr: Option<(u32, u32)> = None;
     for obj_idx in 0..ctx.objs.len() {
         if !ctx.objs[obj_idx].is_alive {
             continue;
@@ -2167,20 +2180,19 @@ pub fn fold_objc_classrefs<E: Arch>(ctx: &mut Context<E>) {
             // A synthetic subsection standing for the GOT entry; not
             // alive, since the __got chunk writes the slot and the
             // slot's local symbol is not emitted.
-            let shndx = *got_hdr.get_or_insert_with(|| {
-                let hdr: &'static MachSection = Box::leak(Box::new(MachSection {
+            let (file, shndx) = *got_hdr.get_or_insert_with(|| {
+                let (file, shndx) = ctx.add_synthetic_section(MachSection {
                     sectname: str_to_name("__got"),
                     segname: str_to_name(data_seg(ctx)),
                     p2align: 3,
                     flags: S_NON_LAZY_SYMBOL_POINTERS,
                     ..Default::default()
-                }));
-                ctx.synthetic_hdrs.push(hdr);
-                (ctx.synthetic_hdrs.len() - 1) as u32
+                });
+                (file, shndx)
             });
             let output_offset = ctx.sym_aux(class).got_idx * 8;
             ctx.isecs.push(InputSection {
-                file: u32::MAX,
+                file,
                 shndx,
                 p2align: 3,
                 input_addr: 0,
@@ -2252,7 +2264,7 @@ fn objc_class_ro<E: Arch>(ctx: &Context<E>, cls: (u32, u64)) -> Option<(u32, u64
 /// (object, index into its relocation arena), for rewriting it.
 fn objc_pointer_reloc<E: Arch>(ctx: &Context<E>, isec: u32, off: u64) -> Option<(usize, usize)> {
     let sec = &ctx.isecs[isec as usize];
-    if sec.file == u32::MAX {
+    if ctx.is_internal(sec.file as usize) {
         return None;
     }
     let k = ctx
@@ -2266,7 +2278,7 @@ fn objc_pointer_reloc<E: Arch>(ctx: &Context<E>, isec: u32, off: u64) -> Option<
 /// 8-byte relocation there, if any.
 fn objc_pointer_at<E: Arch>(ctx: &Context<E>, isec: u32, off: u64) -> Option<ObjcRef> {
     let sec = &ctx.isecs[isec];
-    if sec.file == u32::MAX {
+    if ctx.is_internal(sec.file as usize) {
         return None;
     }
     let rel = ctx
@@ -2327,7 +2339,7 @@ pub fn convert_objc_method_lists<E: Arch>(ctx: &mut Context<E>) {
     let mut selref_of: hashbrown::HashMap<u32, u32> = hashbrown::HashMap::new();
     for i in 0..ctx.isecs.len() {
         let isec = &ctx.isecs[i];
-        if !isec.is_alive() || isec.file == u32::MAX || isec.size != 8 {
+        if !isec.is_alive() || ctx.is_internal(isec.file as usize) || isec.size != 8 {
             continue;
         }
         let h = ctx.hdr_of(isec);
@@ -2373,7 +2385,7 @@ pub fn convert_objc_method_lists<E: Arch>(ctx: &mut Context<E>) {
     }
     for i in 0..ctx.isecs.len() {
         let isec = &ctx.isecs[i];
-        if !isec.is_alive() || isec.file == u32::MAX {
+        if !isec.is_alive() || ctx.is_internal(isec.file as usize) {
             continue;
         }
         let h = ctx.hdr_of(isec);
@@ -2422,15 +2434,13 @@ pub fn convert_objc_method_lists<E: Arch>(ctx: &mut Context<E>) {
         return;
     }
 
-    let hdr: &'static MachSection = Box::leak(Box::new(MachSection {
+    let (file, shndx) = ctx.add_synthetic_section(MachSection {
         sectname: str_to_name("__objc_methlist"),
         segname: str_to_name("__TEXT"),
         p2align: 2,
         flags: S_REGULAR,
         ..Default::default()
-    }));
-    ctx.synthetic_hdrs.push(hdr);
-    let shndx = (ctx.synthetic_hdrs.len() - 1) as u32;
+    });
     let mut extra_of: hashbrown::HashMap<u32, usize> = hashbrown::HashMap::new();
     let stub_of: hashbrown::HashMap<Vec<u8>, usize> = ctx
         .objc_stubs.symbols
@@ -2490,7 +2500,7 @@ pub fn convert_objc_method_lists<E: Arch>(ctx: &mut Context<E>) {
         let size = 8 + 12 * count;
         offset = align_to(offset, 4);
         ctx.isecs.push(InputSection {
-            file: u32::MAX,
+            file,
             shndx,
             p2align: 2,
             input_addr: 0,
@@ -2602,7 +2612,7 @@ pub fn merge_objc_categories<E: Arch>(ctx: &mut Context<E>) {
     let mut nlclslist_sects = false;
     for i in 0..ctx.isecs.len() {
         let isec = &ctx.isecs[i];
-        if !isec.is_alive() || isec.file == u32::MAX {
+        if !isec.is_alive() || ctx.is_internal(isec.file as usize) {
             continue;
         }
         let h = ctx.hdr_of(isec);
@@ -2654,7 +2664,7 @@ pub fn merge_objc_categories<E: Arch>(ctx: &mut Context<E>) {
     let mut list_sects: Vec<ListSect> = Vec::new();
     for i in 0..ctx.isecs.len() {
         let isec = &ctx.isecs[i];
-        if !isec.is_alive() || isec.file == u32::MAX {
+        if !isec.is_alive() || ctx.is_internal(isec.file as usize) {
             continue;
         }
         let h = ctx.hdr_of(isec);
@@ -2766,7 +2776,7 @@ pub fn merge_objc_categories<E: Arch>(ctx: &mut Context<E>) {
         }
     };
 
-    let mut methlist_hdr: Option<u32> = None;
+    let mut methlist_hdr: Option<(u32, u32)> = None;
     let mut methlist_off: u64 = ctx
         .objc_methlist.lists
         .last()
@@ -2897,19 +2907,17 @@ pub fn merge_objc_categories<E: Arch>(ctx: &mut Context<E>) {
 
         // Emit the merged lists.
         let mut new_blob = |ctx: &mut Context<E>, sect: &'static str, fields: Vec<DataField>| -> u32 {
-            let hdr: &'static MachSection = Box::leak(Box::new(MachSection {
+            let (file, shndx) = ctx.add_synthetic_section(MachSection {
                 sectname: str_to_name(sect),
                 segname: str_to_name("__DATA"),
                 p2align: 3,
                 flags: 0,
                 ..Default::default()
-            }));
-            ctx.synthetic_hdrs.push(hdr);
-            let shndx = (ctx.synthetic_hdrs.len() - 1) as u32;
+            });
             let blob = DataBlob { sect, isec: 0, fields };
             let size = blob.size();
             ctx.isecs.push(InputSection {
-                file: u32::MAX,
+                file,
                 shndx,
                 p2align: 3,
                 input_addr: 0,
@@ -2930,21 +2938,20 @@ pub fn merge_objc_categories<E: Arch>(ctx: &mut Context<E>) {
         };
         let mut new_methlist = |ctx: &mut Context<E>, methods: Vec<ObjcMethod>| -> u32 {
             if relative {
-                let shndx = *methlist_hdr.get_or_insert_with(|| {
-                    let hdr: &'static MachSection = Box::leak(Box::new(MachSection {
+                let (file, shndx) = *methlist_hdr.get_or_insert_with(|| {
+                    let (file, shndx) = ctx.add_synthetic_section(MachSection {
                         sectname: str_to_name("__objc_methlist"),
                         segname: str_to_name("__TEXT"),
                         p2align: 2,
                         flags: S_REGULAR,
                         ..Default::default()
-                    }));
-                    ctx.synthetic_hdrs.push(hdr);
-                    (ctx.synthetic_hdrs.len() - 1) as u32
+                    });
+                    (file, shndx)
                 });
                 let size = 8 + 12 * methods.len() as u64;
                 methlist_off = align_to(methlist_off, 4);
                 ctx.isecs.push(InputSection {
-                    file: u32::MAX,
+                    file,
                     shndx,
                     p2align: 2,
                     input_addr: 0,
@@ -3166,17 +3173,15 @@ pub fn merge_objc_categories<E: Arch>(ctx: &mut Context<E>) {
             continue;
         }
         let sect: &'static str = if ls.nonlazy { "__objc_nlcatlist" } else { "__objc_catlist" };
-        let hdr: &'static MachSection = Box::leak(Box::new(MachSection {
+        let (file, shndx) = ctx.add_synthetic_section(MachSection {
             sectname: str_to_name(sect),
             segname: str_to_name("__DATA"),
             p2align: 3,
             flags: S_ATTR_NO_DEAD_STRIP,
             ..Default::default()
-        }));
-        ctx.synthetic_hdrs.push(hdr);
-        let shndx = (ctx.synthetic_hdrs.len() - 1) as u32;
+        });
         ctx.isecs.push(InputSection {
-            file: u32::MAX,
+            file,
             shndx,
             p2align: 3,
             input_addr: 0,
@@ -3199,17 +3204,15 @@ pub fn merge_objc_categories<E: Arch>(ctx: &mut Context<E>) {
     if !nonlazy_classes.is_empty() {
         let _ = nlclslist_sects;
         for cls in nonlazy_classes {
-            let hdr: &'static MachSection = Box::leak(Box::new(MachSection {
+            let (file, shndx) = ctx.add_synthetic_section(MachSection {
                 sectname: str_to_name("__objc_nlclslist"),
                 segname: str_to_name("__DATA"),
                 p2align: 3,
                 flags: S_ATTR_NO_DEAD_STRIP,
                 ..Default::default()
-            }));
-            ctx.synthetic_hdrs.push(hdr);
-            let shndx = (ctx.synthetic_hdrs.len() - 1) as u32;
+            });
             ctx.isecs.push(InputSection {
-                file: u32::MAX,
+                file,
                 shndx,
                 p2align: 3,
                 input_addr: 0,
@@ -3236,11 +3239,12 @@ pub fn merge_objc_categories<E: Arch>(ctx: &mut Context<E>) {
 
 /// Defines the symbols the linker itself provides.
 pub fn add_synthetic_symbols<E: Arch>(ctx: &mut Context<E>) {
+    let internal = ctx.internal_obj.expect("internal object not created yet") as u32;
     if ctx.args.output_type == MH_EXECUTE {
         let id = ctx.symbols.intern("__mh_execute_header");
         let sym = &mut ctx.symbols[id];
         if !sym.is_defined() {
-            sym.set_origin(Origin::Synthetic);
+            sym.set_origin(Origin::Obj(internal));
             sym.value = ctx.args.pagezero_size;
             sym.set_is_extern(true);
         }
@@ -3252,7 +3256,7 @@ pub fn add_synthetic_symbols<E: Arch>(ctx: &mut Context<E>) {
     let id = ctx.symbols.intern("___dso_handle");
     let sym = &mut ctx.symbols[id];
     if !sym.is_defined() {
-        sym.set_origin(Origin::Synthetic);
+        sym.set_origin(Origin::Obj(internal));
         sym.value = ctx.args.pagezero_size;
         sym.set_is_extern(false);
     }
@@ -3281,7 +3285,7 @@ pub fn add_synthetic_symbols<E: Arch>(ctx: &mut Context<E>) {
             // `-alias _NSExtensionMain ___debug_main_executable_dylib_entry_point`.
             if !ctx.symbols[dst].is_defined() {
                 let sym = &mut ctx.symbols[dst];
-                sym.set_origin(Origin::Synthetic);
+                sym.set_origin(Origin::Obj(internal));
                 sym.set_input_section(None);
                 sym.value = 0;
                 sym.set_is_extern(true);
@@ -3330,7 +3334,7 @@ pub fn add_synthetic_symbols<E: Arch>(ctx: &mut Context<E>) {
             continue;
         };
         let sym = &mut ctx.symbols[id];
-        sym.set_origin(Origin::Synthetic);
+        sym.set_origin(Origin::Obj(internal));
         sym.set_is_extern(false);
         ctx.boundary_syms.push((id as u32, is_start, seg, sect));
     }
@@ -3589,8 +3593,11 @@ pub fn create_output_sections<E: Arch>(ctx: &mut Context<E>) {
         {
             continue;
         }
-        let hdr = ctx.hdr_of(&ctx.isecs[i]);
-        let hdr_ptr = hdr as *const crate::macho::MachSection;
+        let hdr_ref = ctx.hdr_of(&ctx.isecs[i]);
+        let hdr_ptr = hdr_ref as *const crate::macho::MachSection;
+        // A copy: the header lives in its object, which stays borrowed
+        // while the section is placed below otherwise.
+        let hdr = *hdr_ref;
         let osec_id = if hdr_ptr == last_hdr {
             last_osec
         } else {
@@ -4142,7 +4149,7 @@ fn keep_local_symbol_in<E: Arch>(ctx: &Context<E>, name: &str, isec: Option<u32>
     match isec {
         Some(isec) => {
             let isec = &ctx.isecs[ctx.resolve_isec(isec as usize)];
-            if isec.file == u32::MAX {
+            if ctx.is_internal(isec.file as usize) {
                 return true;
             }
             !matches!(
@@ -4238,7 +4245,7 @@ pub fn plan_object_stabs<E: Arch>(
     // takes an N_SO with an empty name as the closing one, so a -r
     // output without them crashed it. N_OSO then points at the
     // object (or "archive(member)"), as an absolute path.
-    let (dir, file) = match crate::dwarf::compile_unit_name(obj.mf.data, obj.sect_hdrs) {
+    let (dir, file) = match crate::dwarf::compile_unit_name(obj.mf.data, &obj.sect_hdrs) {
         Some((dir, file)) => (dir, file),
         None => (String::new(), obj.mf.name.rsplit('/').next().unwrap_or("").to_string()),
     };
@@ -4663,7 +4670,11 @@ pub fn create_output_symtab<E: Arch>(
                 ctx.isec_n_sect(&ctx.isecs[ctx.resolve_isec(isec as usize)]),
                 0,
             ),
-            (Origin::Synthetic, None) => (N_SECT | N_EXT, 1, REFERENCED_DYNAMICALLY),
+            // A synthesized symbol with no section (__mh_execute_header)
+            // sits in the first section: the mach header.
+            (Origin::Obj(o), None) if ctx.is_internal(o as usize) => {
+                (N_SECT | N_EXT, 1, REFERENCED_DYNAMICALLY)
+            }
             (_, None) => (N_ABS | N_EXT, 0, 0),
         };
         if sym.is_weak_def() {
@@ -4920,7 +4931,7 @@ pub fn set_osec_offsets<E: Arch>(ctx: &mut Context<E>) {
                         let sym = &shared.symbols[i];
                         sym.is_extern()
                             && !sym.is_private_extern()
-                            && matches!(sym.origin(), Origin::Obj(_) | Origin::Synthetic)
+                            && matches!(sym.origin(), Origin::Obj(_))
                             && sym.input_section().map(|i| i as usize).is_none_or(|isec| {
                                 shared.isecs[shared.resolve_isec(isec)].is_alive()
                             })
@@ -5265,17 +5276,15 @@ fn ensure_stub_binder<E: Arch>(ctx: &mut Context<E>) {
     add_got(ctx, id);
     ctx.stub_helper.dyld_stub_binder = Some(id);
 
-    let hdr: &'static MachSection = Box::leak(Box::new(MachSection {
+    let (file, shndx) = ctx.add_synthetic_section(MachSection {
         sectname: str_to_name("__data"),
         segname: str_to_name("__DATA"),
         p2align: 3,
         flags: 0,
         ..Default::default()
-    }));
-    ctx.synthetic_hdrs.push(hdr);
-    let shndx = (ctx.synthetic_hdrs.len() - 1) as u32;
+    });
     ctx.isecs.push(InputSection {
-        file: u32::MAX,
+        file,
         shndx,
         p2align: 3,
         input_addr: 0,

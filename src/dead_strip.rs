@@ -332,7 +332,7 @@ fn print_why_live<E: Arch>(ctx: &Context<E>, pred: &[usize]) {
             .copied()
             .map(String::from)
             .unwrap_or_else(|| format!("{},{}", ctx.hdr_of(sec).segname(), ctx.hdr_of(sec).sectname()));
-        if sec.file == u32::MAX {
+        if ctx.is_internal(sec.file as usize) {
             return name;
         }
         format!("{} from {}", name, crate::passes::file_display(&ctx.objs[sec.file as usize]))

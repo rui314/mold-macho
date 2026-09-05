@@ -15,8 +15,6 @@ pub enum Origin {
     Obj(u32),
     /// Exported by a dylib (index).
     Dylib(u32),
-    /// Defined by the linker itself, e.g. `__mh_execute_header`.
-    Synthetic,
 }
 
 #[derive(Debug)]
@@ -61,7 +59,6 @@ pub const NONE: u32 = u32::MAX;
 const KIND_UNDEF: u8 = 0;
 const KIND_OBJ: u8 = 1;
 const KIND_DYLIB: u8 = 2;
-const KIND_SYNTHETIC: u8 = 3;
 
 impl Symbol {
     #[inline]
@@ -81,7 +78,6 @@ impl Symbol {
         match self.kind {
             KIND_OBJ => Origin::Obj(self.file),
             KIND_DYLIB => Origin::Dylib(self.file),
-            KIND_SYNTHETIC => Origin::Synthetic,
             _ => Origin::Undef,
         }
     }
@@ -92,7 +88,6 @@ impl Symbol {
             Origin::Undef => (KIND_UNDEF, NONE),
             Origin::Obj(i) => (KIND_OBJ, i),
             Origin::Dylib(i) => (KIND_DYLIB, i),
-            Origin::Synthetic => (KIND_SYNTHETIC, NONE),
         };
         self.kind = kind;
         self.file = file;

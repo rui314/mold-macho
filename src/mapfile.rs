@@ -29,8 +29,9 @@ pub fn write_dependency_info<E: Arch>(ctx: &Context<E>) {
     let mut inputs: Vec<&str> = ctx
         .objs
         .iter()
-        .filter(|o| o.is_alive)
-        .map(|o| o.mf.parent.map(|p| p.name.as_str()).unwrap_or(o.mf.name.as_str()))
+        .enumerate()
+        .filter(|(i, o)| o.is_alive && !ctx.is_internal(*i))
+        .map(|(_, o)| o.mf.parent.map(|p| p.name.as_str()).unwrap_or(o.mf.name.as_str()))
         .collect();
     inputs.extend(ctx.visited_files.iter().map(String::as_str));
     inputs.sort_unstable();
@@ -57,7 +58,7 @@ pub fn print_map<E: Arch>(ctx: &Context<E>) {
     let mut file_no = vec![0usize; ctx.objs.len()];
     let mut next = 1usize;
     for (i, obj) in ctx.objs.iter().enumerate() {
-        if obj.is_alive {
+        if obj.is_alive && !ctx.is_internal(i) {
             file_no[i] = next;
             let _ = writeln!(out, "[{next:3}] {}", obj.mf.name);
             next += 1;

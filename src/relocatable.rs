@@ -405,7 +405,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
 
     let mut referenced: HashSet<crate::symbol::SymbolId> = HashSet::new();
     for isec in ctx.isecs.iter() {
-        if !isec.is_alive() || isec.file == u32::MAX {
+        if !isec.is_alive() || ctx.is_internal(isec.file as usize) {
             continue;
         }
         for rel in crate::input_files::isec_relocs_of(&ctx.objs, isec) {

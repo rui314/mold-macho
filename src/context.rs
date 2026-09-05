@@ -37,9 +37,9 @@ pub struct Context<E: Arch> {
     pub symbols: SymbolTable,
     /// All input sections, in one arena.
     pub isecs: crate::input_sections::InputSections,
-    /// Section headers of the linker-synthesized input sections (those
-    /// with obj == u32::MAX), indexed by their shndx.
-    pub synthetic_hdrs: Vec<&'static crate::macho::MachSection>,
+    /// The object that owns the linker-synthesized sections and
+    /// symbols, once created; mold-rust's internal_obj.
+    pub internal_obj: Option<usize>,
     /// Per-symbol synthetic-slot indices (SymbolId-indexed), grown
     /// lazily; mold-rust's SymbolAux side table.
     pub sym_aux: Vec<crate::symbol::SymAux>,
@@ -134,7 +134,7 @@ impl<E: Arch> Context<E> {
             dylibs: Vec::new(),
             symbols: SymbolTable::default(),
             isecs: Default::default(),
-            synthetic_hdrs: Vec::new(),
+            internal_obj: None,
             sym_aux: Vec::new(),
             priority_counter: 0,
             lto_plugin: None,
@@ -357,16 +357,28 @@ impl<E: Arch> Context<E> {
         })
     }
 
+    /// Whether the file is the internal object holding synthesized
+    /// sections and symbols.
+    pub fn is_internal(&self, idx: usize) -> bool {
+        self.internal_obj == Some(idx)
+    }
+
+    /// Adds a section the linker synthesizes to the internal object,
+    /// returning the (file, shndx) pair a subsection standing for it
+    /// carries.
+    pub fn add_synthetic_section(&mut self, hdr: crate::macho::MachSection) -> (u32, u32) {
+        let file = self.internal_obj.expect("internal object not created yet");
+        let hdrs = self.objs[file].sect_hdrs.to_mut();
+        hdrs.push(hdr);
+        (file as u32, (hdrs.len() - 1) as u32)
+    }
+
     /// The parent section header of a subsection, through its object's
-    /// section list (or the synthetic table) - mold-rust resolves a
-    /// section's shdr through its file the same way.
+    /// section list - mold-rust resolves a section's shdr through its
+    /// file the same way.
     #[inline]
-    pub fn hdr_of(&self, isec: &InputSection) -> &'static crate::macho::MachSection {
-        if isec.file == u32::MAX {
-            self.synthetic_hdrs[isec.shndx as usize]
-        } else {
-            &self.objs[isec.file as usize].sect_hdrs[isec.shndx as usize]
-        }
+    pub fn hdr_of(&self, isec: &InputSection) -> &crate::macho::MachSection {
+        &self.objs[isec.file as usize].sect_hdrs[isec.shndx as usize]
     }
 
     /// Follows literal-merge redirects to the surviving subsection.
@@ -416,9 +428,6 @@ impl<E: Arch> Context<E> {
     /// (subsections keep only a rel_offset/nrels range, sold-style).
     pub fn isec_relocs(&self, id: usize) -> &[crate::input_sections::Reloc] {
         let isec = &self.isecs[id];
-        if isec.file == u32::MAX {
-            return &[];
-        }
         let off = isec.rel_offset as usize;
         &self.objs[isec.file as usize].relocs[off..off + isec.nrels as usize]
     }
@@ -456,7 +465,7 @@ impl<E: Arch> Context<E> {
                 error!("undefined symbol: {}", sym.name());
                 0
             }
-            Origin::Obj(_) | Origin::Synthetic => {
+            Origin::Obj(_) => {
                 if let Some(isec) = sym.input_section().map(|i| i as usize) {
                     self.isec_addr(isec) + sym.value
                 } else if self.sym_aux(id).objc_stub_idx != crate::symbol::NO_IDX {

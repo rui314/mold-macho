@@ -319,7 +319,7 @@ pub fn icf_sections<E: Arch>(ctx: &mut Context<E>) {
             // their DWARF describing folded-away code. ld64 disables
             // its deduplication pass for debug objects for the same
             // reason (it folds freely on release links).
-            && (isec.file == u32::MAX || !ctx.objs[isec.file as usize].has_debug_info)
+            && !ctx.objs[isec.file as usize].has_debug_info
     };
 
     let __t = std::time::Instant::now();
