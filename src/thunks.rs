@@ -71,7 +71,7 @@ pub fn create_range_extension_thunks<E: Arch>(
 
     // Distinguish placed subsections from ones still ahead.
     for &id in isecs {
-        ctx.isecs[id].output_offset = u32::MAX;
+        ctx.isecs[id].offset = u32::MAX;
     }
 
     while i < isecs.len() {
@@ -92,7 +92,7 @@ pub fn create_range_extension_thunks<E: Arch>(
             off = thunk_off + n * E::THUNK_SIZE;
             let isec = &mut ctx.isecs[monster];
             off = isec.align_offset(off);
-            isec.output_offset = off as u32;
+            isec.offset = off as u32;
             off += isec.size as u64;
             i += 1;
             continue;
@@ -110,7 +110,7 @@ pub fn create_range_extension_thunks<E: Arch>(
                 break;
             }
             let isec = &mut ctx.isecs[isecs[i]];
-            isec.output_offset = aligned as u32;
+            isec.offset = aligned as u32;
             off = aligned + isec.size as u64;
             i += 1;
         }
@@ -194,8 +194,8 @@ fn scan_batch<E: Arch>(
                     // in this section's space; reserve an entry.
                     if t.output_section != osec {
                         // conservative: fall through to the entry below
-                    } else if t.output_offset != u32::MAX {
-                        let target_off = t.output_offset as u64 + sym.value;
+                    } else if t.offset != u32::MAX {
+                        let target_off = t.offset as u64 + sym.value;
                         if thunk_off.saturating_sub(target_off)
                             < E::BRANCH_RANGE / 2 - 1024 * 1024
                         {

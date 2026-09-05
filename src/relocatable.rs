@@ -282,7 +282,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
         match sym.isec() {
             Some(isec) => {
                 let isec = &ctx.isecs[ctx.resolve_isec(isec as usize)];
-                ctx.chunks[isec.output_section as usize].hdr.addr + isec.output_offset as u64 + sym.value
+                ctx.chunks[isec.output_section as usize].hdr.addr + isec.offset as u64 + sym.value
             }
             None => sym.value,
         }
@@ -391,7 +391,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
                     n_type: if pext { N_PEXT | N_SECT } else { N_SECT },
                     n_desc: 0,
                     n_sect: ordinals[chunk_idx],
-                    addr: chunk.hdr.addr + isec.output_offset as u64 + k * entsize,
+                    addr: chunk.hdr.addr + isec.offset as u64 + k * entsize,
                     rename: if entsize == 0 { Rename::Cstring } else { Rename::Anon },
                     syms: Vec::new(),
                 });
@@ -693,7 +693,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
             }
             None => {
                 let func_addr = ctx.chunks[isec.output_section as usize].hdr.addr
-                    + isec.output_offset as u64
+                    + isec.offset as u64
                     + rec.input_offset as u64;
                 cu_data.extend_from_slice(&func_addr.to_le_bytes());
                 cu_relocs.push(MachRel {
@@ -733,7 +733,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
                     None => {
                         let l = &ctx.isecs[lsda];
                         let lsda_addr =
-                            ctx.chunks[l.output_section as usize].hdr.addr + l.output_offset as u64 + off as u64;
+                            ctx.chunks[l.output_section as usize].hdr.addr + l.offset as u64 + off as u64;
                         cu_data.extend_from_slice(&lsda_addr.to_le_bytes());
                         cu_relocs.push(MachRel {
                             r_address: entry + 24,
@@ -820,7 +820,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
                         None => {
                             let isec = &ctx.isecs[func_isec];
                             let func_addr = ctx.chunks[isec.output_section as usize].hdr.addr
-                                + isec.output_offset as u64
+                                + isec.offset as u64
                                 + fde.func_offset as u64;
                             eh_patches.push((off + 8, func_addr, 8));
                         }
@@ -847,7 +847,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
                             None => {
                                 let l = &ctx.isecs[lsda];
                                 let lsda_addr = ctx.chunks[l.output_section as usize].hdr.addr
-                                    + l.output_offset as u64
+                                    + l.offset as u64
                                     + lsda_off as u64;
                                 eh_patches.push((off + pos as u32, lsda_addr, size));
                             }
@@ -874,7 +874,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
         for &id in isecs {
             let isec = &ctx.isecs[id];
             for rel in crate::input_files::isec_relocs_of(&ctx.objs, isec) {
-                let r_address = (isec.output_offset as u64 + rel.offset as u64) as u32;
+                let r_address = (isec.offset as u64 + rel.offset as u64) as u32;
                 let length = rel.size.trailing_zeros();
 
                 match rel.target() {
@@ -1174,7 +1174,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
             if isec.data().is_empty() {
                 continue;
             }
-            let dst = base + isec.output_offset as usize;
+            let dst = base + isec.offset as usize;
             buf[dst..dst + isec.data().len()].copy_from_slice(isec.data());
 
             for rel in crate::input_files::isec_relocs_of(&ctx.objs, isec) {
@@ -1184,7 +1184,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
                 let target = ctx.resolve_isec(target as usize);
                 let t = &ctx.isecs[target];
                 let target_addr =
-                    ctx.chunks[t.output_section as usize].hdr.addr + t.output_offset as u64 + rel.addend as u64;
+                    ctx.chunks[t.output_section as usize].hdr.addr + t.offset as u64 + rel.addend as u64;
                 let loc = dst + rel.offset as usize;
                 if let Some(e) = atom_target(target, rel.addend) {
                     // Now a relocation against the atom's symbol: the
@@ -1211,7 +1211,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
                 } else if rel.is_pcrel {
                     // Pcrel non-external fields embed target - (P + 4).
                     let here = ctx.chunks[chunk_idx].hdr.addr
-                        + isec.output_offset as u64
+                        + isec.offset as u64
                         + rel.offset as u64;
                     let val = target_addr
                         .wrapping_sub(here + 4)

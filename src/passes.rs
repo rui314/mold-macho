@@ -1097,7 +1097,7 @@ pub fn convert_common_symbols<E: Arch>(ctx: &mut Context<E>) {
             rel_offset: 0,
             nrels: 0,
             output_section: u32::MAX,
-            output_offset: 0,
+            offset: 0,
             flags: InputSection::flags_alive(),
             replacement: crate::input_sections::NO_REPLACEMENT,
             unwind_offset: 0,
@@ -2164,7 +2164,7 @@ pub fn fold_objc_classrefs<E: Arch>(ctx: &mut Context<E>) {
                 rel_offset: 0,
                 nrels: 0,
                 output_section: u32::MAX,
-                output_offset,
+                offset: output_offset,
                 flags: std::sync::atomic::AtomicU8::new(0),
                 replacement: crate::input_sections::NO_REPLACEMENT,
                 unwind_offset: 0,
@@ -2474,7 +2474,7 @@ pub fn convert_objc_method_lists<E: Arch>(ctx: &mut Context<E>) {
             rel_offset: 0,
             nrels: 0,
             output_section: u32::MAX,
-            output_offset: offset as u32,
+            offset: offset as u32,
             flags: InputSection::flags_placed(),
             replacement: crate::input_sections::NO_REPLACEMENT,
             unwind_offset: 0,
@@ -2745,7 +2745,7 @@ pub fn merge_objc_categories<E: Arch>(ctx: &mut Context<E>) {
     let mut methlist_off: u64 = ctx
         .objc_methlists
         .last()
-        .map(|l| ctx.isecs[l.isec as usize].output_offset as u64 + ctx.isecs[l.isec as usize].size as u64)
+        .map(|l| ctx.isecs[l.isec as usize].offset as u64 + ctx.isecs[l.isec as usize].size as u64)
         .unwrap_or(0);
     let mut nonlazy_classes: Vec<(u32, u64)> = Vec::new();
 
@@ -2893,7 +2893,7 @@ pub fn merge_objc_categories<E: Arch>(ctx: &mut Context<E>) {
                 rel_offset: 0,
                 nrels: 0,
                 output_section: u32::MAX,
-                output_offset: 0,
+                offset: 0,
                 flags: InputSection::flags_placed(),
                 replacement: crate::input_sections::NO_REPLACEMENT,
                 unwind_offset: 0,
@@ -2928,7 +2928,7 @@ pub fn merge_objc_categories<E: Arch>(ctx: &mut Context<E>) {
                     rel_offset: 0,
                     nrels: 0,
                     output_section: u32::MAX,
-                    output_offset: methlist_off as u32,
+                    offset: methlist_off as u32,
                     flags: InputSection::flags_placed(),
                     replacement: crate::input_sections::NO_REPLACEMENT,
                     unwind_offset: 0,
@@ -3160,7 +3160,7 @@ pub fn merge_objc_categories<E: Arch>(ctx: &mut Context<E>) {
             rel_offset: 0,
             nrels: 0,
             output_section: u32::MAX,
-            output_offset: 0,
+            offset: 0,
             flags: InputSection::flags_placed(),
             replacement: crate::input_sections::NO_REPLACEMENT,
             unwind_offset: 0,
@@ -3193,7 +3193,7 @@ pub fn merge_objc_categories<E: Arch>(ctx: &mut Context<E>) {
                 rel_offset: 0,
                 nrels: 0,
                 output_section: u32::MAX,
-                output_offset: 0,
+                offset: 0,
                 flags: InputSection::flags_placed(),
                 replacement: crate::input_sections::NO_REPLACEMENT,
                 unwind_offset: 0,
@@ -3746,7 +3746,7 @@ pub fn create_output_sections<E: Arch>(ctx: &mut Context<E>) {
                 unreachable!()
             };
             for (&id, off) in isecs.clone().iter().zip(offs) {
-                ctx.isecs[id].output_offset = off as u32;
+                ctx.isecs[id].offset = off as u32;
             }
             ctx.chunks[chunk_idx].hdr.size = size;
         }
@@ -3763,7 +3763,7 @@ pub fn create_output_sections<E: Arch>(ctx: &mut Context<E>) {
             };
             let data_end = isecs
                 .last()
-                .map(|&id| ctx.isecs[id].output_offset as u64 + ctx.isecs[id].size as u64)
+                .map(|&id| ctx.isecs[id].offset as u64 + ctx.isecs[id].size as u64)
                 .unwrap_or(0);
             let chunk = &mut ctx.chunks[chunk_idx];
             chunk.hdr.size = end.max(data_end);
@@ -3906,7 +3906,7 @@ pub fn create_output_sections<E: Arch>(ctx: &mut Context<E>) {
             let tail_off = ctx.chunks[idx].tail_off;
             for (isec, off) in offs {
                 ctx.isecs[isec as usize].output_section = idx as u32;
-                ctx.isecs[isec as usize].output_offset = (tail_off + off) as u32;
+                ctx.isecs[isec as usize].offset = (tail_off + off) as u32;
             }
         }
     }
@@ -3934,7 +3934,7 @@ pub fn create_output_sections<E: Arch>(ctx: &mut Context<E>) {
         for i in order {
             let isec = ctx.objc_methlists[i].isec as usize;
             off = align_to(off, 8);
-            ctx.isecs[isec].output_offset = off as u32;
+            ctx.isecs[isec].offset = off as u32;
             off += ctx.isecs[isec].size as u64;
         }
         chunk.hdr.size = off;
@@ -5202,7 +5202,7 @@ fn build_rebase_info<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
         if !isec.is_alive() || isec.replacement != crate::input_sections::NO_REPLACEMENT {
             continue;
         }
-        let base = ctx.chunks[isec.output_section as usize].hdr.addr + isec.output_offset as u64;
+        let base = ctx.chunks[isec.output_section as usize].hdr.addr + isec.offset as u64;
         for rel in crate::input_files::isec_relocs_of(&ctx.objs, isec) {
             if E::classify_reloc(rel.r_type) != RelocClass::Plain
                 || rel.size != 8
@@ -5397,7 +5397,7 @@ fn build_bind_info<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
         if !isec.is_alive() || isec.replacement != crate::input_sections::NO_REPLACEMENT {
             continue;
         }
-        let base = ctx.chunks[isec.output_section as usize].hdr.addr + isec.output_offset as u64;
+        let base = ctx.chunks[isec.output_section as usize].hdr.addr + isec.offset as u64;
         for rel in crate::input_files::isec_relocs_of(&ctx.objs, isec) {
             if E::classify_reloc(rel.r_type) != RelocClass::Plain
                 || rel.size != 8
@@ -5506,7 +5506,7 @@ fn collect_fixups<E: Arch>(ctx: &Context<E>) -> Vec<(u64, Option<crate::symbol::
         .par_iter()
         .filter(|isec| isec.is_alive() && isec.replacement == crate::input_sections::NO_REPLACEMENT)
         .flat_map_iter(|isec| {
-            let base = ctx.chunks[isec.output_section as usize].hdr.addr + isec.output_offset as u64;
+            let base = ctx.chunks[isec.output_section as usize].hdr.addr + isec.offset as u64;
             crate::input_files::isec_relocs_of(&ctx.objs, isec).iter().filter_map(move |rel| {
                 if E::classify_reloc(rel.r_type) != RelocClass::Plain
                     || rel.size != 8
@@ -5590,7 +5590,7 @@ fn build_weak_bind_info<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
         if !isec.is_alive() || isec.replacement != crate::input_sections::NO_REPLACEMENT {
             continue;
         }
-        let base = ctx.chunks[isec.output_section as usize].hdr.addr + isec.output_offset as u64;
+        let base = ctx.chunks[isec.output_section as usize].hdr.addr + isec.offset as u64;
         for rel in crate::input_files::isec_relocs_of(&ctx.objs, isec) {
             if E::classify_reloc(rel.r_type) != RelocClass::Plain
                 || rel.size != 8
@@ -5987,7 +5987,7 @@ fn build_data_in_code<E: Arch>(ctx: &Context<E>) -> Vec<(u32, u16, u16)> {
             };
             let isec = &ctx.isecs[ctx.resolve_isec(isec as usize)];
             if isec.is_alive() {
-                let fileoff = ctx.chunks[isec.output_section as usize].hdr.fileoff + isec.output_offset as u64 + off_in;
+                let fileoff = ctx.chunks[isec.output_section as usize].hdr.fileoff + isec.offset as u64 + off_in;
                 out.push((fileoff as u32, len, kind));
             }
         }
@@ -6014,7 +6014,7 @@ fn build_function_starts<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
                 && ctx.hdr_of(isec).segname() == "__TEXT"
                 && ctx.hdr_of(isec).sectname() == "__text"
             {
-                Some(ctx.chunks[isec.output_section as usize].hdr.addr + isec.output_offset as u64 + sym.value)
+                Some(ctx.chunks[isec.output_section as usize].hdr.addr + isec.offset as u64 + sym.value)
             } else {
                 None
             }
@@ -6117,7 +6117,7 @@ fn ensure_stub_binder<E: Arch>(ctx: &mut Context<E>) {
         rel_offset: 0,
         nrels: 0,
         output_section: u32::MAX,
-        output_offset: 0,
+        offset: 0,
         flags: InputSection::flags_placed(),
         replacement: crate::input_sections::NO_REPLACEMENT,
         unwind_offset: 0,
@@ -6156,7 +6156,7 @@ fn copy_chunk<E: Arch>(ctx: &Context<E>, chunk: &Chunk, buf: &mut [u8]) {
                 if isec.data().is_empty() {
                     return;
                 }
-                let off = isec.output_offset as usize;
+                let off = isec.offset as usize;
                 // SAFETY: subsections' [output_offset, +size) ranges
                 // are disjoint by layout, so each iteration touches
                 // its own slice.
@@ -6164,7 +6164,7 @@ fn copy_chunk<E: Arch>(ctx: &Context<E>, chunk: &Chunk, buf: &mut [u8]) {
                     std::slice::from_raw_parts_mut(bufp.0.add(off), isec.data().len())
                 };
                 slice.copy_from_slice(isec.data());
-                let base = chunk.hdr.addr + isec.output_offset as u64;
+                let base = chunk.hdr.addr + isec.offset as u64;
                 E::apply_relocs(ctx, ctx.isec_relocs(id as usize), id as usize, base, slice);
             });
             // The linker-synthesized tail after the inputs.
@@ -6180,7 +6180,7 @@ fn copy_chunk<E: Arch>(ctx: &Context<E>, chunk: &Chunk, buf: &mut [u8]) {
                         .iter()
                         .filter(|b| std::ptr::eq(&ctx.chunks[ctx.isecs[b.isec as usize].output_section as usize], chunk))
                     {
-                        let mut at = ctx.isecs[b.isec as usize].output_offset as usize - chunk.tail_off as usize;
+                        let mut at = ctx.isecs[b.isec as usize].offset as usize - chunk.tail_off as usize;
                         for f in &b.fields {
                             match f {
                                 DataField::Bytes(bytes) => {
@@ -6224,7 +6224,7 @@ fn copy_chunk<E: Arch>(ctx: &Context<E>, chunk: &Chunk, buf: &mut [u8]) {
             };
             for list in &ctx.objc_methlists {
                 let isec = &ctx.isecs[list.isec as usize];
-                let base = isec.output_offset as usize;
+                let base = isec.offset as usize;
                 let addr = chunk.hdr.addr + base as u64;
                 let count = list.methods.len() as u32;
                 buf[base..base + 4].copy_from_slice(&(12u32 | 0x8000_0000).to_le_bytes());

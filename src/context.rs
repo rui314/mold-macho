@@ -421,10 +421,10 @@ impl<E: Arch> Context<E> {
         if isec.replacement != crate::input_sections::NO_REPLACEMENT {
             isec = &self.isecs[self.resolve_isec(id)];
         }
-        if isec.output_section == u32::MAX || isec.output_offset == u32::MAX {
+        if isec.output_section == u32::MAX || isec.offset == u32::MAX {
             return 0;
         }
-        self.chunks[isec.output_section as usize].hdr.addr + isec.output_offset as u64
+        self.chunks[isec.output_section as usize].hdr.addr + isec.offset as u64
     }
 
     /// Returns the output address of a symbol.

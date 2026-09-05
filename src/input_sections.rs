@@ -170,7 +170,7 @@ pub struct InputSection {
     /// Offset from the start of the output section (u32::MAX marks a
     /// subsection not yet placed, during thunk layout). An output
     /// section stays well under 4 GiB, so a u32 suffices.
-    pub output_offset: u32,
+    pub offset: u32,
     /// IS_ALIVE and the transient IS_VISITED bit, in one atomic byte so
     /// the parallel dead-strip walk marks sections in place (mold-rust's
     /// InputSection flags). Read through is_alive(); the &mut setters
