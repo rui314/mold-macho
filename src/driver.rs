@@ -115,7 +115,7 @@ pub fn link<E: Arch>(cmdline: &[String]) -> Result<i32, String> {
             passes::Autolinked::Objects => {}
         }
     }
-    if passes::run_lto(&mut ctx) {
+    if passes::do_lto(&mut ctx) {
         loop {
             passes::resolve_symbols(&mut ctx);
             match passes::load_autolink_deps(&mut ctx) {

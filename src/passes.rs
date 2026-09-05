@@ -960,7 +960,7 @@ fn mark_live_objects<E: Arch>(ctx: &mut Context<E>) {
 
 /// Compiles all registered bitcode modules into one Mach-O object and
 /// replaces the placeholder objects' symbol claims with the real ones.
-pub fn run_lto<E: Arch>(ctx: &mut Context<E>) -> bool {
+pub fn do_lto<E: Arch>(ctx: &mut Context<E>) -> bool {
     if ctx.lto_modules.is_empty() {
         return false;
     }
