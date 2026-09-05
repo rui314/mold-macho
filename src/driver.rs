@@ -130,6 +130,7 @@ pub fn link<E: Arch>(cmdline: &[String]) -> Result<i32, String> {
     }
     lap(&mut phases, "resolve");
     passes::remove_unreachable_files(&mut ctx);
+    passes::check_duplicate_symbols(&ctx);
     if ctx.args.relocatable {
         passes::merge_literals(&mut ctx);
         passes::coalesce_objc_refs(&mut ctx);

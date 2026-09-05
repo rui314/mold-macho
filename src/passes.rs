@@ -746,8 +746,6 @@ fn do_resolve<E: Arch>(ctx: &mut Context<E>, only_alive: bool) {
     let syms_ptr = &syms_ptr;
     let isecs = &ctx.isecs;
     let objs = &ctx.objs;
-    // Duplicate strong definitions, reported after the race settles.
-    let duplicates: std::sync::Mutex<Vec<(usize, usize)>> = std::sync::Mutex::new(Vec::new());
 
     objs.par_iter()
         .enumerate()
@@ -760,11 +758,6 @@ fn do_resolve<E: Arch>(ctx: &mut Context<E>, only_alive: bool) {
                 };
                 let won = best[sym_id as usize].load(Ordering::Relaxed);
                 if won != rank {
-                    // Two live strong definitions of one name are an
-                    // error whichever wins.
-                    if only_alive && rank >> 40 == 0 && won >> 40 == 0 {
-                        duplicates.lock().unwrap().push((sym_id as usize, obj_idx));
-                    }
                     continue;
                 }
                 // SAFETY: this object holds the unique minimum rank
@@ -841,22 +834,6 @@ fn do_resolve<E: Arch>(ctx: &mut Context<E>, only_alive: bool) {
         let sym = &mut ctx.symbols[sym_id];
         sym.value = sym.value.max(size);
         sym.common_p2align = sym.common_p2align.max(p2align);
-    }
-
-    // Report duplicates deterministically, sorted by symbol name.
-    let mut duplicates = duplicates.into_inner().unwrap();
-    duplicates.sort_by_key(|&(sym_id, obj_idx)| (ctx.symbols[sym_id].name(), obj_idx));
-    duplicates.dedup();
-    for (sym_id, obj_idx) in duplicates {
-        let prev = match ctx.symbols[sym_id].origin() {
-            Origin::Obj(idx) => file_display(&ctx.objs[idx as usize]),
-            _ => "?".to_string(),
-        };
-        error!("duplicate symbol: {}: {}: {}",
-            file_display(&ctx.objs[obj_idx]),
-            prev,
-            ctx.symbols[sym_id].name()
-        );
     }
 
     // Record the references seen this round. A symbol is a weak import
@@ -1637,6 +1614,52 @@ fn same_shape(a: &crate::input_sections::InputSection, b: &crate::input_sections
     }
     let (short, long) = if a.size < b.size { (a, b) } else { (b, a) };
     long.data().get(short.size as usize..).is_some_and(|tail| tail.iter().all(|&x| x == 0))
+}
+
+/// Reports two live strong definitions of one name. Resolution keeps
+/// the first strong definition it meets; a strong definition in any
+/// other live object that lost to it is an error (a weak or common one
+/// yields quietly). Reported after resolution settles, sorted by name,
+/// so the messages are deterministic: mold-rust's
+/// check_duplicate_symbols.
+pub fn check_duplicate_symbols<E: Arch>(ctx: &Context<E>) {
+    use rayon::prelude::*;
+    let mut duplicates: Vec<(crate::symbol::SymbolId, usize)> = ctx
+        .objs
+        .par_iter()
+        .enumerate()
+        .filter(|(_, obj)| obj.is_alive)
+        .flat_map_iter(|(obj_idx, obj)| {
+            let r = obj.global_range();
+            obj.nlists[r.clone()].iter().zip(&obj.symbols[r]).filter_map(move |(nlist, &sym_id)| {
+                if nlist.is_stab()
+                    || !nlist.is_extern()
+                    || !matches!(nlist.n_type(), N_SECT | N_ABS)
+                    || nlist.n_desc & N_WEAK_DEF != 0
+                {
+                    return None;
+                }
+                match ctx.symbols[sym_id].origin() {
+                    Origin::Obj(owner) if owner as usize != obj_idx => Some((sym_id, obj_idx)),
+                    _ => None,
+                }
+            })
+        })
+        .collect();
+    duplicates.sort_by_key(|&(sym_id, obj_idx)| (ctx.symbols[sym_id].name(), obj_idx));
+    duplicates.dedup();
+    for (sym_id, obj_idx) in duplicates {
+        let prev = match ctx.symbols[sym_id].origin() {
+            Origin::Obj(idx) => file_display(&ctx.objs[idx as usize]),
+            _ => "?".to_string(),
+        };
+        error!(
+            "duplicate symbol: {}: {}: {}",
+            file_display(&ctx.objs[obj_idx]),
+            prev,
+            ctx.symbols[sym_id].name()
+        );
+    }
 }
 
 pub fn report_undef_errors<E: Arch>(ctx: &mut Context<E>) {
