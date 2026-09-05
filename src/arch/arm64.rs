@@ -165,7 +165,7 @@ impl Arch for Arm64 {
                     if !isec.is_alive() || isec.output_offset == u32::MAX {
                         continue 'hint;
                     }
-                    let chunk = &ctx.chunks[isec.osec as usize];
+                    let chunk = &ctx.chunks[isec.output_section as usize];
                     locs.push((
                         (chunk.hdr.fileoff + isec.output_offset as u64 + off) as usize,
                         chunk.hdr.addr + isec.output_offset as u64 + off,

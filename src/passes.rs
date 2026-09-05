@@ -1096,7 +1096,7 @@ pub fn convert_common_symbols<E: Arch>(ctx: &mut Context<E>) {
             contents: 0,
             rel_offset: 0,
             nrels: 0,
-            osec: u32::MAX,
+            output_section: u32::MAX,
             output_offset: 0,
             flags: InputSection::flags_alive(),
             replacement: crate::input_sections::NO_REPLACEMENT,
@@ -2163,7 +2163,7 @@ pub fn fold_objc_classrefs<E: Arch>(ctx: &mut Context<E>) {
                 contents: 0,
                 rel_offset: 0,
                 nrels: 0,
-                osec: u32::MAX,
+                output_section: u32::MAX,
                 output_offset,
                 flags: std::sync::atomic::AtomicU8::new(0),
                 replacement: crate::input_sections::NO_REPLACEMENT,
@@ -2473,7 +2473,7 @@ pub fn convert_objc_method_lists<E: Arch>(ctx: &mut Context<E>) {
             contents: 0,
             rel_offset: 0,
             nrels: 0,
-            osec: u32::MAX,
+            output_section: u32::MAX,
             output_offset: offset as u32,
             flags: InputSection::flags_placed(),
             replacement: crate::input_sections::NO_REPLACEMENT,
@@ -2892,7 +2892,7 @@ pub fn merge_objc_categories<E: Arch>(ctx: &mut Context<E>) {
                 contents: 0,
                 rel_offset: 0,
                 nrels: 0,
-                osec: u32::MAX,
+                output_section: u32::MAX,
                 output_offset: 0,
                 flags: InputSection::flags_placed(),
                 replacement: crate::input_sections::NO_REPLACEMENT,
@@ -2927,7 +2927,7 @@ pub fn merge_objc_categories<E: Arch>(ctx: &mut Context<E>) {
                     contents: 0,
                     rel_offset: 0,
                     nrels: 0,
-                    osec: u32::MAX,
+                    output_section: u32::MAX,
                     output_offset: methlist_off as u32,
                     flags: InputSection::flags_placed(),
                     replacement: crate::input_sections::NO_REPLACEMENT,
@@ -3159,7 +3159,7 @@ pub fn merge_objc_categories<E: Arch>(ctx: &mut Context<E>) {
             contents: 0,
             rel_offset: 0,
             nrels: 0,
-            osec: u32::MAX,
+            output_section: u32::MAX,
             output_offset: 0,
             flags: InputSection::flags_placed(),
             replacement: crate::input_sections::NO_REPLACEMENT,
@@ -3192,7 +3192,7 @@ pub fn merge_objc_categories<E: Arch>(ctx: &mut Context<E>) {
                 contents: 0,
                 rel_offset: 0,
                 nrels: 0,
-                osec: u32::MAX,
+                output_section: u32::MAX,
                 output_offset: 0,
                 flags: InputSection::flags_placed(),
                 replacement: crate::input_sections::NO_REPLACEMENT,
@@ -3625,7 +3625,7 @@ pub fn create_output_sections<E: Arch>(ctx: &mut Context<E>) {
             unreachable!()
         };
         isecs.push(i as u32);
-        ctx.isecs[i].osec = chunk_idx as u32;
+        ctx.isecs[i].output_section = chunk_idx as u32;
     }
 
     // -sectalign overrides an output section's alignment, e.g. to
@@ -3811,7 +3811,7 @@ pub fn create_output_sections<E: Arch>(ctx: &mut Context<E>) {
         ctx.chunks.push(chunk);
         let got = (ctx.chunks.len() - 1) as u32;
         for &slot in &ctx.objc_classref_slots {
-            ctx.isecs[slot as usize].osec = got;
+            ctx.isecs[slot as usize].output_section = got;
         }
     }
 
@@ -3905,7 +3905,7 @@ pub fn create_output_sections<E: Arch>(ctx: &mut Context<E>) {
             let idx = tail_section(ctx, seg, out, flags, 3, Tail::DataBlobs, size);
             let tail_off = ctx.chunks[idx].tail_off;
             for (isec, off) in offs {
-                ctx.isecs[isec as usize].osec = idx as u32;
+                ctx.isecs[isec as usize].output_section = idx as u32;
                 ctx.isecs[isec as usize].output_offset = (tail_off + off) as u32;
             }
         }
@@ -3942,7 +3942,7 @@ pub fn create_output_sections<E: Arch>(ctx: &mut Context<E>) {
         let idx = (ctx.chunks.len() - 1) as u32;
         for i in 0..ctx.objc_methlists.len() {
             let isec = ctx.objc_methlists[i].isec as usize;
-            ctx.isecs[isec].osec = idx;
+            ctx.isecs[isec].output_section = idx;
         }
     }
 
@@ -4246,7 +4246,7 @@ pub fn plan_object_stabs<E: Arch>(
                     continue;
                 };
                 ent.n_value = ctx.isec_addr(isec) + off;
-                ent.n_sect = ordinals[ctx.isecs[isec].osec as usize];
+                ent.n_sect = ordinals[ctx.isecs[isec].output_section as usize];
             } else if nlist.n_type == N_FUN && skip_size {
                 skip_size = false;
                 continue;
@@ -4348,7 +4348,7 @@ pub fn plan_object_stabs<E: Arch>(
             // address, then its size), N_ENSYM. Its stab reader takes
             // an N_FUN without the bracketing symbols badly (a crash
             // on a -r output that had only the pair).
-            let sect = ordinals[isec.osec as usize];
+            let sect = ordinals[isec.output_section as usize];
             out.push((
                 "",
                 NList {
@@ -4395,7 +4395,7 @@ pub fn plan_object_stabs<E: Arch>(
                 NList {
                     n_strx: 0,
                     n_type: if nlist.is_extern() { N_GSYM } else { N_STSYM },
-                    n_sect: ordinals[isec.osec as usize],
+                    n_sect: ordinals[isec.output_section as usize],
                     ..Default::default()
                 },
                 Some(sym_id),
@@ -4561,7 +4561,7 @@ pub fn create_output_symtab<E: Arch>(
                     let ent = NList {
                         n_strx: 0,
                         n_type: N_SECT,
-                        n_sect: ordinals[ctx_ref.isecs[isec].osec as usize],
+                        n_sect: ordinals[ctx_ref.isecs[isec].output_section as usize],
                         n_desc: 0,
                         n_value: 0,
                     };
@@ -4580,7 +4580,7 @@ pub fn create_output_symtab<E: Arch>(
         // addresses are final by now.
         for &(name, isec) in &ctx.extra_local_syms {
             let sec = &ctx.isecs[isec as usize];
-            if !sec.is_alive() || sec.osec == u32::MAX {
+            if !sec.is_alive() || sec.output_section == u32::MAX {
                 continue;
             }
             names.push(name);
@@ -4588,7 +4588,7 @@ pub fn create_output_symtab<E: Arch>(
                 NList {
                     n_strx: 0,
                     n_type: N_SECT,
-                    n_sect: ordinals[sec.osec as usize],
+                    n_sect: ordinals[sec.output_section as usize],
                     n_desc: 0,
                     n_value: ctx.isec_addr(isec as usize),
                 },
@@ -4671,7 +4671,7 @@ pub fn create_output_symtab<E: Arch>(
         let ent = NList {
             n_strx: 0,
             n_type: N_SECT | N_PEXT,
-            n_sect: ordinals[ctx.isecs[isec].osec as usize],
+            n_sect: ordinals[ctx.isecs[isec].output_section as usize],
             n_desc: 0,
             n_value: 0,
         };
@@ -4689,7 +4689,7 @@ pub fn create_output_symtab<E: Arch>(
         let (n_type, n_sect, mut n_desc) = match (sym.origin(), sym.isec()) {
             (_, Some(isec)) => (
                 N_SECT | N_EXT,
-                ordinals[ctx.isecs[ctx.resolve_isec(isec as usize)].osec as usize],
+                ordinals[ctx.isecs[ctx.resolve_isec(isec as usize)].output_section as usize],
                 0,
             ),
             (Origin::Synthetic, None) => (N_SECT | N_EXT, 1, REFERENCED_DYNAMICALLY),
@@ -5202,7 +5202,7 @@ fn build_rebase_info<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
         if !isec.is_alive() || isec.replacement != crate::input_sections::NO_REPLACEMENT {
             continue;
         }
-        let base = ctx.chunks[isec.osec as usize].hdr.addr + isec.output_offset as u64;
+        let base = ctx.chunks[isec.output_section as usize].hdr.addr + isec.output_offset as u64;
         for rel in crate::input_files::isec_relocs_of(&ctx.objs, isec) {
             if E::classify_reloc(rel.r_type) != RelocClass::Plain
                 || rel.size != 8
@@ -5397,7 +5397,7 @@ fn build_bind_info<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
         if !isec.is_alive() || isec.replacement != crate::input_sections::NO_REPLACEMENT {
             continue;
         }
-        let base = ctx.chunks[isec.osec as usize].hdr.addr + isec.output_offset as u64;
+        let base = ctx.chunks[isec.output_section as usize].hdr.addr + isec.output_offset as u64;
         for rel in crate::input_files::isec_relocs_of(&ctx.objs, isec) {
             if E::classify_reloc(rel.r_type) != RelocClass::Plain
                 || rel.size != 8
@@ -5506,7 +5506,7 @@ fn collect_fixups<E: Arch>(ctx: &Context<E>) -> Vec<(u64, Option<crate::symbol::
         .par_iter()
         .filter(|isec| isec.is_alive() && isec.replacement == crate::input_sections::NO_REPLACEMENT)
         .flat_map_iter(|isec| {
-            let base = ctx.chunks[isec.osec as usize].hdr.addr + isec.output_offset as u64;
+            let base = ctx.chunks[isec.output_section as usize].hdr.addr + isec.output_offset as u64;
             crate::input_files::isec_relocs_of(&ctx.objs, isec).iter().filter_map(move |rel| {
                 if E::classify_reloc(rel.r_type) != RelocClass::Plain
                     || rel.size != 8
@@ -5590,7 +5590,7 @@ fn build_weak_bind_info<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
         if !isec.is_alive() || isec.replacement != crate::input_sections::NO_REPLACEMENT {
             continue;
         }
-        let base = ctx.chunks[isec.osec as usize].hdr.addr + isec.output_offset as u64;
+        let base = ctx.chunks[isec.output_section as usize].hdr.addr + isec.output_offset as u64;
         for rel in crate::input_files::isec_relocs_of(&ctx.objs, isec) {
             if E::classify_reloc(rel.r_type) != RelocClass::Plain
                 || rel.size != 8
@@ -5987,7 +5987,7 @@ fn build_data_in_code<E: Arch>(ctx: &Context<E>) -> Vec<(u32, u16, u16)> {
             };
             let isec = &ctx.isecs[ctx.resolve_isec(isec as usize)];
             if isec.is_alive() {
-                let fileoff = ctx.chunks[isec.osec as usize].hdr.fileoff + isec.output_offset as u64 + off_in;
+                let fileoff = ctx.chunks[isec.output_section as usize].hdr.fileoff + isec.output_offset as u64 + off_in;
                 out.push((fileoff as u32, len, kind));
             }
         }
@@ -6014,7 +6014,7 @@ fn build_function_starts<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
                 && ctx.hdr_of(isec).segname() == "__TEXT"
                 && ctx.hdr_of(isec).sectname() == "__text"
             {
-                Some(ctx.chunks[isec.osec as usize].hdr.addr + isec.output_offset as u64 + sym.value)
+                Some(ctx.chunks[isec.output_section as usize].hdr.addr + isec.output_offset as u64 + sym.value)
             } else {
                 None
             }
@@ -6116,7 +6116,7 @@ fn ensure_stub_binder<E: Arch>(ctx: &mut Context<E>) {
         contents: 0,
         rel_offset: 0,
         nrels: 0,
-        osec: u32::MAX,
+        output_section: u32::MAX,
         output_offset: 0,
         flags: InputSection::flags_placed(),
         replacement: crate::input_sections::NO_REPLACEMENT,
@@ -6178,7 +6178,7 @@ fn copy_chunk<E: Arch>(ctx: &Context<E>, chunk: &Chunk, buf: &mut [u8]) {
                     for b in ctx
                         .data_blobs
                         .iter()
-                        .filter(|b| std::ptr::eq(&ctx.chunks[ctx.isecs[b.isec as usize].osec as usize], chunk))
+                        .filter(|b| std::ptr::eq(&ctx.chunks[ctx.isecs[b.isec as usize].output_section as usize], chunk))
                     {
                         let mut at = ctx.isecs[b.isec as usize].output_offset as usize - chunk.tail_off as usize;
                         for f in &b.fields {

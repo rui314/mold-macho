@@ -166,7 +166,7 @@ pub struct InputSection {
     pub nrels: u32,
     /// The output section chunk this section is appended to (u32 index;
     /// `u32::MAX` until assigned).
-    pub osec: u32,
+    pub output_section: u32,
     /// Offset from the start of the output section (u32::MAX marks a
     /// subsection not yet placed, during thunk layout). An output
     /// section stays well under 4 GiB, so a u32 suffices.

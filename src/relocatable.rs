@@ -282,7 +282,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
         match sym.isec() {
             Some(isec) => {
                 let isec = &ctx.isecs[ctx.resolve_isec(isec as usize)];
-                ctx.chunks[isec.osec as usize].hdr.addr + isec.output_offset as u64 + sym.value
+                ctx.chunks[isec.output_section as usize].hdr.addr + isec.output_offset as u64 + sym.value
             }
             None => sym.value,
         }
@@ -400,7 +400,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
     }
     // The atom a relocation into one of those sections lands in.
     let atom_target = |t: usize, addend: i64| -> Option<usize> {
-        let entsize = *entsize_of.get(&(ctx.isecs[t].osec as usize))?;
+        let entsize = *entsize_of.get(&(ctx.isecs[t].output_section as usize))?;
         let k = if entsize == 0 { 0 } else { addend as u64 / entsize };
         renamed.get(&(t, k)).copied()
     };
@@ -469,7 +469,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
                 name: sym.name().to_string(),
                 n_type: nlist.n_type,
                 n_desc: nlist.n_desc,
-                n_sect: ordinals[ctx.isecs[isec].osec as usize],
+                n_sect: ordinals[ctx.isecs[isec].output_section as usize],
                 addr: sym_addr(ctx, sym_id),
                 rename: Rename::None,
                 syms: vec![sym_id],
@@ -507,7 +507,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
                     name: sym.name().to_string(),
                     n_type: N_PEXT | N_SECT,
                     n_desc: nlist.n_desc & (N_ALT_ENTRY | N_NO_DEAD_STRIP),
-                    n_sect: ordinals[ctx.isecs[isec].osec as usize],
+                    n_sect: ordinals[ctx.isecs[isec].output_section as usize],
                     addr: sym_addr(ctx, sym_id),
                     rename: Rename::None,
                     syms: vec![sym_id],
@@ -612,7 +612,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
         let (n_type, n_sect) = match sym.isec() {
             Some(isec) => (
                 N_SECT | N_EXT | if sym.is_private_extern() { N_PEXT } else { 0 },
-                ordinals[ctx.isecs[ctx.resolve_isec(isec as usize)].osec as usize],
+                ordinals[ctx.isecs[ctx.resolve_isec(isec as usize)].output_section as usize],
             ),
             None => (N_ABS | N_EXT, 0),
         };
@@ -692,13 +692,13 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
                 cu_relocs.push(MachRel { r_address: entry, bits: symnum | (3 << 25) | (1 << 27) });
             }
             None => {
-                let func_addr = ctx.chunks[isec.osec as usize].hdr.addr
+                let func_addr = ctx.chunks[isec.output_section as usize].hdr.addr
                     + isec.output_offset as u64
                     + rec.input_offset as u64;
                 cu_data.extend_from_slice(&func_addr.to_le_bytes());
                 cu_relocs.push(MachRel {
                     r_address: entry,
-                    bits: ordinals[isec.osec as usize] as u32 | (3 << 25),
+                    bits: ordinals[isec.output_section as usize] as u32 | (3 << 25),
                 });
             }
         }
@@ -733,11 +733,11 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
                     None => {
                         let l = &ctx.isecs[lsda];
                         let lsda_addr =
-                            ctx.chunks[l.osec as usize].hdr.addr + l.output_offset as u64 + off as u64;
+                            ctx.chunks[l.output_section as usize].hdr.addr + l.output_offset as u64 + off as u64;
                         cu_data.extend_from_slice(&lsda_addr.to_le_bytes());
                         cu_relocs.push(MachRel {
                             r_address: entry + 24,
-                            bits: ordinals[l.osec as usize] as u32 | (3 << 25),
+                            bits: ordinals[l.output_section as usize] as u32 | (3 << 25),
                         });
                     }
                 }
@@ -819,7 +819,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
                         }
                         None => {
                             let isec = &ctx.isecs[func_isec];
-                            let func_addr = ctx.chunks[isec.osec as usize].hdr.addr
+                            let func_addr = ctx.chunks[isec.output_section as usize].hdr.addr
                                 + isec.output_offset as u64
                                 + fde.func_offset as u64;
                             eh_patches.push((off + 8, func_addr, 8));
@@ -846,7 +846,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
                             }
                             None => {
                                 let l = &ctx.isecs[lsda];
-                                let lsda_addr = ctx.chunks[l.osec as usize].hdr.addr
+                                let lsda_addr = ctx.chunks[l.output_section as usize].hdr.addr
                                     + l.output_offset as u64
                                     + lsda_off as u64;
                                 eh_patches.push((off + pos as u32, lsda_addr, size));
@@ -918,7 +918,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
                             continue;
                         }
                         let t = &ctx.isecs[target];
-                        let ord = ordinals[t.osec as usize] as u32;
+                        let ord = ordinals[t.output_section as usize] as u32;
                         rels.push(MachRel {
                             r_address,
                             bits: ord
@@ -1184,7 +1184,7 @@ pub fn link<E: Arch>(ctx: &mut Context<E>) {
                 let target = ctx.resolve_isec(target as usize);
                 let t = &ctx.isecs[target];
                 let target_addr =
-                    ctx.chunks[t.osec as usize].hdr.addr + t.output_offset as u64 + rel.addend as u64;
+                    ctx.chunks[t.output_section as usize].hdr.addr + t.output_offset as u64 + rel.addend as u64;
                 let loc = dst + rel.offset as usize;
                 if let Some(e) = atom_target(target, rel.addend) {
                     // Now a relocation against the atom's symbol: the

@@ -479,7 +479,7 @@ pub fn stage_object<E: Arch>(
                 contents: if contents.is_empty() { 0 } else { contents.as_ptr() as usize },
                 rel_offset: 0,
                 nrels: 0,
-                osec: u32::MAX,
+                output_section: u32::MAX,
                 output_offset: 0,
                 flags: InputSection::flags_alive(),
                 replacement: crate::input_sections::NO_REPLACEMENT,

@@ -176,7 +176,7 @@ fn scan_batch<E: Arch>(
             if obj == usize::MAX {
                 return out;
             }
-            let osec = ctx_ref.isecs[isec_id].osec;
+            let osec = ctx_ref.isecs[isec_id].output_section;
             let ro = ctx_ref.isecs[isec_id].rel_offset as usize;
             let nr = ctx_ref.isecs[isec_id].nrels as usize;
             for r in 0..nr {
@@ -192,7 +192,7 @@ fn scan_batch<E: Arch>(
                     let t = &ctx_ref.isecs[ctx_ref.resolve_isec(target as usize)];
                     // A target in another output section has no offset
                     // in this section's space; reserve an entry.
-                    if t.osec != osec {
+                    if t.output_section != osec {
                         // conservative: fall through to the entry below
                     } else if t.output_offset != u32::MAX {
                         let target_off = t.output_offset as u64 + sym.value;
