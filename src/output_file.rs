@@ -28,7 +28,6 @@ use std::sync::mpsc::{channel, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
-use crate::error::errno_string;
 use crate::fatal;
 
 /// The output path of the in-progress link, removed on a fatal error so
@@ -101,10 +100,7 @@ impl OutputFile {
         let _ = std::fs::remove_file(path);
         *OUTPUT_PATH.lock().unwrap() = Some(PathBuf::from(path));
 
-        let file = match std::fs::File::create(path) {
-            Ok(f) => f,
-            Err(_) => fatal!("cannot write {path}: {}", errno_string()),
-        };
+        let file = std::fs::File::create(path).unwrap_or_else(|e| fatal!("cannot write {path}: {e}"));
         let _ = file.set_len(len as u64);
         let file = Arc::new(file);
 
@@ -165,8 +161,8 @@ impl OutputFile {
                 Err(_) => fatal!("cannot write {}: writer thread panicked", self.path),
             }
         }
-        if std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(0o755)).is_err() {
-            fatal!("cannot chmod {}: {}", self.path, errno_string());
+        if let Err(e) = std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(0o755)) {
+            fatal!("cannot chmod {}: {e}", self.path);
         }
         *OUTPUT_PATH.lock().unwrap() = None;
     }

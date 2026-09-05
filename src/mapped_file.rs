@@ -7,9 +7,9 @@
 //! rather than tracked with reference counts, which keeps lifetimes
 //! out of every data structure that refers to file contents.
 
+use std::io;
 use std::path::Path;
 
-use crate::error::errno_string;
 use crate::fatal;
 
 /// An input file's contents, alive for the rest of the process.
@@ -22,11 +22,12 @@ pub struct MappedFile {
 }
 
 impl MappedFile {
-    /// Maps a file, or returns None if it doesn't exist. Opens are
-    /// memoized by path: a file named twice (a library on the command
-    /// line and in a prefetch, an archive listed repeatedly) gets one
-    /// mapping, which also lets downstream caches key by data address.
-    pub fn open(path: &Path) -> Option<&'static MappedFile> {
+    /// Maps a file. Opens are memoized by path: a file named twice (a
+    /// library on the command line and in a prefetch, an archive listed
+    /// repeatedly) gets one mapping, which also lets downstream caches
+    /// key by data address. A path that is not a regular file (a
+    /// framework directory, say) reads as not found.
+    fn open_impl(path: &Path) -> io::Result<&'static MappedFile> {
         static CACHE: std::sync::Mutex<
             Option<std::collections::HashMap<std::path::PathBuf, &'static MappedFile>>,
         > = std::sync::Mutex::new(None);
@@ -36,31 +37,25 @@ impl MappedFile {
             .get_or_insert_with(std::collections::HashMap::new)
             .get(path)
         {
-            return Some(mf);
+            return Ok(mf);
         }
-        if !path.is_file() {
-            return None;
+        let file = std::fs::File::open(path)?;
+        let metadata = file.metadata()?;
+        if !metadata.is_file() {
+            return Err(io::Error::from(io::ErrorKind::NotFound));
         }
-        let Ok(file) = std::fs::File::open(path) else {
-            fatal!("cannot open {}: {}", path.display(), errno_string());
-        };
         // An empty file cannot be mapped; give it an empty slice.
-        let len = file.metadata().map(|m| m.len()).unwrap_or(0);
-        let data: &'static [u8] = if len == 0 {
+        let data: &'static [u8] = if metadata.len() == 0 {
             &[]
         } else {
             // SAFETY: the mapping outlives every reference (it is
             // leaked), and linkers conventionally assume inputs are
             // not modified during the link.
-            match unsafe { memmap2::Mmap::map(&file) } {
-                Ok(map) => {
-                    let slice: &'static [u8] =
-                        unsafe { std::slice::from_raw_parts(map.as_ptr(), map.len()) };
-                    std::mem::forget(map);
-                    slice
-                }
-                Err(_) => fatal!("cannot mmap {}: {}", path.display(), errno_string()),
-            }
+            let map = unsafe { memmap2::Mmap::map(&file) }?;
+            let slice: &'static [u8] =
+                unsafe { std::slice::from_raw_parts(map.as_ptr(), map.len()) };
+            std::mem::forget(map);
+            slice
         };
         let mf: &'static MappedFile = Box::leak(Box::new(MappedFile {
             name: path.to_string_lossy().into_owned(),
@@ -72,15 +67,24 @@ impl MappedFile {
             .unwrap()
             .get_or_insert_with(std::collections::HashMap::new)
             .insert(path.to_path_buf(), mf);
-        Some(mf)
+        Ok(mf)
     }
 
-    /// Reads a file, failing if it doesn't exist.
-    pub fn must_open(path: &Path) -> &'static MappedFile {
-        match MappedFile::open(path) {
-            Some(mf) => mf,
-            None => fatal!("cannot open {}: no such file", path.display()),
+    /// Maps a file, or returns None if it doesn't exist. Any other
+    /// failure - permission denied, an unmappable file - is reported
+    /// with the operating system's own words rather than as "not
+    /// found".
+    pub fn open(path: &Path) -> Option<&'static MappedFile> {
+        match Self::open_impl(path) {
+            Ok(mf) => Some(mf),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+            Err(e) => fatal!("cannot open {}: {e}", path.display()),
         }
+    }
+
+    /// Maps a file that must exist.
+    pub fn must_open(path: &Path) -> &'static MappedFile {
+        Self::open_impl(path).unwrap_or_else(|e| fatal!("cannot open {}: {e}", path.display()))
     }
 
     /// Creates a view of a slice of this file, for an archive member.

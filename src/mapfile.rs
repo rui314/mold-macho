@@ -5,7 +5,6 @@ use std::io::Write;
 
 use crate::arch::Arch;
 use crate::context::Context;
-use crate::error::errno_string;
 use crate::fatal;
 use crate::symbol::Origin;
 
@@ -18,9 +17,7 @@ pub fn write_dependency_info<E: Arch>(ctx: &Context<E>) {
     let Some(path) = &ctx.args.dependency_info else {
         return;
     };
-    let Ok(file) = std::fs::File::create(path) else {
-        fatal!("cannot open {path}: {}", errno_string());
-    };
+    let file = std::fs::File::create(path).unwrap_or_else(|e| fatal!("cannot open {path}: {e}"));
     let mut out = std::io::BufWriter::new(file);
     let mut emit = |op: u8, s: &str| {
         let _ = out.write_all(&[op]);
@@ -46,9 +43,7 @@ pub fn write_dependency_info<E: Arch>(ctx: &Context<E>) {
 
 pub fn print_map<E: Arch>(ctx: &Context<E>) {
     let Some(path) = &ctx.args.map else { return };
-    let Ok(file) = std::fs::File::create(path) else {
-        fatal!("cannot open {path}: {}", errno_string());
-    };
+    let file = std::fs::File::create(path).unwrap_or_else(|e| fatal!("cannot open {path}: {e}"));
     let mut out = std::io::BufWriter::new(file);
 
     let _ = writeln!(out, "# Path: {}", ctx.args.output);

@@ -124,7 +124,3 @@ macro_rules! out {
         $crate::error::out(format_args!($($arg)*))
     };
 }
-
-pub fn errno_string() -> String {
-    io::Error::last_os_error().to_string()
-}
