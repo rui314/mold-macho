@@ -90,7 +90,10 @@ pub fn dead_strip<E: Arch>(ctx: &mut Context<E>) {
             .par_iter()
             .filter_map(|sym| {
                 let is_root = sym.no_dead_strip()
-                    || (ctx.args.output_type != MH_EXECUTE
+                    || ((ctx.args.output_type != MH_EXECUTE
+                        || ctx.args.export_dynamic
+                        || ctx.args.exported_symbols.as_ref()
+                            .is_some_and(|names| names.iter().any(|name| name == sym.name())))
                         && sym.is_extern()
                         && !sym.is_private_extern()
                         && sym.is_defined());
@@ -100,6 +103,15 @@ pub fn dead_strip<E: Arch>(ctx: &mut Context<E>) {
     };
     for isec in sym_roots {
         mark(ctx, &mut pred, &mut stack, isec, usize::MAX);
+    }
+    // -u retains the atom as well as extracting its containing archive
+    // member. It may name a private external, unlike an export root.
+    for name in &ctx.args.forced_undefined {
+        if let Some(id) = ctx.symbols.get(name) {
+            if let Some(isec) = ctx.symbols[id].input_section() {
+                mark(ctx, &mut pred, &mut stack, isec as usize, usize::MAX);
+            }
+        }
     }
     if ctx.args.output_type == MH_EXECUTE {
         if let Some(id) = ctx.symbols.get(&ctx.args.entry) {
@@ -358,4 +370,3 @@ fn print_why_live<E: Arch>(ctx: &Context<E>, pred: &[usize]) {
         }
     }
 }
-
