@@ -949,10 +949,10 @@ fn mark_live_objects<E: Arch>(ctx: &mut Context<E>) {
     }
 }
 
-/// Compiles all registered bitcode modules into one Mach-O object and
+/// Compiles live bitcode modules into one Mach-O object and
 /// replaces the placeholder objects' symbol claims with the real ones.
 pub fn do_lto<E: Arch>(ctx: &mut Context<E>) -> bool {
-    if ctx.lto_modules.is_empty() {
+    if !ctx.lto_modules.iter().any(|&(obj, _)| ctx.objs[obj].is_alive) {
         return false;
     }
     let plugin = ctx.lto_plugin.unwrap();
@@ -965,7 +965,10 @@ pub fn do_lto<E: Arch>(ctx: &mut Context<E>) -> bool {
         }
         (plugin.codegen_set_pic_model)(cg, crate::lto::LTO_CODEGEN_PIC_MODEL_DYNAMIC);
 
-        for &(_, module) in &ctx.lto_modules {
+        for &(obj, module) in &ctx.lto_modules {
+            if !ctx.objs[obj].is_alive {
+                continue;
+            }
             if (plugin.codegen_add_module)(cg, module as *mut _) {
                 fatal!("lto_codegen_add_module failed: {}", plugin.error_message());
             }
@@ -983,7 +986,10 @@ pub fn do_lto<E: Arch>(ctx: &mut Context<E>) -> bool {
         let mut preserve: Vec<std::ffi::CString> = Vec::new();
         for sym in &ctx.symbols.syms {
             if let Some(FileId::Obj(idx)) = sym.file() {
-                if ctx.objs[idx as usize].lto_module.is_some() && sym.is_extern() {
+                if ctx.objs[idx as usize].is_alive
+                    && ctx.objs[idx as usize].lto_module.is_some()
+                    && sym.is_extern()
+                {
                     if executable
                         && !ctx.args.export_dynamic
                         && !sym.is_used()
