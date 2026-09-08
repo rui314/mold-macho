@@ -26,25 +26,25 @@ nm -xp $t/r.o | awk '$2!="0f" && $2!="01" {print $2, $NF}' > $t/locals
 # Cstring literals, N_PEXT|N_SECT, numbered in address order.
 grep -q '^1e LC1$' $t/locals
 [ "$(grep -c '^1e LC[0-9]*$' $t/locals)" -ge 6 ]
-! grep -q 'l_.str\|l_OBJC_METH_VAR_NAME\|l_OBJC_CLASS_NAME' $t/locals
+not grep -q 'l_.str\|l_OBJC_METH_VAR_NAME\|l_OBJC_CLASS_NAME' $t/locals
 # Anonymous records: classlist, nlclslist without N_PEXT; cfstring,
 # selrefs, classrefs with it. The counter continues from the LCs.
 n=$(grep -c '^1e LC' $t/locals)
 [ "$(grep -c '^0e l[0-9][0-9][0-9]$' $t/locals)" = 3 ]
 [ "$(grep -c '^1e l[0-9][0-9][0-9]$' $t/locals)" = 4 ]
-! grep -q 'l_OBJC_LABEL_CLASS\|l__unnamed_cfstring\|_OBJC_SELECTOR_REFERENCES_\|_OBJC_CLASSLIST_REFERENCES' $t/locals
+not grep -q 'l_OBJC_LABEL_CLASS\|l__unnamed_cfstring\|_OBJC_SELECTOR_REFERENCES_\|_OBJC_CLASSLIST_REFERENCES' $t/locals
 first_l=$(grep -m1 -o 'l[0-9][0-9][0-9]$' $t/locals | tr -d l | sed 's/^0*//')
 [ "$first_l" = $((n + 1)) ]
 # The superclass reference keeps its own label; the ltmp aliases go.
 grep -q '^0e l_OBJC_CLASSLIST_SUP_REFS_\$_$' $t/locals
-! grep -q ltmp $t/locals
+not grep -q ltmp $t/locals
 # Locals come in address order.
 nm -xp $t/r.o | awk '$2=="0e" || $2=="1e" {print $1}' > $t/addrs
 sort -c $t/addrs
 # The relocations that referred to the literals now name the atoms.
 otool -rv $t/r.o > $t/relocs
 grep -q ' LC[0-9]' $t/relocs
-! grep -q 'l_.str\|l_OBJC_METH_VAR_NAME' $t/relocs
+not grep -q 'l_.str\|l_OBJC_METH_VAR_NAME' $t/relocs
 # And the merged object still links and runs.
 cat <<EOF2 | $CC -O2 -fobjc-arc -o $t/main.o -c -xobjective-c -
 #import <Foundation/Foundation.h>

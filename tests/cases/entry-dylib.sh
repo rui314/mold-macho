@@ -25,5 +25,5 @@ otool -l $t/exe | grep -q LC_MAIN
 # object then failed with "undefined symbol: _main").
 $mold -r -arch $ARCH -o $t/r.o $t/a.o
 nm $t/r.o > $t/nm-r
-! grep -q ' U _main' $t/nm-r
+not grep -q ' U _main' $t/nm-r
 $CC --ld-path=$mold -shared -o $t/libr.dylib $t/r.o

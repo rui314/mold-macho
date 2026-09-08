@@ -22,5 +22,5 @@ $t/exe | grep '^3$'
 # The archive's symbol resolves but is not exported and shows as a
 # local in the symbol table.
 dyld_info -exports $t/exe > $t/exports
-! grep -q _three $t/exports
+not grep -q _three $t/exports
 nm $t/exe | grep -q 't _three'

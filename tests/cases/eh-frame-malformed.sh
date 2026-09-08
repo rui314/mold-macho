@@ -12,7 +12,7 @@ cat <<EOF2 | $CC -o $t/a.o -c -xassembler -
 .p2align 2
 _main: ret
 EOF2
-! $mold -r -arch $ARCH -o $t/r.o $t/a.o 2> $t/err
+not $mold -r -arch $ARCH -o $t/r.o $t/a.o 2> $t/err
 grep -q 'malformed __eh_frame' $t/err
 
 cat <<EOF2 | $CC -o $t/b.o -c -xassembler -
@@ -24,5 +24,5 @@ cat <<EOF2 | $CC -o $t/b.o -c -xassembler -
 .p2align 2
 _main: ret
 EOF2
-! $mold -r -arch $ARCH -o $t/r2.o $t/b.o 2> $t/err2
+not $mold -r -arch $ARCH -o $t/r2.o $t/b.o 2> $t/err2
 grep -q 'malformed __eh_frame' $t/err2

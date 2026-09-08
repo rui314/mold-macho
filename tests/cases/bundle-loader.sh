@@ -31,7 +31,7 @@ $CC --ld-path=$mold -bundle -o $t/plugin.bundle $t/plugin.o -Wl,-bundle_loader,$
 # The host is not a load command, and the binds name the main
 # executable.
 otool -L $t/plugin.bundle > $t/libs
-! grep -q host $t/libs
+not grep -q host $t/libs
 nm -m $t/plugin.bundle | grep -q 'undefined.*_host_func (from executable)'
 dyld_info -fixups $t/plugin.bundle | grep -q '_host_func\|_host_value'
 
@@ -47,5 +47,5 @@ $CC --ld-path=$mold -bundle -o $t/plugin2.bundle $t/plugin.o -Wl,-bundle_loader,
 dyld_info -fixups $t/plugin2.bundle > $t/fixups2
 grep -q 'lazy-bind *<main-executable>/_host_func' $t/fixups2
 grep -q 'bind *<main-executable>/_host_value' $t/fixups2
-! grep -q 'this-image' $t/fixups2
+not grep -q 'this-image' $t/fixups2
 $t/host $t/plugin2.bundle | grep -q '^461$'

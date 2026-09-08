@@ -20,7 +20,7 @@ $CC -g -c $t/b.c -o $t/b.o
 # through, so the executable's N_OSO entries name a.o and b.o.
 $mold -r -arch $ARCH -platform_version macos 15.0 15.0 -o $t/merged.o $t/a.o $t/b.o
 otool -l $t/merged.o > $t/lc
-! grep -q '__debug_info' $t/lc
+not grep -q '__debug_info' $t/lc
 nm -pa $t/merged.o > $t/stabs
 grep -q 'OSO.*/a.o' $t/stabs
 grep -q 'OSO.*/b.o' $t/stabs
@@ -31,7 +31,7 @@ $t/exe | grep -q '^42$'
 nm -pa $t/exe > $t/stabs2
 grep -q 'OSO.*/a.o' $t/stabs2
 grep -q 'OSO.*/b.o' $t/stabs2
-! grep -q 'OSO.*merged.o' $t/stabs2
+not grep -q 'OSO.*merged.o' $t/stabs2
 
 # Apple's linker accepts the merged object too.
 $CC -g -o $t/exe2 $t/merged.o

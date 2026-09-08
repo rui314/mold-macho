@@ -26,4 +26,4 @@ $t/exe | grep '^3$'
 # An unneeded member should not be linked in
 nm $t/exe > $t/syms
 grep -q _three $t/syms
-! grep -q _five $t/syms
+not grep -q _five $t/syms

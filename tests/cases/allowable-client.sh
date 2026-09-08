@@ -16,7 +16,7 @@ $CC --ld-path=$mold -shared -o $t/libsub.dylib $t/a.o \
 otool -l $t/libsub.dylib | grep -q 'client friend'
 
 # A random client is rejected.
-! $CC --ld-path=$mold -o $t/exe $t/b.o $t/libsub.dylib 2> $t/log
+not $CC --ld-path=$mold -o $t/exe $t/b.o $t/libsub.dylib 2> $t/log
 grep -q 'not an allowed client' $t/log
 
 # The named client and the umbrella itself may link it.

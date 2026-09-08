@@ -21,11 +21,11 @@ nm -m $t/lib.dylib > $t/nm
 grep -q 'non-external (was a private external) __Z5twiceIiET_S0_' $t/nm
 grep -q 'weak external __Z6thriceIiET_S0_' $t/nm
 dyld_info -exports $t/lib.dylib > $t/exports
-! grep -q twice $t/exports
+not grep -q twice $t/exports
 grep -q thrice $t/exports
 # twice is called directly, thrice through a weak-lookup bind.
 otool -Iv $t/lib.dylib | awk '/__stubs/{f=1;next} /Indirect/{f=0} f&&NF>=3{print $NF}' > $t/stubs
-! grep -q twice $t/stubs
+not grep -q twice $t/stubs
 grep -q thrice $t/stubs
 otool -hv $t/lib.dylib > $t/hdr
 grep -q 'WEAK_DEFINES' $t/hdr
@@ -37,4 +37,4 @@ extern "C" int use2(int x) { return twice(x); }
 EOF2
 $CXX --ld-path=$mold -dynamiclib -o $t/lib2.dylib $t/b.o
 otool -hv $t/lib2.dylib > $t/hdr2
-! grep -q 'WEAK_DEFINES' $t/hdr2
+not grep -q 'WEAK_DEFINES' $t/hdr2

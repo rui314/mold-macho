@@ -54,5 +54,5 @@ EOF
 $CC --ld-path=$mold -o $t/exe3 $t/c.o
 $t/exe3 | grep -q '^1 '
 otool -L $t/exe3 | tail -n +2 | awk '{print $1}' > $t/libs
-! grep -q resolv $t/libs
+not grep -q resolv $t/libs
 [ "$(sed 's|.*/||' $t/libs | tr '\n' ' ')" = "libSystem.B.dylib CoreFoundation Foundation libz.1.dylib " ]

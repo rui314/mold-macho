@@ -16,7 +16,7 @@ int bar = 3;
 int main() {}
 EOF
 
-! $CC --ld-path=$mold -o $t/exe $t/a.o $t/b.o -Wl,-fixup_chains >& $t/log
+not $CC --ld-path=$mold -o $t/exe $t/a.o $t/b.o -Wl,-fixup_chains >& $t/log
 grep -Fq '/a.o(__DATA,__data): unaligned base relocation' $t/log
 
 # Classic rebase opcodes have byte granularity; the same input links.

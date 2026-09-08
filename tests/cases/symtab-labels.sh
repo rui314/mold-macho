@@ -28,7 +28,7 @@ nm -m $t/a.o | grep -q 'non-external l_OBJC_LABEL_CLASS_\$'
 nm -m $t/a.o | grep -q 'private external \[no dead strip\] __OBJC_LABEL_PROTOCOL_\$_Greeter'
 $CC --ld-path=$mold -o $t/exe $t/a.o -framework Foundation
 nm -m $t/exe > $t/nm
-! grep -q 'OBJC_LABEL_CLASS' $t/nm
+not grep -q 'OBJC_LABEL_CLASS' $t/nm
 grep -q 'non-external (was a private external) __OBJC_LABEL_PROTOCOL_\$_Greeter' $t/nm
 grep -q 'non-external (was a private external) __OBJC_PROTOCOL_REFERENCE_\$_Greeter' $t/nm
 grep -q ' external _proto$' $t/nm

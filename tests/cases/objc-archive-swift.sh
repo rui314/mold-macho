@@ -28,11 +28,11 @@ nm $t/exe > $t/nm
 grep -q ' T _fn_types$' $t/nm
 grep -q ' T _fn_proto$' $t/nm
 grep -q ' T _fn_modhash$' $t/nm
-! grep -q '_fn_imageinfo' $t/nm
-! grep -q '_fn_selrefs' $t/nm
-! grep -q '_fn_plain' $t/nm
+not grep -q '_fn_imageinfo' $t/nm
+not grep -q '_fn_selrefs' $t/nm
+not grep -q '_fn_plain' $t/nm
 
 # Without -ObjC nothing is pulled in.
 $CC --ld-path=$mold -o $t/exe2 $t/main.o $t/lib.a
 nm $t/exe2 > $t/nm2
-! grep -q '_fn_' $t/nm2
+not grep -q '_fn_' $t/nm2

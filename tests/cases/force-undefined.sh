@@ -15,7 +15,7 @@ ar rcs $t/libfoo.a $t/a.o
 # Without -u the member is not needed; with it, it must be linked.
 $CC --ld-path=$mold -o $t/exe $t/b.o $t/libfoo.a
 nm $t/exe > $t/syms
-! grep -q _keepme $t/syms
+not grep -q _keepme $t/syms
 
 $CC --ld-path=$mold -o $t/exe2 $t/b.o $t/libfoo.a -Wl,-u,_keepme
 nm $t/exe2 > $t/syms2

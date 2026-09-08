@@ -14,6 +14,16 @@ if [ -z "$mold" ]; then
 fi
 
 # Common functions
+# Unlike shell negation, a failed assertion here reaches the ERR trap
+# even when more commands follow it. Use this for expected failures.
+not() {
+  if "$@"; then
+    echo "command unexpectedly succeeded: $*" >&2
+    return 1
+  fi
+  return 0
+}
+
 test_cflags() {
   echo 'int main() {}' | $CC "$@" -o /dev/null -xc - >& /dev/null
 }
@@ -32,8 +42,12 @@ on_error() {
 }
 
 on_exit() {
-  echo OK
-  exit 0
+  code=$?
+  trap - EXIT
+  if [ "$code" -eq 0 ]; then
+    echo OK
+  fi
+  exit "$code"
 }
 
 trap 'on_error $LINENO' ERR

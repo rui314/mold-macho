@@ -27,5 +27,5 @@ $CC --ld-path=$mold -o $t/exe2 $t/a.o $t/b.o -Wl,-alias_list,$t/aliases
 $t/exe2 | grep -q hello
 
 # An alias of nothing is an error.
-! $CC --ld-path=$mold -o $t/exe3 $t/a.o $t/b.o -Wl,-alias,_nonexistent,_official_name 2> $t/log
+not $CC --ld-path=$mold -o $t/exe3 $t/a.o $t/b.o -Wl,-alias,_nonexistent,_official_name 2> $t/log
 grep -q 'undefined base symbol' $t/log

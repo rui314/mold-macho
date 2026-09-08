@@ -86,8 +86,8 @@ grep -q '^__OBJC_PROTOCOL_\$_P3 __OBJC_PROTOCOL_\$_P2 __OBJC_PROTOCOL_\$_P1 $' $
 grep -E '^ *name .* (pa|pb|base)$' $t/ov | head -3 | awk '{print $NF}' | tr '\n' ' ' > $t/props
 grep -q '^pa pb base $' $t/props
 nm $t/exe > $t/nm
-! grep -q 'CATEGORY_INSTANCE_METHODS_Foo' $t/nm
-! grep -q 'OBJC_\$_CATEGORY_Foo' $t/nm
+not grep -q 'CATEGORY_INSTANCE_METHODS_Foo' $t/nm
+not grep -q 'OBJC_\$_CATEGORY_Foo' $t/nm
 # ld64 names the merged lists after the class and its categories.
 grep -q ' s __OBJC_\$_INSTANCE_METHODS_Foo(A|B)$' $t/nm
 grep -q ' s __OBJC_\$_CLASS_METHODS_Foo(A|B)$' $t/nm

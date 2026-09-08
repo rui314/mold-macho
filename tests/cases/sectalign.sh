@@ -14,5 +14,5 @@ addr=$(grep -A2 'sectname __blob' $t/log | awk '/addr/{print $2}')
 [ $(( addr % 0x4000 )) -eq 0 ]
 
 # Alignment must be a power of two.
-! $CC --ld-path=$mold -o $t/exe $t/a.o -Wl,-sectalign,__DATA,__blob,0x3000 2> $t/log2
+not $CC --ld-path=$mold -o $t/exe $t/a.o -Wl,-sectalign,__DATA,__blob,0x3000 2> $t/log2
 grep -q 'not a power of two' $t/log2

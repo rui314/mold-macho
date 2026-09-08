@@ -21,4 +21,4 @@ EOF
 $CC --ld-path=$mold -o $t/exe $t/a.o $t/b.o
 objdump -h $t/exe > $t/sections
 grep -Eq ' __const\s+00000008\s' $t/sections
-! grep -q '__literal8' $t/sections
+not grep -q '__literal8' $t/sections

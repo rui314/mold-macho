@@ -19,7 +19,7 @@ $t/exe | grep '7 8'
 # The hidden symbol must not be exported
 dyld_info -exports $t/exe > $t/exports
 grep -q _visible_fn $t/exports
-! grep -q _hidden_fn $t/exports
+not grep -q _hidden_fn $t/exports
 
 # ... but should still be in the symbol table as a local
 nm $t/exe | grep -q 't _hidden_fn'

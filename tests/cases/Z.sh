@@ -6,5 +6,5 @@ int main() {}
 EOF2
 
 # With -Z, -lSystem is no longer found in the SDK's /usr/lib.
-! $CC --ld-path=$mold -o $t/exe $t/a.o -Wl,-Z 2> $t/log
+not $CC --ld-path=$mold -o $t/exe $t/a.o -Wl,-Z 2> $t/log
 grep -q 'library not found: -lSystem' $t/log

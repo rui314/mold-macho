@@ -47,10 +47,10 @@ fi
 $CC --ld-path=$mold -o $t/exe_bal $t/a.o -mmacosx-version-min=$classic -Wl,-bind_at_load
 $t/exe_bal | grep -q '^4$'
 otool -l $t/exe_bal > $t/lc_bal
-! grep -q '__la_symbol_ptr' $t/lc_bal
+not grep -q '__la_symbol_ptr' $t/lc_bal
 dyld_info -fixups $t/exe_bal | grep -q '__got .* bind .*_printf'
 
 $CC --ld-path=$mold -o $t/exe_ch $t/a.o -mmacosx-version-min=13.0
 $t/exe_ch | grep -q '^4$'
 otool -l $t/exe_ch > $t/lc_ch
-! grep -q '__la_symbol_ptr' $t/lc_ch
+not grep -q '__la_symbol_ptr' $t/lc_ch

@@ -63,7 +63,7 @@ otool -l $t/exe | awk '/^ *sectname/{s=$2} /^ *segname/{g=$2} /^ *flags/{if (s !
 for s in __const __cfstring __objc_classlist __objc_catlist __objc_protolist \
          __objc_imageinfo __mod_init_func; do
   grep -q "^__DATA_CONST,$s " $t/sects
-  ! grep -q "^__DATA,$s " $t/sects
+  not grep -q "^__DATA,$s " $t/sects
 done
 # Protocol references are written by the runtime before macOS 15: they
 # stay in __DATA, flags and all.
@@ -71,7 +71,7 @@ for s in __objc_selrefs __objc_classrefs __objc_protorefs __objc_const __objc_da
   grep -q "^__DATA,$s " $t/sects
 done
 grep -q '^__DATA,__objc_protorefs 0x1000000b$' $t/sects
-! grep -q '__StaticInit\|__literal16\|__LLVM\|__objc_clsrolist' $t/sects
+not grep -q '__StaticInit\|__literal16\|__LLVM\|__objc_clsrolist' $t/sects
 grep -q '^__TEXT,__const ' $t/sects
 
 # Flags.
@@ -79,7 +79,7 @@ grep -q '^__DATA_CONST,__objc_classlist 0x10000000$' $t/sects
 grep -q '^__DATA_CONST,__objc_catlist 0x10000000$' $t/sects
 grep -q '^__DATA,__objc_selrefs 0x10000005$' $t/sects
 grep -q '^__DATA_CONST,__objc_protolist 0x00000000$' $t/sects
-! grep -q '__DATA_CONST,__objc_protorefs' $t/sects
+not grep -q '__DATA_CONST,__objc_protorefs' $t/sects
 grep -q '^__DATA,__mine 0x00000000$' $t/sects
 grep -q '^__DATA,__coal 0x00000000$' $t/sects
 grep -q '^__TEXT,__text 0x80000400$' $t/sects
@@ -118,7 +118,7 @@ $CC --ld-path=$mold -o $t/exe15 $t/a.o $t/b.o $t/c.o -framework Foundation \
   -mmacosx-version-min=15.0 -Wl,-no_objc_category_merging
 otool -l $t/exe15 | awk '/^ *sectname/{s=$2} /^ *segname/{g=$2} /^ *flags/{if (s != "") print g","s, $2; s=""}' > $t/sects15
 grep -q '^__DATA_CONST,__objc_protorefs 0x00000000$' $t/sects15
-! grep -q '__DATA,__objc_protorefs' $t/sects15
+not grep -q '__DATA,__objc_protorefs' $t/sects15
 grep -q '^__TEXT,__init_offsets 0x00000016$' $t/sects15
 $t/exe15
 

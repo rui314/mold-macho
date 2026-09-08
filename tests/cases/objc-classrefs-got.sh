@@ -35,9 +35,9 @@ otool -l $t/a.o | grep -q 'sectname __objc_classrefs'
 $CC --ld-path=$mold -o $t/exe $t/a.o $t/b.o -framework Foundation -mmacosx-version-min=15.0
 $t/exe | grep -q '^Foo NSMutableArray 1 1$'
 otool -l $t/exe > $t/lc
-! grep -q '__objc_classrefs' $t/lc
+not grep -q '__objc_classrefs' $t/lc
 nm $t/exe > $t/nm
-! grep -q 'OBJC_CLASSLIST_REFERENCES' $t/nm
+not grep -q 'OBJC_CLASSLIST_REFERENCES' $t/nm
 dyld_info -fixups $t/exe > $t/fixups
 # One GOT slot per class, bound (NSMutableArray) or rebased (Foo).
 [ "$(grep '__got' $t/fixups | grep -c 'OBJC_CLASS_\$_NSMutableArray')" = 1 ]

@@ -147,3 +147,65 @@ pub fn run(cases: &Path, linker: &Path) -> ExitCode {
     println!("{} test(s) failed", failed.len());
     ExitCode::FAILURE
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::process::Output;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn run_script(body: &str) -> Output {
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let dir = env::temp_dir().join(format!(
+            "mold-harness-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        let common = Path::new(env!("CARGO_MANIFEST_DIR")).join("cases/common.inc");
+        let output = Command::new("bash")
+            .args(["-c", &format!("source \"$1\"\n{body}"), "harness-test"])
+            .arg(common)
+            .env("mold", "unused")
+            .current_dir(&dir)
+            .output().unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+        output
+    }
+
+    #[test]
+    fn negated_failure_at_exit_is_not_success() {
+        let output = run_script("! true");
+        assert!(!output.status.success());
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("OK"));
+    }
+
+    #[test]
+    fn negative_assertion_stops_before_later_commands() {
+        let output = run_script("not true\necho reached");
+        assert!(!output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(!stdout.contains("reached"));
+        assert!(!stdout.contains("OK"));
+        assert!(String::from_utf8_lossy(&output.stderr).contains("unexpectedly succeeded"));
+    }
+
+    #[test]
+    fn explicit_exit_status_is_preserved() {
+        assert_eq!(run_script("exit 7").status.code(), Some(7));
+    }
+
+    #[test]
+    fn expected_failure_and_success_pass() {
+        let output = run_script("not false\ntrue");
+        assert!(output.status.success());
+        assert!(String::from_utf8_lossy(&output.stdout).contains("OK"));
+    }
+
+    #[test]
+    fn skip_remains_successful() {
+        let output = run_script("skip");
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("skipped"));
+        assert!(!stdout.contains("OK"));
+    }
+}

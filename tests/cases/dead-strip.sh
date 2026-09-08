@@ -14,4 +14,4 @@ $t/exe | grep '^live$'
 
 nm $t/exe > $t/syms
 grep -q _live $t/syms
-! grep -q ' _dead' $t/syms
+not grep -q ' _dead' $t/syms

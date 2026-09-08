@@ -15,4 +15,4 @@ EOF2
 $CC --ld-path=$mold -o $t/exe $t/a.o -Wl,-exported_symbols_list,$t/list
 dyld_info -exports $t/exe > $t/exports
 grep -q _foo $t/exports
-! grep -q _bar $t/exports
+not grep -q _bar $t/exports

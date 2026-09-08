@@ -8,7 +8,7 @@ int main() { return 0; }
 EOF2
 
 # Fails by default
-! $CC --ld-path=$mold -o $t/exe $t/a.o 2>/dev/null
+not $CC --ld-path=$mold -o $t/exe $t/a.o 2>/dev/null
 
 # -U allows one specific symbol to stay undefined; running the result
 # still needs something (a host process, an inserted library) to

@@ -41,7 +41,7 @@ $CC --ld-path=$mold -o $t/e2 $t/w1.o $t/w2.o $t/libwl.dylib -Wl,-rpath,$t
 [ "$(load $t/e2)" = strong ]
 dyld_info -fixups $t/e2 > $t/fixups2
 grep -q 'libwl/_wf' $t/fixups2
-! grep -q 'weak-import' $t/fixups2
+not grep -q 'weak-import' $t/fixups2
 $t/e2 | grep -q '^1$'
 
 $CC --ld-path=$mold -o $t/e3 $t/w3.o $t/libwl.dylib -Wl,-rpath,$t

@@ -22,6 +22,6 @@ grep -q 'rebase' $t/fixups
 # -no_fixup_chains falls back to classic dyld info
 $CC --ld-path=$mold -o $t/exe2 $t/a.o -Wl,-no_fixup_chains
 otool -l $t/exe2 > $t/lc
-! grep -q LC_DYLD_CHAINED_FIXUPS $t/lc
+not grep -q LC_DYLD_CHAINED_FIXUPS $t/lc
 grep -q LC_DYLD_INFO_ONLY $t/lc
 $t/exe2 | grep '^5$'

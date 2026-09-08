@@ -19,4 +19,4 @@ grep -q '\[cold func\] __ZN1S1gEv' $t/nm
 $CXX --ld-path=$mold -o $t/exe $t/r.o
 $t/exe
 nm -m $t/exe > $t/nm2
-! grep -q 'cold func' $t/nm2
+not grep -q 'cold func' $t/nm2

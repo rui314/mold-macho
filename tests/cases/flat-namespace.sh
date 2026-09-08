@@ -8,6 +8,6 @@ EOF2
 
 $CC --ld-path=$mold -o $t/exe $t/a.o -Wl,-flat_namespace
 otool -hv $t/exe > $t/hdr
-! grep -q TWOLEVEL $t/hdr
+not grep -q TWOLEVEL $t/hdr
 dyld_info -fixups $t/exe | grep -q 'flat-namespace.*_printf'
 $t/exe | grep hi
