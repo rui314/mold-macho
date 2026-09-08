@@ -132,6 +132,7 @@ pub fn link<E: Arch>(cmdline: &[String]) -> Result<i32, String> {
     lap(&mut phases, "resolve");
     passes::remove_unreachable_files(&mut ctx);
     passes::check_duplicate_symbols(&ctx);
+    crate::error::checkpoint();
     if ctx.args.relocatable {
         passes::merge_literals(&mut ctx);
         passes::coalesce_objc_refs(&mut ctx);
@@ -147,6 +148,7 @@ pub fn link<E: Arch>(cmdline: &[String]) -> Result<i32, String> {
         // for -dependency_info and fails the build if the file is
         // missing.
         crate::mapfile::write_dependency_info(&ctx);
+        crate::subprocess::notify_parent();
         return Ok(0);
     }
     passes::convert_init_offsets(&mut ctx);
