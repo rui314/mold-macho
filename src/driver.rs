@@ -173,7 +173,6 @@ pub fn link<E: Arch>(cmdline: &[String]) -> Result<i32, String> {
     passes::print_dependencies(&ctx);
     passes::print_why_load(&ctx);
     passes::print_trace(&ctx);
-    tp!("dead_strip_dylibs", passes::dead_strip_dylibs(&mut ctx));
     crate::error::checkpoint();
     if ctx.args.dead_strip {
         let tt = std::time::Instant::now();
@@ -206,6 +205,9 @@ pub fn link<E: Arch>(cmdline: &[String]) -> Result<i32, String> {
     passes::fold_objc_classrefs(&mut ctx);
     passes::convert_objc_method_lists(&mut ctx);
     passes::merge_objc_categories(&mut ctx);
+    // Synthetic stubs and unwind data can introduce library references
+    // (notably dyld_stub_binder). Establish them before pruning dylibs.
+    tp!("dead_strip_dylibs", passes::dead_strip_dylibs(&mut ctx));
 
     // Decide the output layout
     let tt = std::time::Instant::now();
