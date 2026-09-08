@@ -54,8 +54,9 @@ impl Export {
 /// A node of the export trie under construction.
 #[derive(Default)]
 struct TrieNode {
-    /// Edge labels borrow from the symbol names themselves.
-    children: Vec<(&'static str, TrieNode)>,
+    /// Edges can split UTF-8 code points, so labels borrow bytes rather
+    /// than strings from the symbol names.
+    children: Vec<(&'static [u8], TrieNode)>,
     /// The exported symbol ending here, if any.
     export: Option<Export>,
     offset: usize,
@@ -105,7 +106,7 @@ fn build_trie(names: &[(&'static str, Export)], depth: usize) -> TrieNode {
                 .zip(last.bytes().skip(depth))
                 .take_while(|(a, b)| a == b)
                 .count();
-        (&first[depth..common], build_trie(group, common))
+        (&first.as_bytes()[depth..common], build_trie(group, common))
     };
     node.children = if names.len() >= 1024 {
         groups.par_iter().map(build_child).collect()
@@ -357,7 +358,7 @@ pub fn encode_export_trie<E: Arch>(
             dst[p] = node.children.len() as u8;
             p += 1;
             for (label, child) in &node.children {
-                dst[p..p + label.len()].copy_from_slice(label.as_bytes());
+                dst[p..p + label.len()].copy_from_slice(label);
                 p += label.len();
                 dst[p] = 0;
                 p += 1;

@@ -2023,7 +2023,7 @@ fn export_trie_names(data: &[u8], off: usize, size: usize) -> Vec<&'static str> 
 fn export_trie_entries(data: &[u8], off: usize, size: usize) -> Vec<(&'static str, u64)> {
     let trie = &data[off..(off + size).min(data.len())];
     let mut names = Vec::new();
-    let mut stack: Vec<(usize, String)> = vec![(0, String::new())];
+    let mut stack: Vec<(usize, Vec<u8>)> = vec![(0, Vec::new())];
     let read_uleb = |pos: &mut usize| -> u64 {
         let mut val = 0u64;
         let mut shift = 0;
@@ -2047,17 +2047,21 @@ fn export_trie_entries(data: &[u8], off: usize, size: usize) -> Vec<(&'static st
         if terminal > 0 {
             let mut p = pos;
             let flags = read_uleb(&mut p);
-            names.push((String::leak(prefix.clone()) as &'static str, flags));
+            // Individual edge labels need not end at UTF-8 boundaries.
+            // Decode only after assembling the complete symbol name.
+            names.push((String::leak(String::from_utf8_lossy(&prefix).into_owned()) as &'static str, flags));
             pos += terminal;
         }
         let Some(&nchildren) = trie.get(pos) else { continue };
         pos += 1;
         for _ in 0..nchildren {
             let end = trie[pos..].iter().position(|&b| b == 0).map_or(trie.len(), |n| pos + n);
-            let label = String::from_utf8_lossy(&trie[pos..end]);
+            let label = &trie[pos..end];
             pos = end + 1;
             let child = read_uleb(&mut pos) as usize;
-            stack.push((child, format!("{prefix}{label}")));
+            let mut name = prefix.clone();
+            name.extend_from_slice(label);
+            stack.push((child, name));
         }
     }
     names
