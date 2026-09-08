@@ -1128,6 +1128,11 @@ pub fn convert_init_offsets<E: Arch>(ctx: &mut Context<E>) {
             continue;
         }
         let mut relocs = ctx.isec_relocs(i).to_vec();
+        // Imported or unresolved initializers cannot be represented as
+        // local offsets. Keep their pointer section and its references.
+        if relocs.iter().any(|rel| ctx.reloc_target_isec(ctx.isecs[i].file as usize, rel).is_none()) {
+            continue;
+        }
         relocs.sort_by_key(|r| r.offset);
         for rel in relocs {
             let obj = ctx.isecs[i].file as usize;
@@ -2049,7 +2054,7 @@ pub fn scan_unwind_personalities<E: Arch>(ctx: &mut Context<E>) {
         .iter()
         .filter_map(|rec| rec.personality())
         .collect();
-    personalities.extend(ctx.cies.iter().filter_map(|cie| cie.personality));
+    personalities.extend(ctx.fdes.iter().filter_map(|fde| ctx.cies[fde.cie as usize].personality));
     for id in personalities {
         add_got(ctx, id);
     }

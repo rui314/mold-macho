@@ -170,7 +170,6 @@ pub fn link<E: Arch>(cmdline: &[String]) -> Result<i32, String> {
     tp!("create_objc_msgsend_stubs", passes::create_objc_msgsend_stubs(&mut ctx));
     tp!("auto_hide_weak_defs", passes::auto_hide_weak_defs(&mut ctx));
     tp!("coalesce_weak_defs", passes::coalesce_weak_defs(&mut ctx));
-    tp!("report_undef_errors", passes::report_undef_errors(&mut ctx));
     passes::print_dependencies(&ctx);
     passes::print_why_load(&ctx);
     passes::print_trace(&ctx);
@@ -179,10 +178,13 @@ pub fn link<E: Arch>(cmdline: &[String]) -> Result<i32, String> {
     if ctx.args.dead_strip {
         let tt = std::time::Instant::now();
         dead_strip::dead_strip(&mut ctx);
+        dead_strip::mark_live_references(&mut ctx);
         if std::env::var_os("MOLD_TIMING").is_some() {
             eprintln!("    dead_strip {:?}", tt.elapsed());
         }
     }
+    tp!("report_undef_errors", passes::report_undef_errors(&mut ctx));
+    crate::error::checkpoint();
     if ctx.args.deduplicate {
         let tt = std::time::Instant::now();
         crate::icf::icf_sections(&mut ctx);

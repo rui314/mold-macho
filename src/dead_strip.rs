@@ -305,6 +305,47 @@ pub fn dead_strip<E: Arch>(ctx: &mut Context<E>) {
 }
 
 
+/// Refresh symbol usage after atom liveness is known. Undefined references
+/// in removed atoms must neither cause errors nor become dynamic imports.
+pub fn mark_live_references<E: Arch>(ctx: &mut Context<E>) {
+    use rayon::prelude::*;
+    ctx.symbols.syms.par_iter().for_each(|sym| sym.unmark());
+    ctx.isecs.par_iter()
+        .filter(|isec| isec.is_alive() && isec.replacement == crate::input_sections::NO_REPLACEMENT)
+        .for_each(|isec| {
+            for rel in crate::input_files::isec_relocs_of(&ctx.objs, isec) {
+                if let Some(id) = ctx.reloc_target_sym(isec.file as usize, rel) {
+                    ctx.symbols[id].mark();
+                }
+            }
+        });
+    for rec in &ctx.unwind_records {
+        if let Some(id) = rec.personality() {
+            ctx.symbols[id].mark();
+        }
+    }
+    for fde in &ctx.fdes {
+        if let Some(id) = ctx.cies[fde.cie as usize].personality {
+            ctx.symbols[id].mark();
+        }
+    }
+    if let Some(id) = ctx.objc_stubs.msgsend_sym {
+        ctx.symbols[id].mark();
+    }
+    for name in ctx.args.forced_undefined.iter()
+        .chain((ctx.args.output_type == MH_EXECUTE).then_some(&ctx.args.entry))
+        .chain(ctx.args.aliases.iter().map(|(base, _)| base))
+    {
+        if let Some(id) = ctx.symbols.get(name) {
+            ctx.symbols[id].mark();
+        }
+    }
+    ctx.symbols.syms.par_iter_mut().for_each(|sym| {
+        sym.set_is_used(sym.is_marked());
+        sym.unmark();
+    });
+}
+
 /// -why_live prints, for each symbol matching a -why_live pattern
 /// ("*" wildcards), the chain of references that kept it alive: the
 /// liveness walk's spanning tree read backwards, one "symbol from
