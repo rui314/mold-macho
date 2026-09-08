@@ -835,7 +835,7 @@ fn do_resolve<E: Arch>(ctx: &mut Context<E>, only_alive: bool) {
                     && nlist.is_extern()
                     && nlist.n_type() == N_UNDF
                     && nlist.is_common()
-                    && best[sym_id as usize].load(Ordering::Relaxed) >> 32 == 3
+                    && best[sym_id as usize].load(Ordering::Relaxed) >> 40 == 3
                 {
                     Some((sym_id, nlist.n_value, ((nlist.n_desc >> 8) & 0xf) as u8))
                 } else {
@@ -881,11 +881,11 @@ fn do_resolve<E: Arch>(ctx: &mut Context<E>, only_alive: bool) {
         }
         // SAFETY: each index is written only by its own iteration.
         let sym = unsafe { &mut *syms_ptr.0.add(i) };
-        if sym.is_common() || best[i].load(Ordering::Relaxed) >> 32 < 2 {
+        if sym.is_common() || best[i].load(Ordering::Relaxed) >> 40 < 2 {
             return;
         }
         for (dylib_idx, dylib) in dylibs.iter().enumerate() {
-            let rank = (2u64 << 32) | dylib.priority as u64;
+            let rank = (2u64 << 40) | dylib.priority as u64;
             if rank < best[i].load(Ordering::Relaxed) && dylib.exports.contains(sym.name()) {
                 best[i].store(rank, Ordering::Relaxed);
                 sym.set_file(FileId::Dylib((dylib_idx) as u32));
