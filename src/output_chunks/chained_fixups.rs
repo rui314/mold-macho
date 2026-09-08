@@ -311,6 +311,11 @@ pub fn collect_fixups<E: Arch>(ctx: &Context<E>) -> Vec<(u64, Option<crate::symb
                 {
                     return None;
                 }
+                if ctx.reloc_target_sym(isec.file as usize, rel)
+                    .is_some_and(|id| ctx.is_absolute_symbol(id) && !ctx.binds_at_runtime(id))
+                {
+                    return None;
+                }
                 let addr = base + rel.offset as u64;
                 // A chain link's stride is 4 bytes, so a fixup at an
                 // unaligned address is unrepresentable. ld64 diagnoses
@@ -341,6 +346,9 @@ pub fn collect_fixups<E: Arch>(ctx: &Context<E>) -> Vec<(u64, Option<crate::symb
     {
         let addr = ctx.got.hdr.addr;
         for (i, &id) in ctx.got.got_syms.iter().enumerate() {
+            if ctx.is_absolute_symbol(id) && !ctx.binds_at_runtime(id) {
+                continue;
+            }
             let sym = Some(id).filter(|&id| ctx.binds_at_runtime(id));
             fixups.push((addr + i as u64 * 8, sym, 0));
         }

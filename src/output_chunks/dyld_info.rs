@@ -147,7 +147,9 @@ pub fn build_rebase_info<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
             let imported = ctx
                 .reloc_target_sym(isec.file as usize, rel)
                 .is_some_and(|id| ctx.symbols[id].is_imported());
-            if !imported && !ctx.reloc_target_is_tls(isec.file as usize, rel) {
+            let absolute = ctx.reloc_target_sym(isec.file as usize, rel)
+                .is_some_and(|id| ctx.is_absolute_symbol(id));
+            if !imported && !absolute && !ctx.reloc_target_is_tls(isec.file as usize, rel) {
                 locs.push(base + rel.offset as u64);
             }
         }
@@ -189,7 +191,7 @@ pub fn build_rebase_info<E: Arch>(ctx: &Context<E>) -> Vec<u8> {
     {
         let got_addr = ctx.got.hdr.addr;
         for (i, &id) in ctx.got.got_syms.iter().enumerate() {
-            if !ctx.symbols[id].is_imported() {
+            if !ctx.symbols[id].is_imported() && !ctx.is_absolute_symbol(id) {
                 locs.push(got_addr + i as u64 * 8);
             }
         }

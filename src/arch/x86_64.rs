@@ -224,7 +224,7 @@ impl Arch for X86_64 {
                 && buf[r.offset as usize - 2] == 0x8b
                 && ctx
                     .reloc_target_sym(obj, r)
-                    .is_some_and(|id| !ctx.binds_at_runtime(id))
+                    .is_some_and(|id| ctx.can_relax_got(id))
             {
                 buf[r.offset as usize - 2] = 0x8d;
                 relaxed_got_load = true;

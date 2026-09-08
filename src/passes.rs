@@ -1966,7 +1966,7 @@ pub fn scan_relocations<E: Arch>(ctx: &mut Context<E>) {
                 }
             }
             RelocClass::Got => add_got(ctx, id),
-            RelocClass::GotLoad if ctx.binds_at_runtime(id) => add_got(ctx, id),
+            RelocClass::GotLoad if !ctx.can_relax_got(id) => add_got(ctx, id),
             // A TLV load of a local thread-local relaxes to the
             // descriptor's address; only imported ones need a
             // __thread_ptrs slot for dyld to fill.

@@ -538,6 +538,21 @@ impl<E: Arch> Context<E> {
         self.symbols[id].is_imported() || self.is_weak_coalesced(id)
     }
 
+    /// An input's N_ABS definition has no section and never slides.
+    /// Sectionless symbols in the internal object instead describe the
+    /// image (its header and layout boundaries), so their values slide.
+    pub fn is_absolute_symbol(&self, id: SymbolId) -> bool {
+        let sym = &self.symbols[id];
+        sym.input_section().is_none()
+            && matches!(sym.file(), Some(FileId::Obj(obj)) if !self.is_internal(obj as usize))
+    }
+
+    /// A PC-relative address computation cannot replace a GOT load of
+    /// an absolute constant: the instruction slides but the value does not.
+    pub fn can_relax_got(&self, id: SymbolId) -> bool {
+        !self.binds_at_runtime(id) && !self.is_absolute_symbol(id)
+    }
+
     /// True for a definition this image exports that some dylib in the
     /// link exports as a weak definition: the program's own operator
     /// new overriding libc++'s. dyld must let it win coalescing, so

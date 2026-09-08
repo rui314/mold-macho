@@ -553,7 +553,7 @@ impl Arch for Arm64 {
                 // "add Xn, Xm, #pageoff".
                 ARM64_RELOC_GOT_LOAD_PAGE21 => {
                     let id = ctx.reloc_target_sym(obj, r).unwrap();
-                    let target = if ctx.binds_at_runtime(id) {
+                    let target = if !ctx.can_relax_got(id) {
                         ctx.sym_got_addr(id)
                     } else {
                         s
@@ -563,7 +563,7 @@ impl Arch for Arm64 {
                 }
                 ARM64_RELOC_GOT_LOAD_PAGEOFF12 => {
                     let id = ctx.reloc_target_sym(obj, r).unwrap();
-                    if ctx.binds_at_runtime(id) {
+                    if !ctx.can_relax_got(id) {
                         let g = ctx.sym_got_addr(id);
                         write_add_ldst(loc, g.wrapping_add_signed(a));
                     } else {

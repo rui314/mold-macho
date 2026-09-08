@@ -171,7 +171,13 @@ pub fn encode_export_trie<E: Arch>(
             if crate::passes::is_thread_local_sym(ctx, id) {
                 flags |= EXPORT_SYMBOL_FLAGS_KIND_THREAD_LOCAL;
             }
-            Some((sym.name(), Export::Addr { flags, addr: ctx.sym_addr(id) - base }))
+            let addr = if ctx.is_absolute_symbol(id) {
+                flags |= EXPORT_SYMBOL_FLAGS_KIND_ABSOLUTE;
+                ctx.sym_addr(id)
+            } else {
+                ctx.sym_addr(id) - base
+            };
+            Some((sym.name(), Export::Addr { flags, addr }))
         })
         .collect();
     if exports.is_empty() {
