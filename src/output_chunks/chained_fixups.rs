@@ -84,7 +84,7 @@ pub fn build_chained_fixups<E: Arch>(ctx: &Context<E>) -> ChainedFixups {
     let max_addend = dynsyms.iter().map(|&(_, a)| a).max().unwrap_or(0);
     let import_format = if max_addend == 0 {
         DYLD_CHAINED_IMPORT
-    } else if max_addend <= u32::MAX as u64 {
+    } else if dynsyms.iter().all(|&(_, a)| i32::try_from(a as i64).is_ok()) {
         DYLD_CHAINED_IMPORT_ADDEND
     } else {
         DYLD_CHAINED_IMPORT_ADDEND64
