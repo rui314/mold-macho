@@ -342,7 +342,7 @@ pub fn read_input_files<E: Arch>(ctx: &mut Context<E>) {
                 _ => {}
             }
         }
-        let wave1 = tapi::prefetch(&stubs);
+        let wave1 = tapi::prefetch(&stubs, E::NAME);
         let mut deps: Vec<&'static MappedFile> = Vec::new();
         for tbd in &wave1 {
             for name in &tbd.external_reexports {
@@ -353,7 +353,7 @@ pub fn read_input_files<E: Arch>(ctx: &mut Context<E>) {
                 }
             }
         }
-        tapi::prefetch(&deps);
+        tapi::prefetch(&deps, E::NAME);
     }
 
     let mut queue: Vec<PendingObject> = Vec::new();

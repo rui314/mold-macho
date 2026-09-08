@@ -27,7 +27,8 @@ cat > $t/libs/Some.framework/Some.tbd <<'EOF'
   },
   "libraries": [
     {"install_names": [{"name": "@rpath/Inner.framework/Versions/A/Inner"}],
-     "target_info": [{"target": "arm64-macos", "min_deployment": "13"}],
+     "target_info": [{"target": "arm64-macos", "min_deployment": "13"},
+                     {"target": "x86_64-macos", "min_deployment": "13"}],
      "exported_symbols": [{"text": {"global": ["_inner_func"]}}]}
   ],
   "tapi_tbd_version": 5

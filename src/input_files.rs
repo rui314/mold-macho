@@ -1770,7 +1770,7 @@ fn load_reexports<E: Arch>(
                     ctx.dylibs[idx].is_implicit = true;
                     continue;
                 }
-                let mut dep_tbd = tapi::parse_cached(dep);
+                let mut dep_tbd = tapi::parse_cached(dep, E::NAME);
                 interpret_ld_symbols(ctx, &mut dep_tbd);
                 tlv_exports.extend(dep_tbd.tlv_exports.iter().copied());
                 exports.extend(dep_tbd.tlv_exports);
@@ -2364,7 +2364,7 @@ fn interpret_ld_symbols<E: Arch>(ctx: &Context<E>, tbd: &mut tapi::TbdFile) {
 }
 
 pub fn parse_dylib<E: Arch>(ctx: &mut Context<E>, mf: &'static MappedFile) -> usize {
-    let mut tbd = tapi::parse_cached(mf);
+    let mut tbd = tapi::parse_cached(mf, E::NAME);
     interpret_ld_symbols(ctx, &mut tbd);
     let mut exports: hashbrown::HashSet<&'static str> =
         tbd.exports.into_iter().collect();

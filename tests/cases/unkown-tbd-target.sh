@@ -26,4 +26,5 @@ exports:
 ...
 EOF
 
-$CC --ld-path=$mold -o $t/exe $t/a.o $t/b.tbd
+! $CC --ld-path=$mold -o $t/exe $t/a.o $t/b.tbd 2> $t/log || false
+grep -q "does not support $ARCH-macos" $t/log
