@@ -1396,7 +1396,7 @@ pub fn coalesce_objc_refs<E: Target>(ctx: &mut Context<E>) {
                 && !rel.is_subtracted
         };
         let key = match h.sectname() {
-            "__objc_classrefs" if !ctx.args.relocatable => continue,
+            "__objc_classrefs" if !ctx.args.relocatable && objc_refs_are_const(ctx) => continue,
             "__objc_selrefs" | "__objc_classrefs" => {
                 if isec.size != 8 || rels.len() != 1 || !plain_ptr(&rels[0]) {
                     continue;
@@ -2313,8 +2313,12 @@ pub struct ObjcMethList {
 }
 
 fn objc_relative_method_lists<E: Target>(ctx: &Context<E>) -> bool {
+    // ld-prime converts method lists in every arm64 image, and on
+    // x86-64 in dylibs and bundles only: an x86-64 executable keeps
+    // the compiler's absolute lists at any deployment target.
     ctx.args.objc_relative_method_lists.unwrap_or_else(|| {
-        ctx.args.platform == crate::macho::PLATFORM_MACOS
+        (E::CPUTYPE == crate::macho::CPU_TYPE_ARM64 || ctx.args.output_type != MH_EXECUTE)
+            && ctx.args.platform == crate::macho::PLATFORM_MACOS
             && ctx.args.platform_minos >= crate::macho::encode_version(11, 0, 0)
     })
 }
@@ -3092,7 +3096,10 @@ pub fn merge_objc_categories<E: Target>(ctx: &mut Context<E>) {
                     fields.push(DataField::Ptr(m.types));
                     fields.push(DataField::Ptr(m.imp));
                 }
-                new_blob(ctx, "__objc_const", fields)
+                // ld-prime writes a merged absolute list into
+                // __objc_data (the protocol and property lists stay in
+                // __objc_const).
+                new_blob(ctx, "__objc_data", fields)
             }
         };
         // The class's original lists and the categories' are dropped
@@ -3960,6 +3967,12 @@ pub fn create_output_sections<E: Target>(ctx: &mut Context<E>) {
     if !ctx.stubs.symbols.is_empty() {
         ctx.stubs.hdr.reserved2 = E::STUB_SIZE as u32;
         ctx.stubs.hdr.size = ctx.stubs.symbols.len() as u64 * E::STUB_SIZE;
+        // ld-prime's x86-64 stubs are 2-byte aligned with chained
+        // fixups and byte-aligned with classic dyld info; arm64's are
+        // instruction-aligned.
+        if E::CPUTYPE == crate::macho::CPU_TYPE_X86_64 {
+            ctx.stubs.hdr.p2align = if ctx.use_chained_fixups() { 1 } else { 0 };
+        }
         ctx.chunks.push(ChunkId::Stubs);
     }
     // (A stub bound by weak lookup goes through the GOT; only lazily
@@ -3999,6 +4012,10 @@ pub fn create_output_sections<E: Target>(ctx: &mut Context<E>) {
 
     if !ctx.objc_stubs.symbols.is_empty() {
         ctx.objc_stubs.hdr.size = ctx.objc_stubs.symbols.len() as u64 * E::OBJC_STUB_SIZE;
+        // 32-byte stubs on arm64; ld-prime leaves x86-64's byte-aligned.
+        if E::CPUTYPE == crate::macho::CPU_TYPE_X86_64 {
+            ctx.objc_stubs.hdr.p2align = 0;
+        }
         ctx.chunks.push(ChunkId::ObjcStubs);
     }
     {
