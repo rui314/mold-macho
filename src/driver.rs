@@ -156,6 +156,7 @@ pub fn link<E: Target>(cmdline: Arc<[Cow<'static, OsStr>]>) -> Result<i32, &'sta
     timed!("create_objc_msgsend_stubs", passes::create_objc_msgsend_stubs(&mut ctx));
     timed!("auto_hide_weak_defs", passes::auto_hide_weak_defs(&mut ctx));
     timed!("hide_all_exports", passes::hide_all_exports(&mut ctx));
+    timed!("apply_export_lists", passes::apply_export_lists(&mut ctx));
     timed!("create_symbol_reexports", passes::create_symbol_reexports(&mut ctx));
     timed!("coalesce_weak_defs", passes::coalesce_weak_defs(&mut ctx));
     passes::print_dependencies(&ctx);
