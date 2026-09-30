@@ -683,7 +683,9 @@ pub fn copy_mach_header<E: Target>(ctx: &Context<E>, buf: &mut [u8]) {
         sizeofcmds: cmds.iter().map(Vec::len).sum::<usize>() as u32,
         // Under -flat_namespace every import is a flat lookup that
         // dyld resolves at load, so ld64 does not claim MH_NOUNDEFS.
-        flags: if is_static_executable {
+        flags: if ctx.args.output_type == MH_KEXT_BUNDLE {
+            0
+        } else if is_static_executable {
             MH_NOUNDEFS
         } else if ctx.args.flat_namespace {
             MH_DYLDLINK

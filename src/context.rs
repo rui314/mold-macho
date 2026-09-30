@@ -347,7 +347,10 @@ impl<E: Target> Context<E> {
     /// arm64 images by default and leaves x86_64 ones unsigned (Intel
     /// Macs and Rosetta run unsigned code).
     pub fn adhoc_codesign(&self) -> bool {
-        self.args.adhoc_codesign.unwrap_or(E::CPUTYPE == crate::macho::CPU_TYPE_ARM64)
+        self.args.adhoc_codesign.unwrap_or(
+            E::CPUTYPE == crate::macho::CPU_TYPE_ARM64
+                && self.args.output_type != crate::macho::MH_KEXT_BUNDLE,
+        )
     }
 
     /// Returns true if the output uses chained fixups rather than
@@ -516,7 +519,10 @@ impl<E: Target> Context<E> {
     /// __stub_helper), as ld64 does below the chained-fixups
     /// deployment targets unless -bind_at_load.
     pub fn lazy_binding(&self) -> bool {
-        !self.args.relocatable && !self.use_chained_fixups() && !self.args.bind_at_load
+        !self.args.relocatable
+            && !self.use_chained_fixups()
+            && !self.args.bind_at_load
+            && self.args.output_type != crate::macho::MH_KEXT_BUNDLE
     }
 
     /// The address of the pointer slot stub `i` (for symbol `id`)

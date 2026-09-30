@@ -4058,7 +4058,15 @@ pub fn create_output_sections<E: Target>(ctx: &mut Context<E>) {
     // A final image always has a __TEXT,__text section, empty if no
     // code reached it (a dylib of only data; ld-prime writes one of
     // size 0, byte-aligned).
-    if !relocatable && !by_out.contains_key(&("__TEXT", "__text")) {
+    // (Not when a kext moves its code out of __TEXT: a placeholder there
+    // would be the first __text, which corecrypto's FIPS check hashes.)
+    let code_moved = ctx.args.output_type == crate::macho::MH_KEXT_BUNDLE
+        && ctx
+            .args
+            .rename_sections
+            .iter()
+            .any(|(seg, sect, _, _)| seg == "__TEXT" && sect == "__text");
+    if !relocatable && !code_moved && !by_out.contains_key(&("__TEXT", "__text")) {
         let mut osec = OutputSection::new("__TEXT", "__text");
         osec.hdr.flags = S_ATTR_PURE_INSTRUCTIONS | S_ATTR_SOME_INSTRUCTIONS;
         let id = OutputSectionId::new(ctx.output_sections.len() as u32);
@@ -4240,6 +4248,17 @@ pub fn create_output_sections<E: Target>(ctx: &mut Context<E>) {
             let lazy = ctx.lazy_binding()
                 && ctx.stubs.symbols.iter().all(|&id| !ctx.binds_weak_lookup(id));
             ctx.stubs.hdr.p2align = if lazy { 0 } else { 1 };
+        }
+        // -rename_section also moves the synthesized stubs (a kext keeps its
+        // code out of the read-only, non-executable __TEXT).
+        if let Some((_, _, seg, sect)) = ctx
+            .args
+            .rename_sections
+            .iter()
+            .find(|(seg, sect, _, _)| seg == "__TEXT" && sect == "__stubs")
+        {
+            ctx.stubs.hdr.segname = String::leak(seg.clone());
+            ctx.stubs.hdr.sectname = sect.clone();
         }
         ctx.chunks.push(ChunkId::Stubs);
     }

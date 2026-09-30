@@ -671,6 +671,13 @@ pub fn parse_args(target: &TargetTraits, cmdline: &[Cow<'_, OsStr>]) -> Args {
             b"-F" => args.framework_paths.push(path(next_arg(&mut i))),
             b"-dylib" => args.output_type = MH_DYLIB,
             b"-bundle" => args.output_type = MH_BUNDLE,
+            // A kernel extension: no libSystem, no dyld, and imports
+            // (the kernel's symbols) are left for the kext loader.
+            b"-kext" => {
+                args.output_type = MH_KEXT_BUNDLE;
+                args.static_link = true;
+                args.undefined_dynamic_lookup = true;
+            }
             b"-bundle_loader" => args.bundle_loader = Some(path(next_arg(&mut i))),
             b"-final_output" => args.final_output = Some(bytes(next_arg(&mut i))),
             b"-keep_private_externs" => args.keep_private_externs = true,
